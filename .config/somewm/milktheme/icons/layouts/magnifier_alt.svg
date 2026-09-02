@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Purple margin/background -->
+  <rect x="0" y="0" width="64" height="64" fill="#623997"/>
+
+  <!-- Black background -->
+  <rect x="4" y="4" width="56" height="56" fill="#000000"/>
+
+  <!-- Large window -->
+  <rect x="8" y="8" width="48" height="48" rx="1" ry="1" fill="#CCCCCC"/>
+  <rect x="8" y="8" width="48" height="48" rx="1" ry="1" fill="none" stroke="#888888" stroke-width="0.25"/>
+
+  <!-- Smaller window centered inside -->
+  <rect x="18" y="18" width="28" height="28" rx="1" ry="1" fill="#000000"/>
+  <rect x="18" y="18" width="28" height="28" rx="1" ry="1" fill="none" stroke="#888888" stroke-width="0.25"/>
+  <!-- Light bg in the middle of the inner window -->
+  <rect x="22" y="22" width="20" height="20" rx="1" ry="1" fill="#CCCCCC"/>
+</svg>

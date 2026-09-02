@@ -1,0 +1,30 @@
+# xephyr testing rule for awesomewm development
+# automatically run xephyr tests when making significant changes
+
+# rule: run xephyr test when:
+# 1. modifying core configuration files (rc.lua, theme files)
+# 2. adding/modifying plugins or modules
+# 3. after fixing syntax errors or crashes
+# 4. before committing changes to version control
+
+# usage patterns:
+# - after plugin modifications: make plugin-test
+# - before major changes: make test
+# - syntax check only: make check
+# - cleanup test environment: make clean
+
+# recommended workflow:
+# 1. make changes to configuration
+# 2. run: make check (quick syntax validation)
+# 3. run: make plugin-test (5-second stability test)
+# 4. if stable, run: make test (full 10-second test)
+# 5. commit changes if all tests pass
+
+# integration with git hooks (optional):
+# add to .git/hooks/pre-commit:
+# #!/bin/bash
+# cd ~/.config/awesome && make check
+
+# environment setup:
+# ensure xephyr is installed: sudo pacman -S xorg-server-xephyr
+# or: sudo apt-get install xserver-xephyr

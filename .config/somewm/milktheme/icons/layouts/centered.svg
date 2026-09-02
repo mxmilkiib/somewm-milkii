@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Purple border -->
+  <rect x="0" y="0" width="64" height="64" fill="#623997"/>
+  
+  <!-- Black background -->
+  <rect x="2" y="2" width="60" height="60" fill="#000000"/>
+  <!-- Window fill -->
+  <rect x="16" y="16" width="32" height="32" fill="#CCCCCC"/>
+  <!-- Window border -->
+  <rect x="16" y="16" width="32" height="32" fill="none" stroke="#333333" stroke-width="1"/>
+</svg>

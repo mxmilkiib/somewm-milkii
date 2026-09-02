@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Purple margin/background -->
+  <rect x="0" y="0" width="64" height="64" fill="#623997"/>
+
+  <!-- Black background -->
+  <rect x="4" y="4" width="56" height="56" fill="#000000"/>
+  <!-- Master window (top, larger) -->
+  <rect x="8" y="8" width="49" height="24" rx="1" ry="1" fill="#CCCCCC"/>
+  <rect x="8" y="8" width="49" height="24" rx="1" ry="1" fill="none" stroke="#888888" stroke-width="0.25"/>
+  <!-- Slave tab bar (2 tabs, first active) -->
+  <rect x="8" y="33" width="15" height="6" rx="1" ry="1" fill="#CCCCCC"/>
+  <rect x="8" y="33" width="15" height="6" rx="1" ry="1" fill="none" stroke="#888888" stroke-width="0.25"/>
+  <rect x="24" y="33" width="15" height="6" rx="1" ry="1" fill="#777777"/>
+  <rect x="24" y="33" width="15" height="6" rx="1" ry="1" fill="none" stroke="#555555" stroke-width="0.25"/>
+  <!-- Active slave window -->
+  <rect x="8" y="40" width="49" height="17" rx="1" ry="1" fill="#CCCCCC"/>
+  <rect x="8" y="40" width="49" height="17" rx="1" ry="1" fill="none" stroke="#888888" stroke-width="0.25"/>
+</svg>

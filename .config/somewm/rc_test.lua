@@ -1,0 +1,12 @@
+-- rc_test.lua is currently empty; diagnostic instrumentation has been
+-- removed. The Lua panic crash was identified and fixed in
+-- lgi_closure_guard.c (see commit history for details).
+--
+-- The crash was caused by lgi resuming an already-completed coroutine
+-- when a GIO async callback fired after the Gio.Async.start coroutine
+-- had already returned. This happened during freedesktop.menu.build's
+-- .desktop file parsing at startup.
+--
+-- The fix intercepts lua_resume in lgi_closure_guard.c and swallows
+-- resumes on completed coroutines (status=0 with no function at the
+-- base), returning LUA_OK with false instead of crashing.

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- AwesomeWM official logo: isolated "A" from the official wordmark SVG
+     Source: https://awesomewm.org/images/awesome-logo.svg (first path) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <path d="M 0,64 V 22 H 44 V 20 H 0 V 0 h 64 V 64 H 44 V 42 H 20 v 2 H 42 V 64 Z"
+        fill="#623997" />
+</svg>
