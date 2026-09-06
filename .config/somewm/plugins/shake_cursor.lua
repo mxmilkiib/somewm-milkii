@@ -22,22 +22,32 @@ local M = {
     window = 0.45,      -- seconds of motion history considered
     ratio = 3.0,        -- path length / bounding box diagonal to count as a shake
     min_travel = 500,   -- pixels of path length needed inside the window
-    scale = 2.5,        -- enlarged size = base size * scale
+    scale = 3.0,        -- first-shake size = base size * scale
+    max_scale = 6.0,    -- keep shaking and it grows up to base size * max_scale
+    growth = 1.12,      -- per-tick multiplier while the shaking continues
     restore = 0.8,      -- seconds after the last shake before shrinking back
 }
 
 local samples = {}
 local base_size
+local current_scale = 1
 local enlarged = false
 local poll, restore_timer
 
+-- root.cursor_size() rebuilds the xcursor manager, so skip no-op sets
+-- (growth is applied every tick while shaking continues)
+local last_set
 local function set_size(size)
-    root.cursor_size(math.floor(size + 0.5))
+    size = math.floor(size + 0.5)
+    if size == last_set then return end
+    last_set = size
+    root.cursor_size(size)
 end
 
 local function shrink()
     if enlarged and base_size then set_size(base_size) end
     enlarged = false
+    current_scale = 1
 end
 
 local function is_shaking()
@@ -59,11 +69,14 @@ local function tick()
     -- samples arrive at a fixed rate, so the window is just a sample count
     while #samples > M.window / M.interval do table.remove(samples, 1) end
     if #samples > 3 and is_shaking() then
-        if not enlarged then
-            base_size = base_size or root.cursor_size()
-            set_size(base_size * M.scale)
-            enlarged = true
-        end
+        base_size = base_size or root.cursor_size()
+        -- jump to `scale` on the first shake, then keep growing toward
+        -- max_scale for as long as the shaking continues (KDE behaviour)
+        current_scale = enlarged
+            and math.min(current_scale * M.growth, M.max_scale)
+            or M.scale
+        set_size(base_size * current_scale)
+        enlarged = true
         restore_timer:again()
     end
     return true
