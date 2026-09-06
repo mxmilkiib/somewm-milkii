@@ -3236,21 +3236,79 @@ client.connect_signal("request::unmanage", function(c)
     -- gears.timer.delayed_call(function()
     --     collectgarbage("collect")
     -- end)
-end)
+end))
+
+
+-- // MARK: --smart-borders
+-- dynamic border width: no border when a tag has only one visible tiled
+-- client, borders for all when two or more share a tag. this replaces the
+-- old static terminal_borderless rule which left terminals borderless even
+-- when sharing a tag with other windows.
+local function count_visible_tiled_clients(tag)
+    local n = 0
+    for _, c in ipairs(tag:clients() or {}) do
+        if c.valid and not c.minimized and not c.hidden and not c.floating then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+local function update_borders_for_tag(tag)
+    if not tag or not tag.valid then return end
+    local n = count_visible_tiled_clients(tag)
+    local bw = (n > 1) and (beautiful.border_width or 1) or 0
+    for _, c in ipairs(tag:clients() or {}) do
+        if c.valid and not c.floating then
+            c.border_width = bw
+        end
+    end
+end
+
+local function update_all_borders()
+    for s in screen do
+        for _, t in ipairs(s.tags) do
+            update_borders_for_tag(t)
+        end
+    end
+end
+
+client.connect_signal("request::manage", guarded(function(c)
+    gears.timer.delayed_call(guarded(function()
+        if not c or not c.valid then return end
+        for _, t in ipairs(c:tags() or {}) do
+            update_borders_for_tag(t)
+        end
+    end))
+end))
+
+client.connect_signal("request::unmanage", guarded(function(c)
+    gears.timer.delayed_call(guarded(update_all_borders))
+end))
+
+client.connect_signal("property::minimized", guarded(update_all_borders))
+client.connect_signal("property::floating", guarded(update_all_borders))
+client.connect_signal("tagged", guarded(function(c)
+    if not c or not c.valid then return end
+    for _, t in ipairs(c:tags() or {}) do
+        update_borders_for_tag(t)
+    end
+end))
+client.connect_signal("untagged", guarded(update_all_borders))
 
 
 -- when a client is minimized/restored or hidden/unhidden, refresh tasklists to update bg color
-client.connect_signal("property::minimized", function(c)
+client.connect_signal("property::minimized", guarded(function(c)
     shimmer.refresh_all_tasklists()
-end)
+end))
 
-client.connect_signal("property::hidden", function(c)
+client.connect_signal("property::hidden", guarded(function(c)
     shimmer.refresh_all_tasklists()
-end)
+end))
 
 
 -- keep track of which clients are being dragged
-client.connect_signal("request::activate", function(c, context, hints)
+client.connect_signal("request::activate", guarded(function(c, context, hints)
     -- validate client first
     if not c or not c.valid then return end
     
@@ -3854,14 +3912,9 @@ ruled.client.connect_signal("request::rules", function()
         end
     }
 
-    -- terminal: borderless for a cleaner look
-    ruled.client.append_rule {
-        id = "terminal_borderless",
-        rule_any = { class = { "foot", "Foot", "wezterm", "WezTerm", "Alacritty", "URxvt", "XTerm" } },
-        properties = {
-            border_width = 0,
-        }
-    }
+    -- terminal: border handled dynamically by update_borders() below;
+    -- the old static border_width=0 rule is removed so terminals get a
+    -- border when sharing a tag with other windows.
 
     -- arandr size hints
     ruled.client.append_rule {
