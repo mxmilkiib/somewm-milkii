@@ -240,6 +240,7 @@ local notification_center = require("plugins.notification_center")     -- notifi
 local tag_pager = require("plugins.tag_pager")                          -- tag-aware expose pager
 tag_pager.init()
 local brightness = require("plugins.brightness")                        -- screen brightness with OSD
+local solo_super = require("plugins.solo_super")                        -- tap Super alone to toggle the launcher
 
 
 -- // MARK: -- shimmer configuration
@@ -1711,6 +1712,23 @@ end
 
 
 -- import keybindings from module
+-- old: quake_toggle_lain was inlined in the keybindings.build() ctx table
+-- new: extract it as a local so the keygrabber workaround in rc.lua can
+--      access it without needing the ctx (which is not stored as a local)
+local quake_toggle_fn = (function()
+    local q = quake_lain({
+        app = terminal,
+        -- alacritty --class takes <general>,<instance>; lain matches c.instance == name,
+        -- so the instance field must equal "QuakeLain" (general is cosmetic)
+        argname = "--class QuakeLain,%s",
+        name = "QuakeLain",
+        height = QUAKE_HEIGHT_SMALL,
+        width = QUAKE_WIDTH_FULL,
+        followtag = true,
+    })
+    return function() q:toggle() end
+end)()
+
 local keys = keybindings.build({
     modkey = modkey,
     terminal = terminal,
@@ -1745,17 +1763,7 @@ local keys = keybindings.build({
     -- custom resize function that prevents cursor warping
     resize_no_warp = resize_no_warp,
     -- quake terminal: expose toggle function for hotkey
-    quake_toggle_lain = (function()
-        -- instantiate lain quake dropdown
-        local q = quake_lain({
-            app = terminal,
-            name = "QuakeLain",
-            height = QUAKE_HEIGHT_SMALL,
-            width = QUAKE_WIDTH_FULL,
-            followtag = true,
-        })
-        return function() q:toggle() end
-    end)(),
+    quake_toggle_lain = quake_toggle_fn,
     -- dynamic UI zoom
     ui_scale_zoom_in = ui_scale.zoom_in,
     ui_scale_zoom_out = ui_scale.zoom_out,
@@ -1774,10 +1782,39 @@ globalkeys = keys.globalkeys
 clientkeys = keys.clientkeys
 clientbuttons = keys.clientbuttons
 
--- register client keybindings properly for modern AwesomeWM
-client.connect_signal("request::default_keybindings", function()
+-- register keybindings properly for modern AwesomeWM/somewm
+-- old: only root.keys(keys.globalkeys) at the end of the file (legacy API).
+--      root.keys is a table property in somewm, not a callable function;
+--      the legacy call silently fails to register global keybindings.
+-- new: use awful.keyboard.append_global_keybindings directly (calls
+--      root._append_keys under the hood). Client keybindings already used
+--      the modern append_client_keybindings API via request::default_keybindings.
+awful.keyboard.append_global_keybindings(globalkeys)
+client.connect_signal("request::default_keybindings", guarded(function()
     awful.keyboard.append_client_keybindings(clientkeys)
-end)
+end))
+
+-- // MARK -- solo super
+-- old: a permanent keygrabber.run() here handled both Mod4+grave (quake) and
+--      solo-Super detection, "returning false to pass events through".
+--      somewm's C keygrabber ignores the callback's return value
+--      (lua_pcall(L, 3, 0, 0) then return true), so while it ran every key
+--      press and release was swallowed before reaching keybindings or
+--      clients. That was the "cannot type into text fields" lockup; typing
+--      only came back when some other module called keygrabber.stop().
+--      The grave "never matches" theory was also wrong: awful.key("grave")
+--      and the delivered "`" both resolve to keysym 0x60 in objects/key.c.
+-- new: no keygrabber at all. Mod4+grave is a plain awful.key in
+--      rc/keybindings.lua, and solo-Super lives in plugins/solo_super.lua
+--      using awful.key press/release plus the class-level key "press"
+--      signal to detect chords. The old grabber block is preserved in
+--      rc.lua.20260906_0929.bak.
+awful.keyboard.append_global_keybindings(solo_super.keys({
+    modkey = modkey,
+    launcher = "/home/milkii/bin/rofi_nice",
+    process = "rofi",   -- tapping Super again closes an open rofi
+    hold = 0.6,
+}))
 
 
 
@@ -2353,34 +2390,39 @@ awful.screen.connect_for_each_screen(function(s)
     -- - Follows the current tag when switching workspaces
     -- - Auto-hides when losing focus
     -- - Can be configured with different terminals via the 'app' parameter
-    s.quake = lain.util.quake(
-        -- Terminal configuration
-        {
-            app = terminal,  -- alacritty runs directly
-            argname = "--class %s",  -- alacritty uses --class for window identity
-            name = "QuakeTerminal",  -- Window name for matching in window rules
-            height = QUAKE_HEIGHT_LARGE,     -- Height as percentage of screen (0.0 to 1.0)
-            width = QUAKE_WIDTH_FULL,      -- Width as percentage of screen (0.0 to 1.0)
-            horiz = "center", -- Horizontal position ("left", "center", "right")
-            vert = "top",     -- Vertical position ("top", "center", "bottom")
-            border = 2,       -- Border width in pixels
-            followtag = true, -- Follow the current tag
-            overlap = false,  -- Whether to overlap the wibox
-            visible = false,  -- Start hidden
-            screen = s        -- Screen to display on
-        },
-        -- Additional settings
-        {
-            settings = function(c)
-                c.followtag = true  -- Make terminal follow tag changes
-                c.sticky = true     -- Keep terminal on all tags
-                c.ontop = true      -- Keep terminal above other windows
-                c.above = true      -- Keep terminal above normal windows
-                c.skip_taskbar = true  -- Don't show in taskbar
-                c.urgent = false    -- Don't set urgent flag
-            end
-        }
-    )
+    -- old: per-screen lain quake dropdown; superseded by the single global
+    --      ctx.quake_toggle_lain instance (one signal-handler pair, no
+    --      accumulation across screen hotplugs/reloads). also had the
+    --      alacritty --class bug (instance never matched name).
+    -- new: commented out; Mod+grave now drives ctx.quake_toggle_lain.
+    -- s.quake = lain.util.quake(
+    --     -- Terminal configuration
+    --     {
+    --         app = terminal,  -- alacritty runs directly
+    --         argname = "--class %s",  -- alacritty uses --class for window identity
+    --         name = "QuakeTerminal",  -- Window name for matching in window rules
+    --         height = QUAKE_HEIGHT_LARGE,     -- Height as percentage of screen (0.0 to 1.0)
+    --         width = QUAKE_WIDTH_FULL,      -- Width as percentage of screen (0.0 to 1.0)
+    --         horiz = "center", -- Horizontal position ("left", "center", "right")
+    --         vert = "top",     -- Vertical position ("top", "center", "bottom")
+    --         border = 2,       -- Border width in pixels
+    --         followtag = true, -- Follow the current tag
+    --         overlap = false,  -- Whether to overlap the wibox
+    --         visible = false,  -- Start hidden
+    --         screen = s        -- Screen to display on
+    --     },
+    --     -- Additional settings
+    --     {
+    --         settings = function(c)
+    --             c.followtag = true  -- Make terminal follow tag changes
+    --             c.sticky = true     -- Keep terminal on all tags
+    --             c.ontop = true      -- Keep terminal above other windows
+    --             c.above = true      -- Keep terminal above normal windows
+    --             c.skip_taskbar = true  -- Don't show in taskbar
+    --             c.urgent = false    -- Don't set urgent flag
+    --         end
+    --     }
+    -- )
 
     -- each screen has its own tag table
     -- old: used first layout in global list (order can vary if modules append)
@@ -3363,12 +3405,16 @@ end)
 -- old: shadowed local and redundant join/unpack
 -- local globalkeys = keys.globalkeys or {}
 -- root.keys(gears.table.join(table.unpack(globalkeys)))
--- new: set once, use keys from module directly
-root.keys(keys.globalkeys)
+-- new: global keybindings are now registered via root.connect_signal(
+--      "request::default_keybindings", ...) with append_global_keybindings
+--      above. root.keys() is a table property in somewm, not callable.
+-- root.keys(keys.globalkeys)
 
 -- Set global mouse bindings
--- mod4 + mousewheel: cycle through tags with clients
-root.buttons(gears.table.join(
+-- old: root.buttons(gears.table.join(...)) — root.buttons is a table in
+--      somewm, not callable, same issue as root.keys
+-- new: use awful.mouse.append_global_mousebindings (modern API)
+awful.mouse.append_global_mousebindings({
     awful.button({ }, 1, function()
         if mymainmenu and mymainmenu.wibox and mymainmenu.wibox.visible then
             mymainmenu:hide()
@@ -3385,7 +3431,7 @@ root.buttons(gears.table.join(
     awful.button({ modkey }, 5, function()
         cycle_tags_with_clients("next")
     end)
-))
+})
 
 -- removed: unused tag_keybindings definition
 

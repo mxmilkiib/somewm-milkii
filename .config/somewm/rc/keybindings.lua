@@ -311,12 +311,16 @@ function M.build(ctx)
 
   -- // MARK: QUAKE TERMINAL
   -- Toggle the lain quake dropdown terminal
-  local quake_keys = {}
-  if ctx_has_function(ctx, "quake_toggle_lain") then
-    quake_keys = {
-      {{modkey}, "grave", ctx.quake_toggle_lain, "toggle quake terminal", nil, "launcher"}
-    }
-  end
+  -- old: briefly moved into a permanent keygrabber in rc.lua on the theory
+  --      that "grave" (registered) never matched "`" (delivered). It does:
+  --      somewm's objects/key.c resolves both to keysym 0x60 and matches on
+  --      the keysym. The binding only looked dead because the solo-Super
+  --      keygrabber was swallowing every key while Super was held.
+  -- new: plain global keybinding again; ctx.quake_toggle_lain is supplied
+  --      by rc.lua.
+  local quake_keys = {
+    {{modkey}, "grave", function() ctx.quake_toggle_lain() end, "toggle quake terminal", nil, "launcher"},
+  }
 
   -- // MARK: PROMPT
   -- Prompt keys
@@ -517,7 +521,7 @@ function M.build(ctx)
   -- // MARK: LAUNCHER
   -- Application launcher keys
   local launcher_keys = {
-    {{modkey}, "space", "/home/milkii/bin/rofi_nice", "rofi app launcher", nil, "launcher"},
+    -- old: {{modkey}, "space", "/home/milkii/bin/rofi_nice", "rofi app launcher", nil, "launcher"},
     {{modkey, altkey}, "space", "/home/milkii/bin/rofi_nice_run", "rofi command launcher", nil, "launcher"}
   }
 
@@ -779,6 +783,129 @@ function M.build(ctx)
   end
   
   add_client_keys(client_key_defs)
+
+
+  -- // MARK: SOLO SUPER
+  -- Single Mod4 press-and-release launches rofi (like a desktop "Super" key).
+  -- old: Used a low-level keygrabber (keygrabber.run) started on Super_L
+  --      press. This conflicted with the quake keygrabber in rc.lua because
+  --      the C-level keygrabber only supports one callback at a time —
+  --      starting the solo-super grabber replaced the quake grabber, and
+  --      stopping it killed the C-level keygrabber entirely, which could
+  --      lock up the keyboard if anything went wrong. Chord dispatch via
+  --      root.fake_input failed because "Mod4" is a modifier name, not a
+  --      keysym. Direct dispatch via key.match/on_press also failed to
+  --      trigger the keybinding in somewm.
+  -- old (2nd attempt): a permanent "pass-through" keygrabber in rc.lua.
+  --      somewm's C keygrabber ignores the callback's return value, so it
+  --      swallowed every key while running and locked text input.
+  -- new: plugins/solo_super.lua. No keygrabber: awful.key on Super_L
+  --      press/release plus the class-level key "press" signal (fires for
+  --      every bound key, so any chord disarms the tap). rc.lua appends its
+  --      keys via awful.keyboard.append_global_keybindings.
+  -- old code preserved below for reference:
+  --
+  -- // MARK -- chord dispatch
+  -- local function strip_ignored_mods(mods)
+  --   local result = {}
+  --   local ignored = awful.key.ignore_modifiers
+  --   for _, m in ipairs(mods) do
+  --     local is_ignored = false
+  --     for _, ig in ipairs(ignored) do
+  --       if m == ig then is_ignored = true break end
+  --     end
+  --     if not is_ignored then
+  --       table.insert(result, m)
+  --     end
+  --   end
+  --   return result
+  -- end
+  --
+  -- local function dispatch_chorded_key(mods, key_name)
+  --   local clean_mods = strip_ignored_mods(mods)
+  --   for _, key_obj in ipairs(globalkeys) do
+  --     if key_obj.match and key_obj:match(clean_mods, key_name) then
+  --       local fn = key_obj.on_press
+  --       if fn then fn(client.focus) end
+  --       return true
+  --     end
+  --   end
+  --   if client.focus then
+  --     for _, key_obj in ipairs(clientkeys) do
+  --       if key_obj.match and key_obj:match(clean_mods, key_name) then
+  --         local fn = key_obj.on_press
+  --         if fn then fn(client.focus) end
+  --         return true
+  --       end
+  --     end
+  --   end
+  --   return false
+  -- end
+  -- local super_grabber_active = false
+  -- local super_mouse_used = false
+  -- local super_held_too_long = false
+  --
+  -- local super_hold_timer = gears.timer {
+  --   timeout = 1.5,
+  --   single_shot = true,
+  --   callback = guarded(function()
+  --     if super_grabber_active then
+  --       super_held_too_long = true
+  --     end
+  --   end),
+  -- }
+  --
+  -- local super_safety_timer = gears.timer {
+  --   timeout = 5,
+  --   single_shot = true,
+  --   callback = guarded(function()
+  --     if super_grabber_active then
+  --       keygrabber.stop()
+  --       super_grabber_active = false
+  --     end
+  --   end),
+  -- }
+  --
+  -- client.connect_signal("button::press", guarded(function()
+  --   if super_grabber_active then
+  --     super_mouse_used = true
+  --   end
+  -- end))
+  --
+  -- table.insert(globalkeys, awful.key({}, "Super_L", guarded(function()
+  --   if super_grabber_active then return end
+  --   super_grabber_active = true
+  --   super_mouse_used = false
+  --   super_held_too_long = false
+  --   super_hold_timer:again()
+  --   super_safety_timer:again()
+  --   keygrabber.run(function(mods, key, event)
+  --     if key == "Super_L" and event == "release" then
+  --       keygrabber.stop()
+  --       super_grabber_active = false
+  --       super_hold_timer:stop()
+  --       super_safety_timer:stop()
+  --       if not super_mouse_used and not super_held_too_long then
+  --         awful.spawn.with_shell("/home/milkii/bin/rofi_nice", false)
+  --       end
+  --       return false
+  --     elseif key == "Super_L" then
+  --       return false
+  --     else
+  --       keygrabber.stop()
+  --       super_grabber_active = false
+  --       super_hold_timer:stop()
+  --       super_safety_timer:stop()
+  --       if event == "press" then
+  --         dispatch_chorded_key(mods, key)
+  --       end
+  --       return false
+  --     end
+  --   end)
+  -- end), {
+  --   description = "rofi app launcher (solo Super)",
+  --   group = "launcher",
+  -- }))
 
   -- Join all global keys into a single table
   -- local all_global_keys = {}

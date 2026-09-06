@@ -17,6 +17,12 @@ local setmetatable = setmetatable
 -- Quake-like Dropdown application spawn
 local quake = {}
 
+-- somewm/Wayland: clients have c.instance == nil (X11 concept); the app_id
+-- lands in c.class. Match either so this works on X11 and Wayland.
+local function matches_name(c, name)
+    return c.instance == name or c.class == name
+end
+
 -- If you have a rule like "awful.client.setslave" for your terminals,
 -- ensure you use an exception for QuakeDD. Otherwise, you may
 -- run into problems with focus.
@@ -29,7 +35,7 @@ function quake:display()
     local i = 0
     for c in awful.client.iterate(function (c)
         -- c.name may be changed!
-        return c.instance == self.name
+        return matches_name(c, self.name)
     end)
     do
         i = i + 1
@@ -74,20 +80,24 @@ function quake:display()
     if self.settings then self.settings(client) end
 
     -- Toggle display
+    -- somewm: c.hidden is not honored; use c.minimized to actually hide/show.
+    --          c:activate() is the Wayland-native way to focus+raise a client.
     if self.visible then
         client.hidden = false
+        client.minimized = false
         client.maximized = self.maximized
         client.fullscreen = self.fullscreen
         client:raise()
         self.last_tag = self.screen.selected_tag
         client:tags({self.screen.selected_tag})
-        capi.client.focus = client
+        client:activate({raise = true})
     else
         self.maximized = maximized
         self.fullscreen = fullscreen
         client.maximized = false
         client.fullscreen = false
         client.hidden = true
+        client.minimized = true
         local ctags = client:tags()
         for j, _ in pairs(ctags) do
             ctags[j] = nil
@@ -164,12 +174,12 @@ function quake.new(conf)
 
     -- somewm 2.0: "manage"/"unmanage" renamed to "request::manage"/"request::unmanage"
     capi.client.connect_signal("request::manage", function(c)
-        if c.instance == dropdown.name and c.screen == dropdown.screen then
+        if matches_name(c, dropdown.name) and c.screen == dropdown.screen then
             dropdown:display()
         end
     end)
     capi.client.connect_signal("request::unmanage", function(c)
-        if c.instance == dropdown.name and c.screen == dropdown.screen then
+        if matches_name(c, dropdown.name) and c.screen == dropdown.screen then
             dropdown.visible = false
         end
      end)
