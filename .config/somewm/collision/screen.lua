@@ -9,6 +9,7 @@ local pangocairo   = require( "lgi"             ).PangoCairo
 local mouse        = require( "collision.mouse" )
 local util         = require( "collision.util"  )
 local shape        = require( "gears.shape"     )
+local guarded      = require( "error_guard"     )
 local scale        = pango.SCALE
 
 local module = {}
@@ -349,9 +350,9 @@ awful.screen.connect_for_each_screen(function(s)
     end
 end)
 
-capi.client.connect_signal("focus",function(c)
+capi.client.connect_signal("focus", guarded(function(c)
     last_clients[c.screen] = c
-end)
+end))
 
 return module
 -- kate: space-indent on; indent-width 4; replace-tabs on;

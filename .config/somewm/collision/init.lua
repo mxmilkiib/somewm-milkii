@@ -4,6 +4,7 @@ local util         = require( "gears.table"     )
 local awful        = require( "awful"          )
 local glib         = require( "lgi"            ).GLib
 local col_utils    = require( "collision.util" )
+local guarded      = require( "error_guard"    )
 local unpack = unpack or table.unpack -- luacheck: globals unpack (compatibility with Lua 5.1)
 local module = {
   _focus  = require( "collision.focus" ),
@@ -138,10 +139,10 @@ function module.highlight_cursor(timeout)
   module.mouse.highlight()
   if timer then
     local timer = capi.timer({ timeout = timeout }) -- 30 mins
-    timer:connect_signal("timeout", function()
+    timer:connect_signal("timeout", guarded(function()
       module.mouse.hide()
       timer:stop()
-    end)
+    end))
     timer:start()
   end
 end

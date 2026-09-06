@@ -4,6 +4,7 @@
 
 local gears = require("gears")
 local beautiful = require("beautiful")
+local guarded = require("error_guard")
 
 local M = {
   style = "basic" -- "basic" (gold markup) or "shimmer" (plain text; allow external styling)
@@ -84,25 +85,26 @@ local function ensure_client_signals(c)
 
   local function deferred_update()
     local cc = c
-    gears.timer.delayed_call(function()
+    gears.timer.delayed_call(guarded(function()
       if cc and cc.valid then update_all_for_client(cc) end
-    end)
+    end))
   end
 
-  c:connect_signal("property::floating", deferred_update)
-  c:connect_signal("property::maximized", deferred_update)
-  c:connect_signal("property::maximized_horizontal", deferred_update)
-  c:connect_signal("property::maximized_vertical", deferred_update)
-  c:connect_signal("property::sticky", deferred_update)
-  c:connect_signal("property::ontop", deferred_update)
-  c:connect_signal("property::above", deferred_update)
-  c:connect_signal("property::below", deferred_update)
-  c:connect_signal("property::fullscreen", deferred_update)
+  local guarded_update = guarded(deferred_update)
+  c:connect_signal("property::floating", guarded_update)
+  c:connect_signal("property::maximized", guarded_update)
+  c:connect_signal("property::maximized_horizontal", guarded_update)
+  c:connect_signal("property::maximized_vertical", guarded_update)
+  c:connect_signal("property::sticky", guarded_update)
+  c:connect_signal("property::ontop", guarded_update)
+  c:connect_signal("property::above", guarded_update)
+  c:connect_signal("property::below", guarded_update)
+  c:connect_signal("property::fullscreen", guarded_update)
 
   -- somewm 2.0: "unmanage" renamed to "request::unmanage"
-  c:connect_signal("request::unmanage", function(cl)
+  c:connect_signal("request::unmanage", guarded(function(cl)
     prefix_widgets[cl] = nil
-  end)
+  end))
 end
 
 function M.apply(task_item_widget, c)

@@ -55,17 +55,20 @@
 
 local gears = require("gears")
 local awful = require("awful")
+local ruled = require("ruled")
 local menubar = require("menubar")
 local hotkeys_popup = require("awful.hotkeys_popup")
 local naughty = require("naughty")
 local shimmer = require("plugins/shimmer") -- For shimmer mode functions
+local guarded = require("error_guard")
 
 -- Matcher generator for rules - supports class or instance matching
+-- old: used awful.rules.match, but somewm removed awful.rules in favour of ruled.client
 local create_matcher = function(class_name, use_instance)
     if use_instance then
-        return function(c) return awful.rules.match(c, {instance = class_name}) end
+        return function(c) return ruled.client.match(c, {instance = class_name}) end
     else
-        return function(c) return awful.rules.match(c, {class = class_name}) end
+        return function(c) return ruled.client.match(c, {class = class_name}) end
     end
 end
 

@@ -23,6 +23,7 @@
 
 local gears = require("gears")
 local awful = require("awful")
+local guarded = require("error_guard")
 
 local M = {}
 
@@ -64,12 +65,12 @@ end
 function M.attach_tag_hover(tag_widget, tag)
     if not tag_widget or not tag then return end -- guard
     -- wire mouse enter/leave to existing hover handler
-    tag_widget:connect_signal('mouse::enter', function()
+    tag_widget:connect_signal('mouse::enter', guarded(function()
         M.handle_tag_hover(tag_widget, tag, "enter")
-    end)
-    tag_widget:connect_signal('mouse::leave', function()
+    end))
+    tag_widget:connect_signal('mouse::leave', guarded(function()
         M.handle_tag_hover(tag_widget, tag, "leave")
-    end)
+    end))
 end
 
 -- apply tasklist fg and status_prefix color safely
@@ -421,7 +422,7 @@ function M.handle_tag_hover(tag_widget, tag, mode)
                 text_widget.__hover_fade_timer = gears.timer {
                     timeout = step_time,
                     autostart = true,
-                    callback = function()
+                    callback = guarded(function()
                         step = step + 1
                         local linear_progress = step / fade_steps
                         
@@ -501,7 +502,7 @@ function M.handle_tag_hover(tag_widget, tag, mode)
                             -- final state: plain text with theme color
                             text_widget:set_markup(current)
                         end
-                    end
+                    end)
                 }
                 
                 text_widget.__hover_fade_lock = true
@@ -638,10 +639,10 @@ function M.update_widgets()
         local focused_tasklist = registered_widgets.tasklist[screen_index]
         if focused_tasklist then
             -- defer redraw slightly to allow batch updates to complete first
-            gears.timer.start_new(0.01, function()
+            gears.timer.start_new(0.01, guarded(function()
                 focused_tasklist:emit_signal("widget::redraw_needed")
                 return false
-            end)
+            end))
         end
     end
 end
@@ -692,25 +693,25 @@ end
 -- setup client focus signal handling to ensure shimmer on focus changes
 function M.setup_focus_signals()
     -- connect to client focus signal to ensure shimmer is applied
-    client.connect_signal("focus", function(c)
+    client.connect_signal("focus", guarded(function(c)
         -- immediate update without delay
         M.update_widgets()
-        
+
         -- force tasklist content update by triggering property changes
         if c then
             c:emit_signal("property::name")
             c:emit_signal("property::urgent")
             c:emit_signal("property::minimized")
         end
-        
+
         -- also force tasklist redraw to ensure widget mapping
         for _, tasklist in pairs(registered_widgets.tasklist) do
             tasklist:emit_signal("widget::redraw_needed")
         end
-    end)
-    
+    end))
+
     -- also connect to unfocus to maintain color consistency for unfocused clients
-    client.connect_signal("unfocus", function(c)
+    client.connect_signal("unfocus", guarded(function(c)
         local text_widget = registered_widgets.tasklist_clients[c]
         if text_widget then
             local title = c.name or c.class or ""
@@ -721,10 +722,10 @@ function M.setup_focus_signals()
                 apply_color_safe(text_widget, title, current_color, false)
             end
         end
-    end)
-    
+    end))
+
     -- connect to client property changes to handle title updates smoothly
-    client.connect_signal("property::name", function(c)
+    client.connect_signal("property::name", guarded(function(c)
         local text_widget = registered_widgets.tasklist_clients[c]
         if text_widget and not text_widget.__hover_lock then
             local title = c.name or c.class or ""
@@ -740,15 +741,15 @@ function M.setup_focus_signals()
                 end
             end
         end
-    end)
-    
+    end))
+
     -- connect to client list changes to handle startup scenarios
-    client.connect_signal("list", function()
+    client.connect_signal("list", guarded(function()
         -- gears.timer.start_new(0.1, function()
             M.update_widgets()
             return false
         -- end)
-    end)
+    end))
 end
 
 -- getter function for registered tasklists

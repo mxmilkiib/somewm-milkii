@@ -2,6 +2,7 @@ local awful = require("awful")
 local gears = require("gears")
 local wibox = require("wibox")
 local beautiful = require("beautiful")
+local guarded = require("error_guard")
 
 local mylayout = {}
 
@@ -40,11 +41,11 @@ end
 
 -- Haven't found a signal that is emitted when a new tag is added. That should work though
 -- since you can't use a layout on a tag that you haven't selected previously
-tag.connect_signal("property::selected", function(t)
+tag.connect_signal("property::selected", guarded(function(t)
     if not t.top_idx then
         t.top_idx = 1
     end
-end)
+end))
 
 function update_tabbar(
     clients,
@@ -93,25 +94,25 @@ function update_tabbar(
                 and (t.layout.name == mylayout.name)
         end
 
-        tag.connect_signal("property::selected", function(t)
+        tag.connect_signal("property::selected", guarded(function(t)
             adjust_visiblity(t)
-        end)
-        tag.connect_signal("property::layout", function(t, layout)
+        end))
+        tag.connect_signal("property::layout", guarded(function(t, layout)
             adjust_visiblity(t)
-        end)
-        tag.connect_signal("tagged", function(t, c)
+        end))
+        tag.connect_signal("tagged", guarded(function(t, c)
             adjust_visiblity(t)
-        end)
-        tag.connect_signal("untagged", function(t, c)
+        end))
+        tag.connect_signal("untagged", guarded(function(t, c)
             adjust_visiblity(t)
-        end)
-        tag.connect_signal("property::master_count", function(t)
+        end))
+        tag.connect_signal("property::master_count", guarded(function(t)
             adjust_visiblity(t)
-        end)
-        client.connect_signal("property::minimized", function(c)
+        end))
+        client.connect_signal("property::minimized", guarded(function(c)
             local t = c.first_tag
             adjust_visiblity(t)
-        end)
+        end))
     end
 
     -- update the tabbar size and position (to support gap size change on the fly)

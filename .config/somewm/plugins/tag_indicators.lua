@@ -8,6 +8,7 @@ local awful = require("awful")
 local beautiful = require("beautiful")
 local cairo = require("lgi").cairo
 local awful_taglist = require("awful.widget.taglist")
+local guarded = require("error_guard")
 
 
 local M = {}
@@ -137,7 +138,7 @@ function M.register_tag(tag, square_widget)
         update_timer = require("gears").timer {
             timeout = 0.05,
             single_shot = true,
-            callback = function()
+            callback = guarded(function()
                 for pending_tag, pending_widget in pairs(pending_updates) do
                     if pending_tag.valid and pending_widget then
                         M.update_square_widget(pending_widget, pending_tag)
@@ -145,19 +146,19 @@ function M.register_tag(tag, square_widget)
                 end
                 pending_updates = {}
                 update_timer = nil
-            end
+            end)
         }
         update_timer:start()
     end
-    tag.connect_signal("property::clients", schedule_update)
+    tag.connect_signal("property::clients", guarded(schedule_update))
     for _, prop in ipairs({"minimized", "hidden"}) do
-        client.connect_signal("property::" .. prop, function(c)
+        client.connect_signal("property::" .. prop, guarded(function(c)
             if c and c.valid and c:tags() then
                 for _, tg in ipairs(c:tags()) do
                     if tg == tag then schedule_update(); break end
                 end
             end
-        end)
+        end))
     end
 end
 ]]
@@ -196,7 +197,7 @@ local function refresh_all_taglists()
         timeout = 0.05,
         autostart = true,
         single_shot = true,
-        callback = function()
+        callback = guarded(function()
             -- directly refresh all known taglists per screen; fallback to redraw
             for s in screen do
                 if s.mytaglist then
@@ -209,7 +210,7 @@ local function refresh_all_taglists()
                 end
             end
             _refresh_timer = nil
-        end
+        end)
     }
 end
 
@@ -296,18 +297,18 @@ local function wrap_taglist_template(tpl)
 
         -- extend callbacks while preserving user callbacks
         local old_create = tpl.create_callback
-        wrapped.create_callback = function(self, tag, index, objects)
+        wrapped.create_callback = guarded(function(self, tag, index, objects)
             if type(old_create) == 'function' then pcall(old_create, self, tag, index, objects) end
             local sq = self:get_children_by_id('occ_square')[1]
             if sq then update_occ_square_widget(sq, tag) end
-        end
+        end)
 
         local old_update = tpl.update_callback
-        wrapped.update_callback = function(self, tag, index, objects)
+        wrapped.update_callback = guarded(function(self, tag, index, objects)
             if type(old_update) == 'function' then pcall(old_update, self, tag, index, objects) end
             local sq = self:get_children_by_id('occ_square')[1]
             if sq then update_occ_square_widget(sq, tag) end
-        end
+        end)
 
         return wrapped
     else
@@ -368,18 +369,18 @@ function M.init()
     
     -- re-apply on theme changes
     if beautiful.connect_signal then
-        beautiful.connect_signal("changed", function()
+        beautiful.connect_signal("changed", guarded(function()
             apply_tag_label_patch()
             refresh_all_taglists()
-        end)
+        end))
     end
-    
+
     -- refresh when clients move/change visibility
-    tag.connect_signal("property::clients", refresh_all_taglists)
-    client.connect_signal("property::minimized", refresh_all_taglists)
-    client.connect_signal("property::hidden", refresh_all_taglists)
-    client.connect_signal("tagged", refresh_all_taglists)
-    client.connect_signal("untagged", refresh_all_taglists)
+    tag.connect_signal("property::clients", guarded(refresh_all_taglists))
+    client.connect_signal("property::minimized", guarded(refresh_all_taglists))
+    client.connect_signal("property::hidden", guarded(refresh_all_taglists))
+    client.connect_signal("tagged", guarded(refresh_all_taglists))
+    client.connect_signal("untagged", guarded(refresh_all_taglists))
 
     -- initial draw
     refresh_all_taglists()

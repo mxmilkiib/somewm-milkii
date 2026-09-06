@@ -88,6 +88,7 @@ local screen = screen
 local gtable = require("gears.table")
 local gstring = require("gears.string")
 local gshape = require("gears.shape")
+local guarded = require("error_guard")
 
 local M = {}
 
@@ -625,13 +626,13 @@ local function create_small_button(label, callback, compact)
         end
     end)))
 
-    button_container:connect_signal("mouse::enter", function()
+    button_container:connect_signal("mouse::enter", guarded(function()
         button_container.bg = button_hover_bg
-    end)
+    end))
 
-    button_container:connect_signal("mouse::leave", function()
+    button_container:connect_signal("mouse::leave", guarded(function()
         button_container.bg = button_container._default_bg
-    end)
+    end))
 
     return button_container
 end
@@ -823,15 +824,15 @@ local function store_notification(n)
     rebuild_pending = true
     update_toggle_indicators()
     -- Rebuild later to avoid blocking the D-Bus notification reply
-    gears.timer.delayed_call(function()
+    gears.timer.delayed_call(guarded(function()
         if popup_instance and popup_instance.visible then
             M._rebuild_history()
         end
         awesome.emit_signal(HISTORY_SIGNAL, #history)
-    end)
+    end))
 end
 
-naughty.connect_signal("added", function(n)
+naughty.connect_signal("added", guarded(function(n)
     local ok = pcall(function()
         if suppressed_notifications[n] then
             suppressed_notifications[n] = nil
@@ -861,7 +862,7 @@ naughty.connect_signal("added", function(n)
         -- swallow errors to avoid stalling notifications
         return
     end
-end)
+end))
 
 -- create popup header with title, count, and controls
 local function create_popup_header()
@@ -1177,13 +1178,13 @@ function ToggleIndicator:new()
         end)
     ))
 
-    container:connect_signal("mouse::enter", function()
+    container:connect_signal("mouse::enter", guarded(function()
         container.fg = COLOR_GOLD
-    end)
+    end))
 
-    container:connect_signal("mouse::leave", function()
+    container:connect_signal("mouse::leave", guarded(function()
         container.fg = button_fg
-    end)
+    end))
 
     -- store indicator on widget to prevent garbage collection
     container._indicator = instance

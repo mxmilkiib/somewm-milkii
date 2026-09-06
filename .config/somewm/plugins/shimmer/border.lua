@@ -21,6 +21,7 @@
 -- • Smoothness setting controls update frequency
 
 local gears = require("gears")
+local guarded = require("error_guard")
 
 local M = {}
 
@@ -105,7 +106,7 @@ function M.start()
     border_timer = gears.timer {
         timeout = border_params.speed,
         autostart = true,
-        callback = function()
+        callback = guarded(function()
             if border_paused then return end
             local c = client.focus
             if not c then
@@ -113,7 +114,7 @@ function M.start()
                 return
             end
             if c._dnd_dragging then return end
-            
+
             -- get active palette (shimmer or default)
             local palette = get_active_palette()
             if not palette then return end
@@ -173,7 +174,7 @@ function M.start()
             
             c.border_color = color
             awesome.emit_signal("shimmer::border_tick", border_loop, len, color)
-        end
+        end)
     }
 end
 
@@ -263,7 +264,7 @@ end
 generate_default_palette()
 
 -- set up client signals
-client.connect_signal("focus", function(c)
+client.connect_signal("focus", guarded(function(c)
     border_loop = 0.0
     border_step = border_params.step_size or 0.5
     local palette = get_active_palette()
@@ -272,15 +273,15 @@ client.connect_signal("focus", function(c)
         awesome.emit_signal("shimmer::border_tick", border_loop, #palette, palette[1])
     end
     if not border_paused then M.start() end
-end)
+end))
 
-client.connect_signal("unfocus", function(c)
+client.connect_signal("unfocus", guarded(function(c)
     c.border_color = "#00000000"
-end)
+end))
 
 -- listen for external pause/resume requests (e.g., DnD)
-awesome.connect_signal("shimmer::border_pause", function() M.pause() end)
-awesome.connect_signal("shimmer::border_resume", function() M.resume() end)
+awesome.connect_signal("shimmer::border_pause", guarded(function() M.pause() end))
+awesome.connect_signal("shimmer::border_resume", guarded(function() M.resume() end))
 
 -- respond to shimmer mode changes
 function M.on_mode_changed(mode)

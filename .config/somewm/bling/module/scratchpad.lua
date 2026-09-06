@@ -5,6 +5,7 @@ local helpers = require(tostring(...):match(".*bling") .. ".helpers")
 local capi = { awesome = awesome, client = client }
 local ruled = capi.awesome.version ~= "v4.3" and require("ruled") or nil
 local pairs = pairs
+local guarded = require("error_guard")
 
 local Scratchpad = { mt = {} }
 
@@ -183,10 +184,10 @@ function Scratchpad:apply(c)
     })
 
     if self.autoclose then
-        c:connect_signal("unfocus", function(c1)
+        c:connect_signal("unfocus", guarded(function(c1)
             c1.sticky = false -- client won't turn off if sticky
             helpers.client.turn_off(c1)
-        end)
+        end))
     end
 end
 
@@ -244,13 +245,13 @@ function Scratchpad:turn_on()
                     hidden = true,
                     minimized = true,
                 },
-                callback = function(c)
+                callback = guarded(function(c)
                     -- For a reason I can't quite get the gemotery rules will fail to apply unless we use this timer
                     gears.timer({
                         timeout = 0.15,
                         autostart = true,
                         single_shot = true,
-                        callback = function()
+                        callback = guarded(function()
                             self.client = c
 
                             self:apply(c)
@@ -273,12 +274,12 @@ function Scratchpad:turn_on()
                                 ruled.client.remove_rule("scratchpad")
                             end
                             -- In a case Discord is killed before the second window spawns
-                            c:connect_signal("request::unmanage", function()
+                            c:connect_signal("request::unmanage", guarded(function()
                                 ruled.client.remove_rule("scratchpad")
-                            end)
-                        end,
+                            end))
+                        end),
                     })
-                end,
+                end),
             })
         else
             local function inital_apply(c1)
@@ -296,7 +297,7 @@ function Scratchpad:turn_on()
                     client.disconnect_signal("manage", inital_apply)
                 end
             end
-            client.connect_signal("manage", inital_apply)
+            client.connect_signal("manage", guarded(inital_apply))
         end
     end
 end
@@ -353,7 +354,7 @@ function Scratchpad:toggle()
         end
     else
         is_turn_off = capi.client.focus
-            and awful.rules.match(capi.client.focus, self.rule)
+            and ruled.client.match(capi.client.focus, self.rule)
     end
 
     if is_turn_off then

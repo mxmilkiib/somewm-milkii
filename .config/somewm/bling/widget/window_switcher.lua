@@ -3,8 +3,10 @@ local awful = require("awful")
 local gears = require("gears")
 local wibox = require("wibox")
 local beautiful = require("beautiful")
+local ruled = require("ruled")
 local helpers = require(tostring(...):match(".*bling") .. ".helpers")
 local dpi = beautiful.xresources.apply_dpi
+local guarded = require("error_guard")
 
 local window_switcher_first_client -- The client that was focused when the window_switcher was activated
 local window_switcher_minimized_clients = {} -- The clients that were minimized when the window switcher was activated
@@ -13,7 +15,7 @@ local window_switcher_grabber
 local get_num_clients = function()
     local minimized_clients_in_tag = 0
     local matcher = function(c)
-        return awful.rules.match(
+        return ruled.client.match(
             c,
             {
                 minimized = true,
@@ -361,19 +363,19 @@ local enable = function(opts)
         end,
     }
 
-    window_switcher_box:connect_signal("property::width", function()
+    window_switcher_box:connect_signal("property::width", guarded(function()
         if window_switcher_box.visible and get_num_clients() == 0 then
             window_switcher_hide(window_switcher_box)
         end
-    end)
+    end))
 
-    window_switcher_box:connect_signal("property::height", function()
+    window_switcher_box:connect_signal("property::height", guarded(function()
         if window_switcher_box.visible and get_num_clients() == 0 then
             window_switcher_hide(window_switcher_box)
         end
-    end)
+    end))
 
-    awesome.connect_signal("bling::window_switcher::turn_on", function()
+    awesome.connect_signal("bling::window_switcher::turn_on", guarded(function()
         local number_of_clients = get_num_clients()
         if number_of_clients == 0 then
             return
@@ -448,7 +450,7 @@ local enable = function(opts)
             mouse_keys
         )
         window_switcher_box.visible = true
-    end)
+    end))
 end
 
 return { enable = enable }

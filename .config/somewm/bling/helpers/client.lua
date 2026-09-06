@@ -1,5 +1,6 @@
 local awful = require("awful")
 local gears = require("gears")
+local ruled = require("ruled")
 
 local _client = {}
 
@@ -88,7 +89,7 @@ end
 -- @retrun A list of clients that match the given rule
 function _client.find(rule)
     local function matcher(c)
-        return awful.rules.match(c, rule)
+        return ruled.client.match(c, rule)
     end
     local clients = client.get()
     local findex = gears.table.hasitem(clients, client.focus) or 1

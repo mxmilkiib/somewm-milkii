@@ -20,6 +20,7 @@ local beautiful = require("beautiful")
 local wibox = require("wibox")
 local gears = require("gears")
 local naughty = require("naughty")
+local guarded = require("error_guard")
 
 local M = {}
 
@@ -71,18 +72,18 @@ local function make_icon_widget(symbolic_name, tooltip, onclick)
     }
 
     if onclick then
-        container:connect_signal("button::press", function(_, _, _, button)
+        container:connect_signal("button::press", guarded(function(_, _, _, button)
             if button == 1 then onclick() end
-        end)
+        end))
     end
 
     -- hover effect
-    container:connect_signal("mouse::enter", function()
+    container:connect_signal("mouse::enter", guarded(function()
         img.opacity = 0.6
-    end)
-    container:connect_signal("mouse::leave", function()
+    end))
+    container:connect_signal("mouse::leave", guarded(function()
         img.opacity = 1
-    end)
+    end))
 
     container.set_icon = function(surf)
         img:set_image(surf)
@@ -120,10 +121,10 @@ local function toggle_bluetooth()
         else
             awful.spawn("bluetoothctl power on")
         end
-        gears.timer.start_new(0.5, function()
+        gears.timer.start_new(0.5, guarded(function()
             update_bluetooth()
             return false
-        end)
+        end))
     end)
 end
 
@@ -261,16 +262,16 @@ function M.create_widgets()
     gears.timer {
         timeout = 10,
         autostart = true,
-        callback = function()
+        callback = guarded(function()
             update_bluetooth()
             update_media()
             update_wifi()
-        end,
+        end),
     }
     gears.timer {
         timeout = 30,
         autostart = true,
-        callback = function() update_battery() end,
+        callback = guarded(function() update_battery() end),
     }
 
     return {

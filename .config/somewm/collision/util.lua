@@ -4,6 +4,7 @@ local color     = require( "gears.color" )
 local beautiful = require( "beautiful"   )
 local glib      = require("lgi").GLib
 local cairo        = require( "lgi"            ).cairo
+local guarded      = require( "error_guard"     )
 
 local module = {settings={}}
 
@@ -127,12 +128,12 @@ function module.get_ordered_screens()
   return screens,screens_inv
 end
 
-capi.screen.connect_signal("added", function()
+capi.screen.connect_signal("added", guarded(function()
   screens,screens_inv = nil, nil
-end)
-capi.screen.connect_signal("removed", function()
+end))
+capi.screen.connect_signal("removed", guarded(function()
   screens,screens_inv = nil, nil
-end)
+end))
 
 --- Setup the whole thing and call fct(cr, width, height) then apply the shape
 -- fct should not set the source or color

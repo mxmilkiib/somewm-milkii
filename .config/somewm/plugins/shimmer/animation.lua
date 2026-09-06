@@ -23,6 +23,7 @@
 local gears = require("gears")
 local bit = require("bit")
 -- local awful = require("awful")  -- unused
+local guarded = require("error_guard")
 
 -- import modular components
 local constants = require("plugins.shimmer.constants")
@@ -2753,7 +2754,7 @@ function M.start()
     shimmer_timer = gears.timer {
         timeout = get_dynamic_timer_interval(),
         autostart = false,  -- manual start to avoid double-start error
-        callback = shimmer_tick
+        callback = guarded(shimmer_tick)
     }
     
     -- start timer after creation
@@ -3177,10 +3178,10 @@ function M.cycle_preset(direction)
     update_timer_interval()
     
     -- force immediate palette regeneration and widget update
-    gears.timer.start_new(0.05, function()
+    gears.timer.start_new(0.05, guarded(function()
         get_integrations().update_widgets()
         return false
-    end)
+    end))
     
     return new_preset, current_preset_index, #preset_list
 end

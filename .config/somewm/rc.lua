@@ -175,6 +175,12 @@ end
 -- Standard awesome libraries
 local gears = require("gears")
 local awful = require("awful")
+-- Per-handler protected-call wrapper: wraps a callback so errors surface with
+-- a full debug.traceback via gears.debug instead of hitting luaA_panic (which
+-- prints only the message and tears down the WM). Use on synchronous signal
+-- handlers; timer/delayed_call callbacks are already protected by gears.timer.
+--   client.connect_signal("property::name", guarded(function(c) ... end))
+local guarded = require("error_guard")
 require("awful.autofocus")
 local wibox = require("wibox")          -- Widget and layout library
 local beautiful = require("beautiful")  -- Theme handling library
@@ -626,7 +632,7 @@ local client_tiled_sizes = setmetatable({}, { __mode = "k" })  -- store tiled si
 local cleanup_timer = gears.timer {
     timeout = CLEANUP_INTERVAL,  -- cleanup timer interval
     autostart = true,
-    callback = function()
+    callback = guarded(function()
         -- clean up window_centers for invalid clients
         for c, _ in pairs(window_centers) do
             if not c.valid then
@@ -642,7 +648,7 @@ local cleanup_timer = gears.timer {
         -- old: collectgarbage("collect") -- removed: forced full GC could
         -- collect Lua objects (e.g. old awful.wallpaper instances) that C
         -- signal handlers still reference, causing SEGV in lua_pcall
-    end
+    end)
 }
 
 -- Window management utilities
@@ -1285,10 +1291,10 @@ local function __log_title(c, reason)
     end
 end
 
-client.connect_signal("property::name", function(c) __log_title(c, "name") end)
+client.connect_signal("property::name", guarded(function(c) __log_title(c, "name") end))
 -- somewm 2.0 renamed manage/unmanage to request::manage/request::unmanage
-client.connect_signal("request::manage", function(c) __log_title(c, "init") end)
-client.connect_signal("request::unmanage", function(c) __title_log[c] = nil end)
+client.connect_signal("request::manage", guarded(function(c) __log_title(c, "init") end))
+client.connect_signal("request::unmanage", guarded(function(c) __title_log[c] = nil end))
 
 
 -- // MARK: ICONS
@@ -1530,7 +1536,7 @@ end
 
 
 -- force enable ruled notifications
-ruled.notification.connect_signal("request::rules", function()
+ruled.notification.connect_signal("request::rules", guarded(function()
     ruled.notification.append_rule {
         rule = {},
         properties = {
@@ -1538,7 +1544,7 @@ ruled.notification.connect_signal("request::rules", function()
             implicit_timeout = 50,
         }
     }
-end)
+end))
 
 -- explicitly require and configure naughty display - this was the key fix for Xephyr
 
@@ -1861,7 +1867,7 @@ local function set_wallpaper(s)
 end
 
 -- Set wallpaper on startup and when screens change
-screen.connect_signal("request::wallpaper", set_wallpaper)
+screen.connect_signal("request::wallpaper", guarded(set_wallpaper))
 -- NOTE: property::geometry is handled by awful.wallpaper module internally
 -- (backgrounds[s]:repaint()). Connecting set_wallpaper here created duplicate
 -- wallpaper objects on every kanshi profile switch, causing use-after-free
@@ -1952,7 +1958,7 @@ require("collision") {
 -- new: handle default layouts by assigning the exact curated subset
 -- somewm emits request::default_layouts on the tag object (capi.tag), not on
 -- awesome, so connect there or the handler never fires and the fallback list is used
-tag.connect_signal("request::default_layouts", function()
+tag.connect_signal("request::default_layouts", guarded(function()
     -- assert only these layouts are available (not a superset)
     -- using append_default_layouts because direct assignment to
     -- awful.layout.layouts triggers a double-disconnect bug in somewm's
@@ -2003,8 +2009,7 @@ tag.connect_signal("request::default_layouts", function()
         -- dynamite.layout.stack,
         -- dynamite.layout.tabbed
     })
-end)
-
+end))
 
 -- now that custom layouts are loaded, set preferred default
 -- overrides the temporary safe default set earlier
@@ -2485,21 +2490,21 @@ awful.screen.connect_for_each_screen(function(s)
             },
             id = 'background_role',
             widget = wibox.container.background,
-            create_callback = function(self, t, index, objects)
+            create_callback = guarded(function(self, t, index, objects)
                 local text_widget = self:get_children_by_id('text_role')[1]
                 if text_widget and t then
                     -- shimmer: register + wire hover via module helper
                     shimmer.register_taglist(self, s.index, t)
                     shimmer.attach_tag_hover(self, t)
                 end
-            end
+            end)
             ,
-            update_callback = function(self, t, index, objects)
+            update_callback = guarded(function(self, t, index, objects)
                 local text_widget = self:get_children_by_id('text_role')[1]
                 if text_widget and t then
                     -- taglist update handled automatically by shimmer
                 end
-            end
+            end)
         }
     }
 
@@ -2603,7 +2608,7 @@ awful.screen.connect_for_each_screen(function(s)
             },
             id     = 'background_role',
             widget = wibox.container.background,
-            create_callback = function(self, c, index, objects)
+            create_callback = guarded(function(self, c, index, objects)
                 local ib = self:get_children_by_id('icon_role')[1]
                 if ib then
                     local sz = (beautiful and (beautiful.tasklist_icon_size or beautiful.icon_size)) or DEFAULT_ICON_SIZE
@@ -2631,9 +2636,9 @@ awful.screen.connect_for_each_screen(function(s)
                 -- purple only when the app is actually visible on screen
                 -- delayed_call: re-apply after common.list_update overwrites self.bg
                 local visible = on_selected and not c.minimized
-                gears.timer.delayed_call(function()
+                gears.timer.delayed_call(guarded(function()
                     self.bg = visible and TASKLIST_BG_VISIBLE or TASKLIST_BG_OFFSCREEN
-                end)
+                end))
                 mode_glyphs.apply(self, c)
                 -- shimmer: centralize safety colorization
                 shimmer.apply_tasklist_safety(self, c)
@@ -2641,8 +2646,8 @@ awful.screen.connect_for_each_screen(function(s)
                 if shimmer and shimmer.tasklist_update_callback then
                     shimmer.tasklist_update_callback(self, c, index, objects)
                 end
-            end,
-            update_callback = function(self, c, index, objects)
+            end),
+            update_callback = guarded(function(self, c, index, objects)
                 local ib = self:get_children_by_id('icon_role')[1]
                 if ib then
                     local sz = (beautiful and (beautiful.tasklist_icon_size or beautiful.icon_size)) or DEFAULT_ICON_SIZE
@@ -2668,14 +2673,14 @@ awful.screen.connect_for_each_screen(function(s)
                 -- purple only when the app is actually visible on screen
                 -- delayed_call: re-apply after common.list_update overwrites self.bg
                 local visible = on_selected and not c.minimized
-                gears.timer.delayed_call(function()
+                gears.timer.delayed_call(guarded(function()
                     self.bg = visible and TASKLIST_BG_VISIBLE or TASKLIST_BG_OFFSCREEN
-                end)
+                end))
                 mode_glyphs.update(self, c)
                 -- shimmer: centralize safety colorization
                 shimmer.apply_tasklist_safety(self, c)
                 shimmer.tasklist_update_callback(self, c, index, objects)
-            end,
+            end),
         }
     }
     
@@ -2951,7 +2956,7 @@ end)
 
 -- Client creation and setup
 -- somewm 2.0: "manage" renamed to "request::manage"
-client.connect_signal("request::manage", function(c)
+client.connect_signal("request::manage", guarded(function(c)
     -- Set client window shapes
     c.shape = function(cr, w, h)
         -- guard missing theme var
@@ -2994,7 +2999,7 @@ client.connect_signal("request::manage", function(c)
             }
         end
     end
-end)
+end))
 
 -- // MARK: --titlebar-management
 -- double-click handler for titlebar (per-client, weak-keyed)
@@ -3011,10 +3016,10 @@ local function titlebar_handle_click(c, single_cb, double_cb, interval)
             timeout = interval,
             autostart = true,
             single_shot = true,
-            callback = function()
+            callback = guarded(function()
                 double_click_timers[c] = nil
                 if single_cb then single_cb() end
-            end
+            end)
         }
         double_click_timers[c] = t
     end
@@ -3160,47 +3165,47 @@ end)
 
 -- // MARK: --dragging-max-windows
 -- Client property changes
-client.connect_signal("property::maximized", function(c)
+client.connect_signal("property::maximized", guarded(function(c)
     -- Prevent firefox from maximizing (personal preference)
     if c.maximized and (c.class == "Navigator" or c.class == "firefox" or c.class == "Firefox") then
         c.maximized = false
     end
-end)
+end))
 
 -- Handle maximized state for dragging windows between screens
-client.connect_signal("request::activate", function(c, context, hints)
+client.connect_signal("request::activate", guarded(function(c, context, hints)
     -- unmaximize only when a move was intended (from titlebar or modkey+drag)
     if (context == "mouse_click" or context == "titlebar") and c._intend_drag and c.maximized then
         -- store the maximized state to restore later
         c._was_maximized = true
         c.maximized = false
     end
-end)
+end))
 
 -- Create a new signal for drag completion
-client.connect_signal("awesome::drag_end", function(c)
+client.connect_signal("awesome::drag_end", guarded(function(c)
     if c and c._was_maximized then
         c.maximized = true
         c._was_maximized = nil
     end
-end)
+end))
 
 -- Use mouse::leave as a fallback
-client.connect_signal("mouse::leave", function(c)
+client.connect_signal("mouse::leave", guarded(function(c)
     if c and c._was_maximized and not window_manager.is_dragging(c) then
         c.maximized = true
         c._was_maximized = nil
     end
-end)
+end))
 
-client.connect_signal("property::struts", function(c)
+client.connect_signal("property::struts", guarded(function(c)
     -- Make firefox picture-in-picture sticky when it meets screen edges
     local struts = c:struts()
     if struts.left ~= 0 or struts.right ~= 0 or
        struts.top ~= 0 or struts.bottom ~= 0 then
         c.sticky = true
     end
-end)
+end))
 
 
 -- disable focus-follows-mouse (sloppy focus): do not focus clients on cursor hover
@@ -3211,7 +3216,7 @@ end)
 
 -- Client cleanup - comprehensive cleanup on client destruction
 -- somewm 2.0: "unmanage" renamed to "request::unmanage"
-client.connect_signal("request::unmanage", function(c)
+client.connect_signal("request::unmanage", guarded(function(c)
     -- immediate cleanup of all client tracking
     window_manager.cleanup(c)
     
@@ -3320,18 +3325,18 @@ client.connect_signal("request::activate", guarded(function(c, context, hints)
         c._intend_drag = nil
     else
     end
-end)
+end))
 
 -- explicit lifecycle tracking for intended drags in case activate events are sparse
-client.connect_signal("button::press", function(c)
+client.connect_signal("button::press", guarded(function(c)
     -- validate client before accessing properties
     if not c or not c.valid then return end
     if c._intend_drag then
         window_manager.set_dragging(c, true)
     end
-end)
+end))
 
-client.connect_signal("button::release", function(c)
+client.connect_signal("button::release", guarded(function(c)
     -- validate client before accessing properties
     if not c or not c.valid then return end
     if c._intend_drag then
@@ -3344,10 +3349,10 @@ client.connect_signal("button::release", function(c)
         end
         c._intend_drag = nil
     end
-end)
+end))
 
 
-client.connect_signal("property::size", function(c)
+client.connect_signal("property::size", guarded(function(c)
     -- validate client first
     if not c or not c.valid then return end
     
@@ -3370,12 +3375,12 @@ client.connect_signal("property::size", function(c)
         window_manager.maintain_center(c)
         window_manager.store_center(c)  -- Update stored center after repositioning
     end
-end)
+end))
 
 
--- // MARK: -- auto-resize floated clients 
+-- // MARK: -- auto-resize floated clients
 -- Handle floating property changes to auto-resize tiled-to-floating clients
-client.connect_signal("property::floating", function(c)
+client.connect_signal("property::floating", guarded(function(c)
     -- validate client first
     if not c or not c.valid then return end
     
@@ -3445,7 +3450,7 @@ client.connect_signal("property::floating", function(c)
     
     -- clear the stored size since we've used it
     client_tiled_sizes[c] = nil
-end)
+end))
 
 -- Client cleanup handled above in consolidated signal section
 
@@ -3855,7 +3860,7 @@ awful.rules.rules = {
 -- // MARK: --ruled-rules
 -- modern rules system (ruled)
 -- keep the old awful.rules.rules commented above for reference
-ruled.client.connect_signal("request::rules", function()
+ruled.client.connect_signal("request::rules", guarded(function()
     -- global defaults
     ruled.client.append_rule {
         id = "global",
@@ -4063,7 +4068,7 @@ ruled.client.connect_signal("request::rules", function()
     for _, r in ipairs(tag_rules) do
         ruled.client.append_rule(r)
     end
-end)
+end))
 
 
 

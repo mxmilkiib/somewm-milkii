@@ -32,9 +32,10 @@
 local gears = require("gears")
 local naughty = require("naughty")
 local animation = require("plugins.shimmer.animation")
-local border = require("plugins.shimmer.border") 
+local border = require("plugins.shimmer.border")
 local integrations = require("plugins.shimmer.integrations")
 local beautiful = require("beautiful")  -- Theme handling library
+local guarded = require("error_guard")
 
 local M = {}
 
@@ -81,7 +82,7 @@ end
 -- run a tiny deferred init once awesome has built early widgets
 function M.post_startup_init()
     -- defer a frame to allow tasklists to exist
-    gears.timer.start_new(0.05, function()
+    gears.timer.start_new(0.05, guarded(function()
         -- trigger tasklist redraws to establish widget mappings
         for s in screen do
             if s.mytasklist then
@@ -93,7 +94,7 @@ function M.post_startup_init()
             M.initialize_focused_client()
         end
         return false
-    end)
+    end))
 end
 
 -- toggle notification persistence
@@ -105,7 +106,7 @@ function M.toggle_notification_persistence()
         -- when turning persistent on, show status immediately (it will be persistent)
         M.show_current_state_notify()
         -- then briefly show the toggle message as a temporary overlay
-        gears.timer.start_new(0.2, function()
+        gears.timer.start_new(0.2, guarded(function()
             naughty.notify({
                 title = "shimmer notifications",
                 text = "notifications now: " .. status,
@@ -119,7 +120,7 @@ function M.toggle_notification_persistence()
                 -- position = "top_middle"  -- force top position for visibility
             })
             return false  -- don't repeat
-        end)
+        end))
     else
         -- when turning persistent off, just show the toggle message
         show_shimmer_notification("shimmer notifications", "notifications now: " .. status, 3)

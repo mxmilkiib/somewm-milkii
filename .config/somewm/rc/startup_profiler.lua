@@ -1,6 +1,7 @@
 -- startup_profiler.lua
 -- Performance profiling for awesome startup to identify blocking operations
 local gears = require("gears")
+local guarded = require("error_guard")
 
 local M = {}
 
@@ -77,9 +78,9 @@ function M.report()
 end
 
 -- schedule automatic report
-gears.timer.start_new(2.0, function()
+gears.timer.start_new(2.0, guarded(function()
     M.report()
     return false
-end)
+end))
 
 return M

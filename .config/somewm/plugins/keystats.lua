@@ -71,6 +71,7 @@ local gfs = require("gears.filesystem")
 local gears = require("gears")
 local awful = require("awful")
 local naughty = require("naughty")
+local guarded = require("error_guard")
 
 local M = {}
 
@@ -141,7 +142,7 @@ local function write_db()
 end
 
 -- Periodic flush
-local flush_timer = gears.timer({ timeout = 10, autostart = true, callback = write_db })
+local flush_timer = gears.timer({ timeout = 10, autostart = true, callback = guarded(write_db) })
 
 local function normalize_mods(mods)
     local t = {}
@@ -190,11 +191,11 @@ end
 
 local function update_stats_deferred(rec)
     if gears and gears.timer and gears.timer.delayed_call then
-        gears.timer.delayed_call(function()
+        gears.timer.delayed_call(guarded(function()
             rec.count = (rec.count or 0) + 1
             rec.last_seen = now()
             dirty = true
-        end)
+        end))
     else
         rec.count = (rec.count or 0) + 1
         rec.last_seen = now()
@@ -342,7 +343,7 @@ local function hook_awful_key()
 end
 
 -- Flush on Awesome exit
-awesome.connect_signal("exit", function() write_db() end)
+awesome.connect_signal("exit", guarded(function() write_db() end))
 
 -- Initialize immediately upon require
 hook_awful_key()
