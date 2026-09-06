@@ -237,6 +237,7 @@ local shimmer = setmetatable({}, { __index = function() return noop end })
 local mode_glyphs = require("plugins.mode_glyphs")                    -- stable tasklist mode glyphs
 local hotkey_dupe_detector = require("plugins.hotkey_dupe_detector")  -- duplicate hotkey detection
 local notification_center = require("plugins.notification_center")     -- notification history popup
+local notifications = require("plugins.notifications")                  -- animated notification display
 local tag_pager = require("plugins.tag_pager")                          -- tag-aware expose pager
 tag_pager.init()
 local brightness = require("plugins.brightness")                        -- screen brightness with OSD
@@ -323,7 +324,7 @@ end
 -- Handle runtime errors after startup
 do
 	local in_error = false
-	awesome.connect_signal("debug::error", function(err)
+	awesome.connect_signal("debug::error", guarded(function(err)
 		-- Make sure we don't go into an endless error loop
 		if in_error then return end
 		in_error = true
@@ -334,13 +335,14 @@ do
 			text = tostring(err)
 		})
 		in_error = false
-	end)
+	end))
 end
 
 -- Notification display handler (required by somewm 2.0 to render notifications)
-naughty.connect_signal("request::display", function(n)
-    naughty.layout.box { notification = n }
-end)
+-- old: naughty.layout.box { notification = n }
+naughty.connect_signal("request::display", guarded(function(n)
+    notifications.display(n)
+end))
 
 
 -- Enable hotkeys help widget for VIM and other apps
@@ -1579,53 +1581,20 @@ local last_notification_text = ""
 -- enable default naughty notification system 
 require("naughty.dbus")
 
--- store notification text and add click handling to existing notifications
-naughty.connect_signal("added", function(n)
-    -- store text for keyboard shortcut
-    local text_to_copy = ""
+-- store notification text for keyboard copy shortcut
+-- old: also added button::press handler via n.box.widget (now handled by
+--      plugins/notifications.lua popup:buttons for left/right click)
+naughty.connect_signal("added", guarded(function(n)
     if n.title and n.text then
-        text_to_copy = n.title .. "\n" .. n.text
-        last_notification_text = text_to_copy
+        last_notification_text = n.title .. "\n" .. n.text
     elseif n.title then
-        text_to_copy = n.title
-        last_notification_text = text_to_copy
+        last_notification_text = n.title
     elseif n.text then
-        text_to_copy = n.text
-        last_notification_text = text_to_copy
+        last_notification_text = n.text
     else
         last_notification_text = ""
     end
-    
-    -- add right-click handler to the notification (after it's displayed)
-    gears.timer.delayed_call(function()
-        if n.box and n.box.widget then
-            n.box.widget:connect_signal("button::press", function(_, _, _, button)
-                if button == 1 then
-                    -- left click: dismiss (default behavior)
-                    n:destroy()
-                elseif button == 3 then
-                    -- right click: copy to clipboard
-                    if text_to_copy ~= "" then
-                        -- awful.spawn.with_shell("echo '" .. text_to_copy:gsub("'", "'\"'\"'") .. "' | xclip -selection clipboard")
-                        awful.spawn.with_shell("echo '" .. text_to_copy:gsub("'", "'\"'\"'") .. "' | wl-copy")
-                        naughty.notify({
-                            title = "copied",
-                            text = "notification copied to clipboard",
-                            timeout = 2,
-                        })
-                    else
-                        naughty.notify({
-                            title = "nothing to copy",
-                            text = "notification has no text",
-                            timeout = 2,
-                        })
-                    end
-                    n:destroy()
-                end
-            end)
-        end
-    end)
-end)
+end))
 
 -- function to copy last notification via keyboard shortcut
 local function copy_last_notification()
@@ -2725,6 +2694,7 @@ awful.screen.connect_for_each_screen(function(s)
     -- add widgets to the wibox
     -- create systray with base size from theme
     local mysystray = wibox.widget.systray()
+    s.mysystray = mysystray  -- store ref for notification placement anchoring
     if mysystray.set_base_size then
         local tray_size = (beautiful and (beautiful.systray_icon_size or beautiful.icon_size)) or 16
         mysystray:set_base_size(tray_size)

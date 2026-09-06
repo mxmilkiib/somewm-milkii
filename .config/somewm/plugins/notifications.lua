@@ -1,0 +1,637 @@
+-- Modern notification display with shared-timer slide animation
+-- Uses awful.popup for full placement control + naughty.widget.* for content
+-- Slide-in animation uses a single shared gears.timer for all active animations
+-- Stacking is manual (per-screen list) to anchor at the systray's left edge
+
+local awful = require("awful")
+local naughty = require("naughty")
+local wibox = require("wibox")
+local beautiful = require("beautiful")
+local gears = require("gears")
+local gtable = require("gears.table")
+local gtimer = require("gears.timer")
+local gdebug = require("gears.debug")
+local guarded = require("error_guard")
+local dpi = beautiful.xresources.apply_dpi
+
+local M = {}
+
+-- Configuration
+local SLIDE_DURATION = 0.3
+local NOTIF_GAP = dpi(4)
+local NOTIF_TOP_MARGIN = dpi(4)
+local NOTIF_RIGHT_GAP = dpi(6)
+local ANIM_FPS = 60
+local MAX_NOTIF_WIDTH = dpi(800)
+local DEFAULT_TIMEOUT = 50
+
+-- Scale a font string's trailing size by `scale` (e.g. "Sans 10" -> "Sans 14")
+local function scale_font(fontstr, scale)
+    if not fontstr then return nil end
+    return fontstr:gsub("(%d+)%s*$", function(n)
+        return tostring(math.floor(tonumber(n) * scale))
+    end)
+end
+local NOTIF_FONT = scale_font(beautiful.notification_font or beautiful.font, 1.4) or "Sans 14"
+
+-- Shared animation state
+local active_anims = {}
+local anim_timer = nil
+
+-- Per-screen active notification boxes (for manual stacking)
+local screen_boxes = {}
+
+-- Per-screen systray anchor cache
+local systray_anchors = {}
+local systray_anchor_stale = true
+
+
+local wbase = require("wibox.widget.base")
+
+-- // MARK --systray-anchor
+
+-- Compute the left-edge x of the systray on a given screen by traversing
+-- the wibar's widget tree and fitting each widget in the right section.
+local function compute_systray_anchor(s)
+    local wibar = s.mywibox
+    if not wibar or not wibar.valid then return nil end
+    local wg = wibar:geometry()
+    local root = wibar.widget
+    if not root then return nil end
+
+    local children = root:get_children()
+    if #children < 3 then return nil end
+
+    local right_section = children[3]
+    local right_children = right_section:get_children()
+
+    local context = { dpi = beautiful.xresources.get_dpi() or 96 }
+    local max_w, max_h = wg.width, wg.height
+
+    local systray_found = false
+    local width_after = 0
+    local systray_w = 0
+
+    for _, child in ipairs(right_children) do
+        -- check if this widget contains the systray
+        if not systray_found and s.mysystray then
+            local function contains_systray(w)
+                if w == s.mysystray then return true end
+                local kids = w.get_children and w:get_children() or nil
+                if kids then
+                    for _, k in ipairs(kids) do
+                        if contains_systray(k) then return true end
+                    end
+                end
+                return false
+            end
+            if contains_systray(child) then
+                local fw = wbase.fit_widget(right_section, context, child, max_w, max_h)
+                systray_w = fw or 0
+                systray_found = true
+            end
+        else
+            local fw = wbase.fit_widget(right_section, context, child, max_w, max_h)
+            width_after = width_after + (fw or 0)
+        end
+    end
+
+    if not systray_found then return nil end
+
+    -- systray left edge = wibar right edge - widgets after systray - systray width
+    return wg.x + wg.width - width_after - systray_w
+end
+
+local function get_systray_anchor(s)
+    if systray_anchor_stale or not systray_anchors[s] then
+        systray_anchors[s] = compute_systray_anchor(s)
+        systray_anchor_stale = false
+    end
+    return systray_anchors[s]
+end
+
+-- recompute anchors on screen geometry changes
+screen.connect_signal("property::geometry", guarded(function()
+    systray_anchor_stale = true
+    systray_anchors = {}
+end))
+
+-- cleanup on screen removal
+screen.connect_signal("removed", guarded(function(s)
+    systray_anchors[s] = nil
+    screen_boxes[s] = nil
+end))
+
+
+-- // MARK --stacking
+
+-- Reposition all active notification popups on a screen (top-down from wibar).
+-- Skips entries currently animating so the slide-in doesn't fight with reflow.
+local function reflow(s)
+    local boxes = screen_boxes[s]
+    if not boxes then return end
+    local wibar = s.mywibox
+    local wibar_h = (wibar and wibar.valid and wibar:geometry().height) or 0
+    -- include screen y offset for correct multi-screen stacking
+    local y = s.geometry.y + wibar_h + NOTIF_TOP_MARGIN
+    for i = #boxes, 1, -1 do
+        local entry = boxes[i]
+        if entry.popup and entry.popup.valid then
+            if not entry.animating then
+                local geo = entry.popup:geometry()
+                entry.popup:geometry({ y = math.floor(y) })
+            end
+            local geo = entry.popup:geometry()
+            y = y + geo.height + NOTIF_GAP
+        end
+    end
+end
+
+local function add_box(s, entry)
+    if not screen_boxes[s] then screen_boxes[s] = {} end
+    table.insert(screen_boxes[s], 1, entry)
+    reflow(s)
+end
+
+local function remove_box(s, entry)
+    local boxes = screen_boxes[s]
+    if not boxes then return end
+    for i, e in ipairs(boxes) do
+        if e == entry then
+            table.remove(boxes, i)
+            break
+        end
+    end
+    reflow(s)
+end
+
+
+-- // MARK --animation
+
+local function ensure_anim_timer()
+    if anim_timer then return end
+    anim_timer = gtimer {
+        timeout = 1 / ANIM_FPS,
+        call_now = false,
+        autostart = false,
+        callback = guarded(function()
+            local now = os.clock()
+            local remaining = {}
+            for _, anim in ipairs(active_anims) do
+                local elapsed = now - anim.start_time
+                local t = math.min(1, elapsed / anim.duration)
+                -- ease-out cubic
+                local eased = 1 - math.pow(1 - t, 3)
+                local y = anim.start_y + (anim.target_y - anim.start_y) * eased
+                if anim.popup and anim.popup.valid then
+                    anim.popup:geometry({ y = math.floor(y) })
+                end
+                if t < 1 then
+                    table.insert(remaining, anim)
+                else
+                    -- animation done: reflow to settle final stacking position
+                    if anim.entry and anim.entry.popup and anim.entry.popup.valid then
+                        anim.entry.animating = false
+                        reflow(anim.entry.screen)
+                    end
+                end
+            end
+            active_anims = remaining
+            if #active_anims == 0 then
+                anim_timer:stop()
+            end
+        end),
+    }
+end
+
+
+-- // MARK --widget-template
+
+local function build_widget(n, s)
+    local icon_widget = wibox.widget {
+        image = n.icon,
+        resize = true,
+        halign = "center",
+        valign = "center",
+        forced_width = dpi(48),
+        forced_height = dpi(48),
+        widget = wibox.widget.imagebox,
+    }
+
+    -- title: black bold text on gold background, in its own container
+    local title_widget = wibox.widget {
+        markup = "<span foreground='#000'><b>" .. (n.title or "") .. "</b></span>",
+        font = scale_font(beautiful.notification_font or beautiful.font, 1.8) or "Sans 18",
+        align = "left",
+        widget = wibox.widget.textbox,
+    }
+
+    -- close button: black circle with yellow X, right-aligned in the gold title bar
+    local close_button = wibox.widget {
+        {
+            {
+                markup = "<span foreground='#FFD700'><b>x</b></span>",
+                font = "Monospace 8",
+                widget = wibox.widget.textbox,
+            },
+            halign = "center",
+            valign = "center",
+            widget = wibox.container.place,
+        },
+        forced_width = dpi(20),
+        forced_height = dpi(20),
+        shape = function(cr, w, h)
+            gears.shape.circle(cr, w, h)
+        end,
+        border_width = dpi(1),
+        border_color = "#000000",
+        bg = "#000000",
+        widget = wibox.container.background,
+    }
+
+    -- countdown text (kept as reference for timer updates)
+    local countdown_text = wibox.widget {
+        markup = "<span foreground='#000' size='x-small'>0s</span>",
+        widget = wibox.widget.textbox,
+    }
+
+    -- countdown arc with countdown text inside it (goes in header centre)
+    local timeout_arc = wibox.widget {
+        {
+            countdown_text,
+            halign = "center",
+            valign = "center",
+            widget = wibox.container.place,
+        },
+        widget = wibox.container.arcchart,
+        forced_width = dpi(24),
+        forced_height = dpi(24),
+        max_value = 100,
+        min_value = 0,
+        value = 100,
+        thickness = dpi(2),
+        rounded_edge = true,
+        bg = "transparent",
+        colors = { beautiful.main_purple and beautiful.main_purple.base or "#623997" },
+    }
+
+    local title_bar = wibox.widget {
+        {
+            {
+                title_widget,
+                timeout_arc,
+                close_button,
+                expand = "none",
+                layout = wibox.layout.align.horizontal,
+            },
+            left = dpi(12),
+            right = dpi(8),
+            top = dpi(6),
+            bottom = dpi(6),
+            widget = wibox.container.margin,
+        },
+        bg = "#FFD700",
+        widget = wibox.container.background,
+    }
+
+    local message_widget = wibox.widget {
+        markup = n.message or n.text or "",
+        font = NOTIF_FONT,
+        align = "left",
+        wrap = "word_char",
+        widget = wibox.widget.textbox,
+    }
+
+    -- app name row (small grey text in the lower black section)
+    local app_name_widget = wibox.widget {
+        markup = "<span size='small' foreground='#888'>" .. (n.app_name or "") .. "</span>",
+        widget = wibox.widget.textbox,
+    }
+
+    -- right column: just the icon (countdown arc moved to header)
+    local right_col = wibox.widget {
+        icon_widget,
+        spacing = dpi(4),
+        layout = wibox.layout.fixed.vertical,
+    }
+
+    local actions_widget
+    if n.actions and #n.actions > 0 then
+        local action_buttons = {}
+        for _, action in ipairs(n.actions) do
+            table.insert(action_buttons, wibox.widget {
+                {
+                    text = action.name,
+                    align = "center",
+                    widget = wibox.widget.textbox,
+                },
+                forced_height = dpi(24),
+                widget = wibox.container.background,
+                bg = "#ffffff22",
+                shape = function(cr, w, h)
+                    gears.shape.rounded_rect(cr, w, h, dpi(3))
+                end,
+                buttons = {
+                    awful.button({}, 1, function()
+                        action:invoke()
+                    end),
+                },
+            })
+        end
+        actions_widget = wibox.layout.flex.horizontal()
+        actions_widget.spacing = dpi(4)
+        for _, btn in ipairs(action_buttons) do
+            actions_widget:add(btn)
+        end
+        actions_widget = wibox.widget {
+            actions_widget,
+            spacing = dpi(4),
+            layout = wibox.layout.fixed.vertical,
+        }
+    end
+
+    -- body: content on left, icon + countdown on right
+    local body_content = wibox.widget {
+        {
+            {
+                app_name_widget,
+                message_widget,
+                spacing = dpi(2),
+                layout = wibox.layout.fixed.vertical,
+            },
+            nil,
+            right_col,
+            expand = "none",
+            layout = wibox.layout.align.horizontal,
+        },
+        margins = dpi(10),
+        widget = wibox.container.margin,
+    }
+
+    local inner = wibox.widget {
+        {
+            title_bar,
+            {
+                body_content,
+                bg = "#000000",
+                widget = wibox.container.background,
+            },
+            actions_widget,
+            spacing = dpi(0),
+            layout = wibox.layout.fixed.vertical,
+        },
+        bg = "#000000",
+        widget = wibox.container.background,
+    }
+
+    -- enforce 15% minimum screen width at the widget level so the popup
+    -- is actually that wide (awful.popup sizes from its widget tree)
+    local min_width = dpi(0)
+    if s and s.valid then
+        min_width = math.floor(s.geometry.width * 0.15)
+    end
+    local widget = wibox.widget {
+        inner,
+        strategy = "min",
+        width = min_width,
+        widget = wibox.container.constraint,
+    }
+
+    return widget, timeout_arc, countdown_text, close_button
+end
+
+
+-- // MARK --display
+
+-- pick the screen with the largest pixel area (typically the external monitor)
+local function pick_largest_screen()
+    local best, best_area = nil, 0
+    for scr in screen do
+        if scr.valid then
+            local g = scr.geometry
+            local area = g.width * g.height
+            if area > best_area then
+                best, best_area = scr, area
+            end
+        end
+    end
+    return best or screen.primary or awful.screen.focused()
+end
+
+function M.display(n)
+    local s = pick_largest_screen()
+    if not s or not s.valid then return end
+
+    local widget, timeout_arc, countdown_text, close_button = build_widget(n, s)
+
+    local popup = awful.popup {
+        widget = widget,
+        screen = s,
+        visible = false,
+        ontop = true,
+        type = "notification",
+        bg = "#000000",
+        fg = "#ffffff",
+        border_width = 0,
+        shape = function(cr, w, h)
+            gears.shape.rounded_rect(cr, w, h, dpi(4))
+        end,
+        maximum_width = MAX_NOTIF_WIDTH,
+    }
+
+    -- set n.box so existing added-signal handler can access it
+    n.box = popup
+
+    -- popup-level buttons: left-click dismiss, right-click copy to clipboard
+    local text_to_copy = ""
+    if n.title and n.message then
+        text_to_copy = n.title .. "\n" .. n.message
+    elseif n.title then
+        text_to_copy = n.title
+    elseif n.message then
+        text_to_copy = n.message
+    end
+    popup:buttons(gtable.join(
+        awful.button({}, 1, function()
+            n:destroy(naughty.notification_closed_reason.dismissed_by_user)
+        end),
+        awful.button({}, 3, function()
+            if text_to_copy ~= "" then
+                awful.spawn.with_shell("echo '" .. text_to_copy:gsub("'", "'\"'\"'") .. "' | wl-copy")
+            end
+            n:destroy(naughty.notification_closed_reason.silent)
+        end)
+    ))
+
+    local entry = { popup = popup, notification = n }
+
+    -- timeout handling
+    local timeout = n.timeout or DEFAULT_TIMEOUT
+    local timeout_timer
+    local arc_timer
+    if timeout > 0 then
+        -- arc countdown timer (updates arc value + visible countdown text)
+        -- uses a tick counter instead of os.clock() (which measures CPU time,
+        -- not wall time, and barely advances while awesome is idle)
+        local arc_duration = timeout
+        local arc_ticks = 0
+        local ARC_RATE = 15
+        arc_timer = gtimer {
+            timeout = 1 / ARC_RATE,
+            autostart = false,
+            callback = guarded(function()
+                arc_ticks = arc_ticks + 1
+                local elapsed = arc_ticks / ARC_RATE
+                local remaining = math.max(0, 1 - elapsed / arc_duration)
+                timeout_arc.value = remaining * 100
+                local secs_left = math.ceil(remaining * arc_duration)
+                countdown_text:set_markup(string.format(
+                    "<span foreground='#000' size='x-small'>%ds</span>", secs_left))
+                if remaining <= 0 then arc_timer:stop() end
+            end),
+        }
+
+        timeout_timer = gtimer {
+            timeout = timeout,
+            single_shot = true,
+            autostart = false,
+            callback = guarded(function()
+                n:destroy(naughty.notification_closed_reason.expired)
+            end),
+        }
+    end
+
+    -- close button click in the title bar
+    close_button:buttons(gtable.join(
+        awful.button({}, 1, function()
+            n:destroy(naughty.notification_closed_reason.dismissed_by_user)
+        end)
+    ))
+
+    -- hover to pause timeout
+    popup:connect_signal("mouse::enter", guarded(function()
+        if timeout_timer then timeout_timer:stop() end
+        if arc_timer then arc_timer:stop() end
+    end))
+    popup:connect_signal("mouse::leave", guarded(function()
+        if timeout_timer then timeout_timer:start() end
+        if arc_timer then arc_timer:start() end
+    end))
+
+    -- cleanup on destroy
+    n:connect_signal("destroyed", guarded(function()
+        if timeout_timer then timeout_timer:stop() end
+        if arc_timer then arc_timer:stop() end
+        if popup and popup.valid then
+            popup.visible = false
+        end
+        remove_box(s, entry)
+    end))
+
+    -- defer geometry-dependent setup to next event loop (popup needs layout)
+    gtimer.delayed_call(guarded(function()
+        if not popup.valid or not s.valid then return end
+
+        local ok, err = pcall(function()
+            local screen_geo = s.geometry
+
+            -- add to stacking list; reflow computes the target y
+            -- (reflow skips animating entries, so we set y ourselves)
+            entry.animating = true
+            entry.screen = s
+            add_box(s, entry)
+
+            -- capture target y from reflow (reflow ran in add_box but
+            -- skipped this entry because animating=true; compute manually)
+            -- must include the screen's y offset for multi-screen layouts
+            local wibar = s.mywibox
+            local wibar_h = (wibar and wibar.valid and wibar:geometry().height) or 0
+            local target_y = screen_geo.y + wibar_h + NOTIF_TOP_MARGIN
+
+            -- start position: above the target screen so the popup slides
+            -- down from the top edge of that specific screen
+            -- set width explicitly so we can center perfectly before showing
+            -- (somewm may not reposition an already-visible popup)
+            local min_w = math.floor(screen_geo.width * 0.15)
+            local popup_x = screen_geo.x + math.floor((screen_geo.width - min_w) / 2)
+            popup:geometry({ width = min_w, x = popup_x, y = screen_geo.y - dpi(400) })
+            popup.visible = true
+
+            -- defer to the next frame so the compositor has drawn the popup
+            -- and geometry().height reflects the real height
+            gtimer.delayed_call(guarded(function()
+                if not popup.valid or not s.valid then return end
+
+                local popup_w = popup:geometry().width
+                local popup_h = popup:geometry().height
+
+                -- recenter if the actual width differs from min_w
+                -- (hide/reshow because somewm may not move a visible popup)
+                local screen_geo = s.geometry
+                local correct_x = screen_geo.x + math.floor((screen_geo.width - popup_w) / 2)
+                if correct_x ~= popup:geometry().x then
+                    popup.visible = false
+                    popup:geometry({ x = correct_x })
+                    popup.visible = true
+                end
+
+                -- set the real start y now that we know the popup height
+                local start_y = screen_geo.y - popup_h - dpi(10)
+                popup:geometry({ y = math.floor(start_y) })
+
+                -- start slide-in animation (y only)
+                ensure_anim_timer()
+                table.insert(active_anims, {
+                    popup = popup,
+                    entry = entry,
+                    start_y = start_y,
+                    target_y = target_y,
+                    start_time = os.clock(),
+                    duration = SLIDE_DURATION,
+                })
+                anim_timer:start()
+            end))
+        end)
+        if not ok then
+            -- fallback: show without animation
+            if popup.valid then
+                add_box(s, entry)
+                popup.visible = true
+            end
+            gdebug.print_warning("notifications.display delayed_call: " .. tostring(err))
+        end
+    end))
+
+    -- start timers
+    if timeout_timer then timeout_timer:start() end
+    if arc_timer then arc_timer:start() end
+
+    return popup
+end
+
+-- debug exports (read-only via eval)
+M._debug = function()
+    local info = {}
+    local total_boxes = 0
+    for scr in screen do
+        local boxes = screen_boxes[scr] or {}
+        total_boxes = total_boxes + #boxes
+        for i, e in ipairs(boxes) do
+            local p = e.popup
+            if p and p.valid then
+                local g = p:geometry()
+                local sg = scr.geometry
+                table.insert(info, string.format("[s%d][%d] x=%d y=%d w=%d vis=%s | screen x=%d y=%d w=%d center=%d",
+                    scr.index, i, g.x, g.y, g.width, tostring(p.visible),
+                    sg.x, sg.y, sg.width, sg.x + math.floor(sg.width/2)))
+            else
+                table.insert(info, string.format("[%d] invalid", i))
+            end
+        end
+    end
+    return string.format("boxes:%d anims:%d timer:%s | %s",
+        total_boxes, #active_anims, tostring(anim_timer and anim_timer.started or "nil"),
+        table.concat(info, " "))
+end
+
+return M
