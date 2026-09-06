@@ -263,7 +263,7 @@ function M.build(ctx)
     {{modkey}, "h", function() awful.tag.incmwfact(-0.05) end, "decrease master width factor", nil, "layout"},
     {{modkey, shiftkey}, "h", function() awful.tag.incnmaster(1, nil, true) end, "increase number of master clients", nil, "layout"},
     {{modkey, shiftkey}, "l", function() awful.tag.incnmaster(-1, nil, true) end, "decrease number of master clients", nil, "layout"},
-    {{modkey, ctrlkey}, "h", function() awful.tag.incncol(1, nil, true) end, "increase number of columns", nil, "layout"},
+    {{modkey, ctrlkey}, "h", function() awful.tag.incncol(1, nil, true)  end, "increase number of columns", nil, "layout"},
     {{modkey, ctrlkey}, "l", function() awful.tag.incncol(-1, nil, true) end, "decrease number of columns", nil, "layout"},
     {{modkey}, "r", function() awful.layout.inc(1) end, "select next layout", nil, "layout"},
     {{modkey, shiftkey}, "r", function() awful.layout.inc(-1) end, "select previous layout", nil, "layout"}
@@ -433,6 +433,7 @@ function M.build(ctx)
     -- old: {{modkey, altkey}, "b", "xset dpms force off", "blank screens immediately (DPMS)", nil, "utility"},
     {{modkey, altkey}, "b", "sh -c 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --off {}'", "blank screens immediately (DPMS)", nil, "utility"},
     -- old: {{modkey, shiftkey, altkey}, "b", "xset dpms force suspend", "suspend screens (DPMS)", nil, "utility"}
+    {{ctrlkey, shiftkey}, "space", "whisper-dictate", "toggle voice dictation", nil, "utility"},
   }
   
   -- // MARK: MENU

@@ -2314,15 +2314,10 @@ local tasklist_buttons = gears.table.join(
         })
         ctx_menu:show({ coords = { x = mouse.coords().x, y = mouse.coords().y } })
 
-        -- dismiss on outside click: use a mousegrabber that hides the menu
-        -- on any button press, then stops itself
-        mousegrabber.run(function(m)
-            if m.buttons[1] or m.buttons[3] then
-                ctx_menu:hide()
-                return false
-            end
-            return true
-        end, "arrow")
+        -- dismiss on outside click: awful.menu handles this itself; a
+        -- mousegrabber here would intercept the very click that selects a
+        -- menu item (hiding the menu before the item callback runs), so
+        -- none of the items would ever activate.
     end),
     -- mousewheel up: cycle forward through clients on current tag
     awful.button({ }, 4, function ()
