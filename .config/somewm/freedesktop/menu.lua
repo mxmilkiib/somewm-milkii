@@ -22,6 +22,42 @@ local io, pairs, string, table, os = io, pairs, string, table, os
 -- Expecting a wm_name of awesome omits too many applications and tools
 menu_utils.wm_name = ""
 
+-- Synchronous replacement for menubar.utils.parse_dir.
+-- The stock version walks directories through lgi's Gio.Async coroutine
+-- wrapper; under somewm a GIO completion can resume the coroutine after
+-- it has already finished, and lgi rethrows that outside any pcall, which
+-- panics the compositor ("attempt to call a number value") on startup.
+-- A plain synchronous GIO walk of a few hundred .desktop files costs tens
+-- of milliseconds and has no coroutine to race against.
+local DESKTOP_QUERY = Gio.FILE_ATTRIBUTE_STANDARD_NAME .. "," .. Gio.FILE_ATTRIBUTE_STANDARD_TYPE
+
+local function walk_desktop_dir(file, programs)
+    local enum = file:enumerate_children(DESKTOP_QUERY, Gio.FileQueryInfoFlags.NONE, nil)
+    if not enum then return end
+    while true do
+        local info = enum:next_file(nil)
+        if not info then break end
+        local child = enum:get_child(info)
+        local file_type = info:get_file_type()
+        if file_type == "REGULAR" then
+            local path = child:get_path()
+            if path and path:sub(-8) == ".desktop" then
+                local ok, program = pcall(menu_utils.parse_desktop_file, path)
+                if ok and program then table.insert(programs, program) end
+            end
+        elseif file_type == "DIRECTORY" then
+            walk_desktop_dir(child, programs)
+        end
+    end
+    enum:close(nil)
+end
+
+function menu_utils.parse_dir(dir_path, callback)
+    local programs = {}
+    walk_desktop_dir(Gio.File.new_for_path(dir_path), programs)
+    callback(programs)
+end
+
 -- Menu
 -- freedesktop.menu
 local menu = {}
