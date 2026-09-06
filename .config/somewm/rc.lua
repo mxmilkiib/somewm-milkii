@@ -2041,6 +2041,12 @@ milkdefault = vstack
 
 -- Restore previous clock style: Hack font, white on purple, with right margin
 local mytextclock = wibox.widget.textclock()
+-- month calendar popup on clock click (navigate months by scrolling on it)
+local month_calendar = awful.widget.calendar_popup.month({
+    start_sunday = false,
+    week_numbers = true,
+})
+month_calendar:attach(mytextclock, "tr", { on_hover = false })
 mytextclock.format = "%a %b %d %H:%M"
 mytextclock.font = "Hack Nerd Font 11"
 
@@ -4294,7 +4300,9 @@ awful.spawn.with_shell("pgrep -u $USER -x blueman-applet > /dev/null || blueman-
 -- awful.spawn.with_shell("volumeicon")
 
 -- Clipboard manager
-awful.spawn.with_shell("pgrep -u $USER -x clipcat > /dev/null || clipcat")
+-- old: clipcat (not installed); cliphist is the maintained Wayland-native choice
+awful.spawn.with_shell("pgrep -f 'wl-paste --type text' > /dev/null || wl-paste --type text --watch cliphist store")
+awful.spawn.with_shell("pgrep -f 'wl-paste --type image' > /dev/null || wl-paste --type image --watch cliphist store")
 
 -- Notifications daemon
 -- awful.spawn.with_shell("dunst")
