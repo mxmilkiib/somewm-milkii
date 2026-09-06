@@ -24,7 +24,7 @@ _die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 _need() {
   local missing=()
-  for t in somewm-client awk sed date grep mv mkdir find stat touch jq; do
+  for t in somewm-client awk sed date grep mv mkdir find stat touch; do
     command -v "$t" >/dev/null 2>&1 || missing+=("$t")
   done
   if ((${#missing[@]})); then _die "missing required tools: ${missing[*]}"; fi
@@ -35,6 +35,41 @@ _need() {
 
 _escape_lua() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/\"/\\\"/g'
+}
+
+# extract a stable substring from a window title so that name-based rules
+# match future windows from the same app, not just the current content.
+# ruled.client matches name via Lua string.match (substring/pattern), so
+# the extracted part will match any title containing it.
+#
+# heuristics:
+#   "Page Title — App"     → take after " — "  (browser-style app suffix)
+#   "file.ext - App"       → take after " - "  (editor-style app suffix)
+#   "App: content"         → take before ": "  (app prefix)
+#   "Dialog Name"          → no separator, keep as-is (likely already stable)
+_extract_stable_name() {
+  local title="$1" segment
+
+  # " — " (em-dash with spaces) — app is the last segment
+  if [[ "$title" == *" — "* ]]; then
+    segment="${title##* — }"
+    (( ${#segment} >= 3 )) && { printf '%s' "$segment"; return 0; }
+  fi
+
+  # " - " (hyphen with spaces) — app is the last segment
+  if [[ "$title" == *" - "* ]]; then
+    segment="${title##* - }"
+    (( ${#segment} >= 3 )) && { printf '%s' "$segment"; return 0; }
+  fi
+
+  # ": " (colon with space) — app is the first segment
+  if [[ "$title" == *": "* ]]; then
+    segment="${title%%: *}"
+    (( ${#segment} >= 3 )) && { printf '%s' "$segment"; return 0; }
+  fi
+
+  # no separator or segments too short — keep the full title
+  printf '%s' "$title"
 }
 
 _backup_rotate() {
@@ -78,16 +113,21 @@ _backup_rotate() {
 }
 
 # old: _choose_identifier used xprop -id to get WM_CLASS/WM_NAME/WM_WINDOW_ROLE
-# new: uses somewm-client --json client info focused to get class/instance/name/role
+# old: tried somewm-client --json client info focused, but its result field is a
+#      flat text blob, not structured JSON, so jq field access returned empty
+# new: uses somewm-client eval to read the four fields directly from the
+#      focused client object, returned as a pipe-delimited string
 _choose_identifier() {
-  local info class instance name role
-  info=$(somewm-client --json client info focused 2>/dev/null) || true
-  [[ -n "$info" ]] || _die "cannot get focused client info from somewm-client"
+  local raw class instance name role
+  raw=$(somewm-client eval 'c=client.focus; if c then return tostring(c.class or "").."|"..tostring(c.instance or "").."|"..tostring(c.name or "").."|"..tostring(c.role or "") end return "|||"' 2>/dev/null) || true
+  [[ -n "$raw" ]] || _die "cannot get focused client info from somewm-client eval"
 
-  class=$(printf '%s' "$info" | jq -r '.class // .app_id // empty' 2>/dev/null)
-  instance=$(printf '%s' "$info" | jq -r '.instance // .app_id // empty' 2>/dev/null)
-  name=$(printf '%s' "$info" | jq -r '.name // .title // empty' 2>/dev/null)
-  role=$(printf '%s' "$info" | jq -r '.role // .window_role // empty' 2>/dev/null)
+  # somewm-client prints "OK\n<return value>"; take the last non-empty line
+  local payload
+  payload=$(printf '%s\n' "$raw" | sed -e '/^OK$/d' -e '/^[[:space:]]*$/d' | tail -n1)
+  [[ -n "$payload" ]] || _die "empty payload from somewm-client eval"
+
+  IFS='|' read -r class instance name role <<<"$payload"
 
   local -a generic_classes=(
     "Alacritty" "URxvt" "XTerm" "kitty" "st-256color" "foot" "wezterm" "WezTerm"
@@ -102,7 +142,12 @@ _choose_identifier() {
   if [[ -n "${class:-}" && $is_generic == false ]]; then printf 'class|%s\n' "$class"; return 0; fi
   if [[ -n "${instance:-}" ]]; then printf 'instance|%s\n' "$instance"; return 0; fi
   if [[ -n "${role:-}" ]]; then printf 'role|%s\n' "$role"; return 0; fi
-  if [[ -n "${name:-}" ]]; then printf 'name|%s\n' "$name"; return 0; fi
+  if [[ -n "${name:-}" ]]; then
+    local stable
+    stable=$(_extract_stable_name "$name")
+    printf 'name|%s\n' "$stable"
+    return 0
+  fi
   return 1
 }
 

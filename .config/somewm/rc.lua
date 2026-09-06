@@ -372,8 +372,9 @@ local tasklist_show_all_tags = true
 -- refresh_all_tasklists function moved earlier in file
 
 -- Matcher generator for rules
+-- old: used awful.rules.match, but somewm removed awful.rules in favour of ruled.client
 local create_matcher = function(class_name)
-    return function(c) return awful.rules.match(c, {class = class_name}) end
+    return function(c) return ruled.client.match(c, {class = class_name}) end
 end
 
 -- Unified tag hover styling function
@@ -3574,7 +3575,7 @@ awful.rules.rules = {
     -- // MARK: --old-floating-rules
     -- {{{ Floating client rules
     -- Applications that should always be floating windows
-    -- Search marker: floatingggggggggg
+    -- Old search marker (defunct, moved to ruled.client block)
     {
         rule_any = {
             -- Match by instance name
@@ -3582,8 +3583,7 @@ awful.rules.rules = {
                 "DTA",         -- Firefox addon DownThemAll
                 "copyq",       -- Clipboard manager (includes session name in class)
                 "pinentry",    -- Password entry dialog
-                "ncmpcpp",     -- Music player
-                "firefox"      -- Firefox dialogs
+                "ncmpcpp"      -- Music player
             },
 
             -- Match by class name (organized by category)
@@ -3967,10 +3967,13 @@ ruled.client.connect_signal("request::rules", function()
     }
 
     -- extended floating rules (consolidated from original)
+    -- Search marker: floatingggggggggg
     ruled.client.append_rule {
         id = "floating_extended",
         rule_any = {
-            instance = { "DTA", "copyq", "pinentry", "ncmpcpp", "firefox" },
+            instance = {
+                "DTA", "copyq", "pinentry", "ncmpcpp", "firefox"
+            },
             class = {
                 -- system
                 "Arandr", "Blueman-manager", "Lxappearance", "Gsmartcontrol", "hp-toolbox",
@@ -3991,10 +3994,14 @@ ruled.client.connect_signal("request::rules", function()
                 "Gnaural", "kdeconnect.sms", "Mattermost", "Onboard", "gammy", "Flirc",
                 "isoimagewriter", "Xdotoolgui.py", "mpd218 editor.exe", "Indicator-sound-switcher", "easyeffects"
             },
-            name = { "Event Tester", "Choose an application", "File operations", "Blender Preferences",
-                "Options", "Tree View Menu", "menu" },
-            role = { "AlarmWindow", "ConfigManager", "pop-up", "page-info", "TfrmFileOp",
-                "TfrmViewer" },
+            name = {
+                "Event Tester", "Choose an application", "File operations", "Blender Preferences",
+                "Options", "Tree View Menu", "menu", "Mozilla Firefox"
+            },
+            role = {
+                "AlarmWindow", "ConfigManager", "pop-up", "page-info", "TfrmFileOp",
+                "TfrmViewer"
+            },
         },
         properties = {
             floating = true,
