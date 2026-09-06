@@ -45,10 +45,12 @@ local gstring = require("gears.string")
 local gsurface = require("gears.surface")
 local cairo = require("lgi").cairo
 local menubar = require("menubar")
+local guarded = require("error_guard")
 
 local root = root
 local client = client
 local screen = screen
+local capi = { mousegrabber = mousegrabber }
 
 local M = {}
 
@@ -161,6 +163,7 @@ local cells = {}
 
 -- forward declaration: refresh is defined later but used by start_drag
 local refresh
+local debounced_refresh
 
 
 -- // MARK --landscape-rotation
@@ -264,10 +267,16 @@ local function tag_clients_stacked(t)
     local clients = t:clients() or {}
     if #clients <= 1 then return clients end
     local focused = client.focus
+    -- only treat the focused client as "on top" if it actually belongs to
+    -- this tag; otherwise it would bleed into cells of tags it's not on
+    local focused_on_tag = false
+    for _, c in ipairs(clients) do
+        if c == focused then focused_on_tag = true; break end
+    end
     local visible, minimized = {}, {}
     for _, c in ipairs(clients) do
         if c.valid then
-            if c == focused then
+            if c == focused and focused_on_tag then
                 -- focused client goes last (drawn on top)
             elseif c.minimized then
                 table.insert(minimized, c)
@@ -279,7 +288,7 @@ local function tag_clients_stacked(t)
     local sorted = {}
     for _, c in ipairs(minimized) do table.insert(sorted, c) end
     for _, c in ipairs(visible)  do table.insert(sorted, c) end
-    if focused and focused.valid then table.insert(sorted, focused) end
+    if focused and focused.valid and focused_on_tag then table.insert(sorted, focused) end
     return sorted
 end
 
@@ -376,9 +385,9 @@ local function render_cell_surface(width, height, t)
         end
     end
 
-    -- border: purple for selected, gold for viewed, black for the rest
+    -- border: purple (2px) for selected, gold for viewed, black for the rest
     cr:set_source_rgba(hex_to_rgba(is_selected and COLOR_PURPLE or (is_viewed and COLOR_GOLD or COLOR_BG), 1))
-    cr:set_line_width(1)
+    cr:set_line_width((is_selected or is_viewed) and 2 or 1)
     cr:rectangle(0.5, 0.5, width - 1, height - 1)
     cr:stroke()
 
@@ -429,6 +438,11 @@ end
 
 
 -- drag state
+-- drag_gen is a generation token: each start_drag increments it and the
+-- active grabber captures the current value. a stale grabber closure from
+-- a previous drag bails out when it sees gen ~= drag_gen, so it can never
+-- move the client captured by an earlier drag.
+local drag_gen = 0
 local drag_client = nil
 local drag_source_tag = nil
 local drag_start_x, drag_start_y = nil, nil
@@ -461,48 +475,132 @@ end
 
 
 local function start_drag(c, source_tag, start_x, start_y)
+    drag_gen = drag_gen + 1
+    local gen = drag_gen
     drag_client = c
     drag_source_tag = source_tag
     drag_start_x = start_x
     drag_start_y = start_y
 
-    mousegrabber.run(function(m)
+    -- stop any grabber left over from a previous drag before starting a
+    -- new one. somewm's mousegrabber does not reliably replace a running
+    -- grabber, so without this the previous drag's closure (capturing the
+    -- previous client) could handle this drag's drop and move the wrong
+    -- client. the gen guard below is a backstop for the same race.
+    if capi.mousegrabber.isrunning and capi.mousegrabber.isrunning() then
+        capi.mousegrabber.stop()
+    end
+
+    -- safety timeout: force-stop the grabber after 10 seconds so a missed
+    -- button-release event (or a Lua error in the callback) can never
+    -- leave the grabber permanently intercepting all mouse input
+    local drag_safety_timer = gears.timer {
+        timeout = 10,
+        single_shot = true,
+        callback = guarded(function()
+            if gen == drag_gen then
+                drag_client = nil
+                drag_source_tag = nil
+                drag_start_x = nil
+                drag_start_y = nil
+            end
+            if capi.mousegrabber.isrunning and capi.mousegrabber.isrunning() then
+                capi.mousegrabber.stop()
+            end
+        end),
+    }
+
+    capi.mousegrabber.run(function(m)
+        -- a newer drag has started; ignore this stale closure
+        if gen ~= drag_gen then
+            drag_safety_timer:stop()
+            return false
+        end
+
         if not c or not c.valid then
-            drag_client = nil
-            drag_source_tag = nil
+            if gen == drag_gen then
+                drag_client = nil
+                drag_source_tag = nil
+            end
+            drag_safety_timer:stop()
             return false
         end
 
         -- drop on left button release
         if not (m.buttons and m.buttons[1]) then
-            local moved = math.abs(m.x - start_x) > DRAG_THRESHOLD
-                or math.abs(m.y - start_y) > DRAG_THRESHOLD
+            -- wrap drop/click logic in pcall so a Lua error can never
+            -- prevent return false from being reached, which would leave
+            -- the grabber running and swallow all mouse input
+            local ok, err = pcall(function()
+                local moved = math.abs(m.x - start_x) > DRAG_THRESHOLD
+                    or math.abs(m.y - start_y) > DRAG_THRESHOLD
 
-            if moved then
-                -- drag: move client to target tag
-                local target_tag = find_cell_under_mouse(m.x, m.y)
-                if target_tag and target_tag.valid and target_tag ~= source_tag then
-                    c:move_to_tag(target_tag)
-                    -- follow the client to the new tag
-                    target_tag:view_only()
+                if moved then
+                    -- drag: move client to target tag
+                    local target_tag = find_cell_under_mouse(m.x, m.y)
+                    if target_tag and target_tag.valid and target_tag ~= source_tag then
+                        c:move_to_tag(target_tag)
+                        -- awful.layout.arrange is async (timer.delayed_call):
+                        -- calling target_tag:view_only() immediately would
+                        -- switch the selected tag before the source tag's
+                        -- layout reflows, leaving the remaining client at
+                        -- its stale geometry. defer view_only until the
+                        -- source screen's arrange signal fires, so the
+                        -- remaining client gets its new full-screen geometry
+                        -- first and the pager renders it correctly.
+                        local src_screen = source_tag and source_tag.valid and source_tag.screen
+                        if src_screen and src_screen.valid then
+                            local arrange_handler
+                            arrange_handler = function()
+                                src_screen:disconnect_signal("arrange", arrange_handler)
+                                if target_tag and target_tag.valid then
+                                    target_tag:view_only()
+                                end
+                                debounced_refresh()
+                            end
+                            src_screen:connect_signal("arrange", guarded(arrange_handler))
+                            -- safety fallback in case arrange never fires
+                            gears.timer {
+                                timeout = 0.1,
+                                single_shot = true,
+                                callback = guarded(function()
+                                    src_screen:disconnect_signal("arrange", arrange_handler)
+                                    if target_tag and target_tag.valid then
+                                        target_tag:view_only()
+                                    end
+                                    debounced_refresh()
+                                end),
+                            }:start()
+                        else
+                            target_tag:view_only()
+                        end
+                    end
+                else
+                    -- click without drag: switch to source tag and focus client
+                    source_tag:view_only()
+                    c.minimized = false
+                    c:emit_signal("request::activate", "tag_pager", { raise = true })
                 end
-            else
-                -- click without drag: switch to source tag and focus client
-                source_tag:view_only()
-                c.minimized = false
-                c:emit_signal("request::activate", "tag_pager", { raise = true })
+            end)
+            if not ok then
+                require("gears.debug").print_warning("tag_pager drag error: " .. tostring(err))
             end
 
-            drag_client = nil
-            drag_source_tag = nil
-            drag_start_x = nil
-            drag_start_y = nil
-            refresh()
+            if gen == drag_gen then
+                drag_client = nil
+                drag_source_tag = nil
+                drag_start_x = nil
+                drag_start_y = nil
+            end
+            drag_safety_timer:stop()
+            debounced_refresh()
             return false
         end
 
         return true
     end, "fleur")
+
+    drag_safety_timer:start()
 end
 
 
@@ -587,6 +685,36 @@ refresh = function()
             entry.imagebox:set_image(surf)
         end
     end
+end
+
+
+-- MARK: DEBOUNCED REFRESH
+-- // MARK --debounce
+
+
+-- coalesce rapid signal bursts (e.g. on restart when all clients are
+-- re-managed and each fires property::geometry, tagged, focus, ...) into
+-- a single render pass. without this, 15 signal connections × N clients
+-- × 12 cells = thousands of cairo surface renders in interpreted Lua
+-- (jit.off is active), freezing the UI for several seconds on restart.
+local refresh_timer
+local refresh_pending = false
+local REFRESH_DELAY = 1 / 60  -- one frame; fast enough to feel immediate
+
+debounced_refresh = function()
+    if refresh_pending then return end
+    refresh_pending = true
+    if not refresh_timer then
+        refresh_timer = gears.timer {
+            timeout   = REFRESH_DELAY,
+            single_shot = true,
+            callback  = guarded(function()
+                refresh_pending = false
+                refresh()
+            end),
+        }
+    end
+    refresh_timer:again()
 end
 
 
@@ -713,9 +841,9 @@ function M.show(opt_tag)
 
     -- outside-click detection via client + wibar button::press signals
     -- (root:get_buttons()/set_buttons() are X11-only and not available in somewm)
-    popup._client_click_handler = function()
+    popup._client_click_handler = guarded(function()
         if popup_instance and popup_instance.visible then M.hide() end
-    end
+    end)
     client.connect_signal("button::press", popup._client_click_handler)
 
     popup._screen_handlers = {}
@@ -747,6 +875,15 @@ end
 
 function M.hide()
     if not popup_instance or not popup_instance.visible then return end
+
+    -- safety net: stop any lingering drag grabber so closing the popup
+    -- can never leave mouse input intercepted
+    if capi.mousegrabber.isrunning and capi.mousegrabber.isrunning() then
+        capi.mousegrabber.stop()
+    end
+    drag_gen = drag_gen + 1
+    drag_client = nil
+    drag_source_tag = nil
 
     if popup_instance._escape_key then
         if root._remove_key then
@@ -784,27 +921,31 @@ end
 function M.init()
     ensure_popup()
 
-    -- redraw cells on any change that affects their appearance
-    tag.connect_signal("property::selected", refresh)
-    tag.connect_signal("property::clients", refresh)
-    client.connect_signal("property::geometry", refresh)
-    client.connect_signal("property::minimized", refresh)
-    client.connect_signal("property::hidden", refresh)
-    client.connect_signal("tagged", refresh)
-    client.connect_signal("untagged", refresh)
+    -- redraw cells on any change that affects their appearance.
+    -- all signal handlers use debounced_refresh so a burst of signals
+    -- (e.g. on restart when every client is re-managed) coalesces into
+    -- a single render pass instead of freezing the UI.
+    local guarded_refresh = guarded(debounced_refresh)
+    tag.connect_signal("property::selected", guarded_refresh)
+    tag.connect_signal("property::clients", guarded_refresh)
+    client.connect_signal("property::geometry", guarded_refresh)
+    client.connect_signal("property::minimized", guarded_refresh)
+    client.connect_signal("property::hidden", guarded_refresh)
+    client.connect_signal("tagged", guarded_refresh)
+    client.connect_signal("untagged", guarded_refresh)
     -- maximized/fullscreen/floating changes affect geometry but may not
     -- always emit property::geometry before the layout settles, so listen
     -- to these explicitly to catch maximized-window state changes
-    client.connect_signal("property::maximized", refresh)
-    client.connect_signal("property::maximized_horizontal", refresh)
-    client.connect_signal("property::maximized_vertical", refresh)
-    client.connect_signal("property::fullscreen", refresh)
-    client.connect_signal("property::floating", refresh)
+    client.connect_signal("property::maximized", guarded_refresh)
+    client.connect_signal("property::maximized_horizontal", guarded_refresh)
+    client.connect_signal("property::maximized_vertical", guarded_refresh)
+    client.connect_signal("property::fullscreen", guarded_refresh)
+    client.connect_signal("property::floating", guarded_refresh)
     -- focus changes affect stacking order in the cell rendering
-    client.connect_signal("focus", refresh)
-    client.connect_signal("unfocus", refresh)
+    client.connect_signal("focus", guarded_refresh)
+    client.connect_signal("unfocus", guarded_refresh)
     -- somewm emits this on tag view changes
-    screen.connect_signal("tag::history::update", refresh)
+    screen.connect_signal("tag::history::update", guarded_refresh)
 end
 
 -- pre-build the popup so the first open has no delay
