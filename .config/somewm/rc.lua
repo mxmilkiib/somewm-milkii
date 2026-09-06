@@ -252,6 +252,7 @@ require("plugins.shake_cursor").start()                                 -- shake
 require("somewm.layout_animation")                                      -- animated tiled-layout transitions (native frame clock)
 require("plugins.window_fx")                                            -- open fade, close shrink, focus dim, floating shadows
 require("plugins.power").start()                                        -- battery warnings and charger events via upower monitor
+local volume_osd = require("plugins.volume_osd")                        -- volume keys OSD (KDE-style bar)
 
 
 -- // MARK: -- shimmer configuration
@@ -1754,6 +1755,10 @@ local keys = keybindings.build({
     -- screen brightness control (brightnessctl + OSD)
     brightness_increase = brightness.increase,
     brightness_decrease = brightness.decrease,
+    -- volume control with OSD (wraps the vol-*-all scripts)
+    volume_increase = volume_osd.increase,
+    volume_decrease = volume_osd.decrease,
+    volume_toggle_mute = volume_osd.toggle_mute,
 })
 
 

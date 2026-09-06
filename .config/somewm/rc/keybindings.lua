@@ -475,9 +475,10 @@ function M.build(ctx)
   -- Volume and audio control keys
   local audio_keys = {
     {{modkey}, "p", function() if ctx.toggle_pavucontrol then ctx.toggle_pavucontrol() end end, "toggle pavucontrol", nil, "audio"},
-    {{}, "XF86AudioLowerVolume", "vol-dec-all-3.sh", "decrease volume", nil, "audio"},
-    {{}, "XF86AudioRaiseVolume", "vol-inc-all-3.sh", "increase volume", nil, "audio"},
-    {{}, "XF86AudioMute", "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle", "toggle mute", nil, "audio"}
+    -- old: raw shell strings; new: ctx functions that also show a volume OSD
+    {{}, "XF86AudioLowerVolume", ctx.volume_decrease or "vol-dec-all-3.sh", "decrease volume", nil, "audio"},
+    {{}, "XF86AudioRaiseVolume", ctx.volume_increase or "vol-inc-all-3.sh", "increase volume", nil, "audio"},
+    {{}, "XF86AudioMute", ctx.volume_toggle_mute or "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle", "toggle mute", nil, "audio"}
   }
   
   -- // MARK: DISPLAY
