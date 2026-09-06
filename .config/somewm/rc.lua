@@ -249,6 +249,8 @@ tag_pager.init()
 local brightness = require("plugins.brightness")                        -- screen brightness with OSD
 local solo_super = require("plugins.solo_super")                        -- tap Super alone to toggle the launcher
 require("plugins.shake_cursor").start()                                 -- shake the pointer to enlarge it briefly
+require("somewm.layout_animation")                                      -- animated tiled-layout transitions (native frame clock)
+require("plugins.window_fx")                                            -- open fade, close shrink, focus dim, floating shadows
 
 
 -- // MARK: -- shimmer configuration

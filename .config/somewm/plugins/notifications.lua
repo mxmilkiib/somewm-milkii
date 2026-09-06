@@ -34,9 +34,6 @@ local function scale_font(fontstr, scale)
 end
 local NOTIF_FONT = scale_font(beautiful.notification_font or beautiful.font, 1.4) or "Sans 14"
 
--- Shared animation state
-local active_anims = {}
-local anim_timer = nil
 
 -- Per-screen active notification boxes (for manual stacking)
 local screen_boxes = {}
@@ -167,41 +164,28 @@ end
 
 
 -- // MARK --animation
+-- old: a shared 60fps gears.timer stepped every active slide (see
+--      ensure_anim_timer in git history).
+-- new: somewm's native C frame clock via awesome.start_animation —
+--      vsync-paced ticks, easing in C, and a :cancel() handle.
 
-local function ensure_anim_timer()
-    if anim_timer then return end
-    anim_timer = gtimer {
-        timeout = 1 / ANIM_FPS,
-        call_now = false,
-        autostart = false,
-        callback = guarded(function()
-            local now = os.clock()
-            local remaining = {}
-            for _, anim in ipairs(active_anims) do
-                local elapsed = now - anim.start_time
-                local t = math.min(1, elapsed / anim.duration)
-                -- ease-out cubic
-                local eased = 1 - math.pow(1 - t, 3)
-                local y = anim.start_y + (anim.target_y - anim.start_y) * eased
-                if anim.popup and anim.popup.valid then
-                    anim.popup:geometry({ y = math.floor(y) })
-                end
-                if t < 1 then
-                    table.insert(remaining, anim)
-                else
-                    -- animation done: reflow to settle final stacking position
-                    if anim.entry and anim.entry.popup and anim.entry.popup.valid then
-                        anim.entry.animating = false
-                        reflow(anim.entry.screen)
-                    end
-                end
+local anim_count = 0
+
+local function slide_to(entry, popup, start_y, target_y)
+    anim_count = anim_count + 1
+    awesome.start_animation(SLIDE_DURATION, "ease-out-cubic",
+        function(progress)
+            if popup.valid then
+                popup:geometry({ y = math.floor(start_y + (target_y - start_y) * progress) })
             end
-            active_anims = remaining
-            if #active_anims == 0 then
-                anim_timer:stop()
+        end,
+        function()
+            anim_count = anim_count - 1
+            if entry and entry.popup and entry.popup.valid then
+                entry.animating = false
+                reflow(entry.screen)
             end
-        end),
-    }
+        end)
 end
 
 
@@ -580,16 +564,7 @@ function M.display(n)
                 popup:geometry({ y = math.floor(start_y) })
 
                 -- start slide-in animation (y only)
-                ensure_anim_timer()
-                table.insert(active_anims, {
-                    popup = popup,
-                    entry = entry,
-                    start_y = start_y,
-                    target_y = target_y,
-                    start_time = os.clock(),
-                    duration = SLIDE_DURATION,
-                })
-                anim_timer:start()
+                slide_to(entry, popup, start_y, target_y)
             end))
         end)
         if not ok then
@@ -629,9 +604,8 @@ M._debug = function()
             end
         end
     end
-    return string.format("boxes:%d anims:%d timer:%s | %s",
-        total_boxes, #active_anims, tostring(anim_timer and anim_timer.started or "nil"),
-        table.concat(info, " "))
+    return string.format("boxes:%d anims:%d | %s",
+        total_boxes, anim_count, table.concat(info, " "))
 end
 
 return M
