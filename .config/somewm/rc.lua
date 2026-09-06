@@ -253,6 +253,7 @@ require("somewm.layout_animation")                                      -- anima
 require("plugins.window_fx")                                            -- open fade, close shrink, focus dim, floating shadows
 require("plugins.power").start()                                        -- battery warnings and charger events via upower monitor
 local volume_osd = require("plugins.volume_osd")                        -- volume keys OSD (KDE-style bar)
+local media_popup = require("plugins.media_popup")                      -- KDE-style media popup with controls
 
 
 -- // MARK: -- shimmer configuration
@@ -2869,8 +2870,12 @@ awful.screen.connect_for_each_screen(function(s)
         resize = true,
         widget = wibox.widget.imagebox,
     }
+    -- old: left click ran playerctl play-pause directly
+    -- new: left click toggles the media popup (art, title, prev/play/next);
+    --      middle click keeps the quick play-pause
+    media_popup.attach(media_btn)
     media_btn:connect_signal("button::press", guarded(function(_, _, _, button)
-        if button == 1 then
+        if button == 2 then
             awful.spawn.with_shell("playerctl play-pause 2>/dev/null || true")
         end
     end))
