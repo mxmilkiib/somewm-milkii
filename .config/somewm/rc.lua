@@ -251,6 +251,7 @@ local solo_super = require("plugins.solo_super")                        -- tap S
 require("plugins.shake_cursor").start()                                 -- shake the pointer to enlarge it briefly
 require("somewm.layout_animation")                                      -- animated tiled-layout transitions (native frame clock)
 require("plugins.window_fx")                                            -- open fade, close shrink, focus dim, floating shadows
+require("plugins.power").start()                                        -- battery warnings and charger events via upower monitor
 
 
 -- // MARK: -- shimmer configuration

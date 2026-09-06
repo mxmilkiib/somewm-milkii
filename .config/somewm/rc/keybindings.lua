@@ -249,6 +249,7 @@ function M.build(ctx)
     {{modkey, altkey}, "Right", function() if ctx_has_function(ctx, "cycle_tags_with_clients") then ctx.cycle_tags_with_clients("next") end end,
       "view next tag with client", nil, "tag"},
     {{modkey}, "Escape", function() awful.tag.history.restore() end, "go back", nil, "tag"},
+    {{modkey, shiftkey}, "Escape", "/home/milkii/bin/rofi_power", "power menu (lock/suspend/reboot/off)", nil, "awesome"},
     {{modkey}, "j", function() awful.client.focus.byidx(1) end, "focus next client", nil, "client"},
     {{modkey}, "k", function() awful.client.focus.byidx(-1) end, "focus previous client", nil, "client"},
     {{modkey}, "Tab", function() awful.client.focus.history.previous() if client.focus then client.focus:raise() end end, "go back", nil, "client"}
