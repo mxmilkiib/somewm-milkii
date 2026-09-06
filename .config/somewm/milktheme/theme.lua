@@ -386,9 +386,12 @@ theme.notification_icon_size = 64
 
 -- Keep theme as the single source of truth
 -- theme.menu_height = 24
-theme.menu_height = dpi(20)
+-- old: dpi(20) — cramped rows, hard click targets
+theme.menu_height = dpi(26)
 -- theme.menu_width = 300
 theme.menu_width  = dpi(300)
+theme.menu_border_width = 1
+theme.menu_border_color = "#623997"
 
 
 -- menu_[bg|fg]_[normal|focus]

@@ -2059,6 +2059,15 @@ awesomesubmenu = {
     {"Quit", function() awesome.quit() end}
 }
 
+-- Power submenu: session actions that used to need a terminal
+powersubmenu = {
+    {"Lock", "swaylock -f"},
+    {"Suspend", "systemctl suspend"},
+    {"Hibernate", "systemctl hibernate"},
+    {"Reboot", "systemctl reboot"},
+    {"Power off", "systemctl poweroff"},
+}
+
 
 -- Build the main menu with the submenu, app launcher, and terminal entry
 mymainmenu = freedesktop.menu.build({
@@ -2067,6 +2076,7 @@ mymainmenu = freedesktop.menu.build({
         -- other triads can be put here
     },
     after = {
+        {"Power", powersubmenu},
         {"Terminal", terminal}
         -- other triads can be put here
     }
@@ -2082,10 +2092,32 @@ mymainmenu = freedesktop.menu.build({
 
 
 -- Create a launcher widget and a main menu
-mylauncher = awful.widget.launcher({
-    image = "/home/milkii/.config/somewm/milktheme/icons/awesome-logo.svg",
-    menu = mymainmenu
-})
+-- old: awful.widget.launcher opened the menu at the mouse position, so it
+--      appeared half over the wibar and at a different spot every time.
+-- new: plain imagebox that toggles the menu anchored just below the bar at
+--      the screen's left edge, with hover feedback on the icon background.
+mylauncher = wibox.widget {
+    {
+        {
+            image = "/home/milkii/.config/somewm/milktheme/icons/awesome-logo.svg",
+            resize = true,
+            widget = wibox.widget.imagebox,
+        },
+        margins = 2,
+        widget = wibox.container.margin,
+    },
+    bg = "transparent",
+    widget = wibox.container.background,
+}
+mylauncher:connect_signal("mouse::enter", guarded(function() mylauncher.bg = beautiful.bg_focus end))
+mylauncher:connect_signal("mouse::leave", guarded(function() mylauncher.bg = "transparent" end))
+mylauncher:connect_signal("button::press", guarded(function(_, _, _, button)
+    if button ~= 1 and button ~= 3 then return end
+    local s = mouse.screen
+    local bar_h = (s.mywibox and s.mywibox.valid and s.mywibox:geometry().height) or 32
+    mymainmenu:toggle({ coords = { x = s.geometry.x, y = s.geometry.y + bar_h } })
+end))
+awful.tooltip({ objects = { mylauncher }, text = "Applications" })
 
 
 -- local media_player = require("media-player")
