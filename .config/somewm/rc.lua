@@ -241,6 +241,7 @@ local tag_pager = require("plugins.tag_pager")                          -- tag-a
 tag_pager.init()
 local brightness = require("plugins.brightness")                        -- screen brightness with OSD
 local solo_super = require("plugins.solo_super")                        -- tap Super alone to toggle the launcher
+require("plugins.shake_cursor").start()                                 -- shake the pointer to enlarge it briefly
 
 
 -- // MARK: -- shimmer configuration
