@@ -2737,17 +2737,21 @@ awful.screen.connect_for_each_screen(function(s)
         awful.button({}, 4, function() brightness.increase() end),
         awful.button({}, 5, function() brightness.decrease() end)
     ))
+    local brightness_tooltip = awful.tooltip({ objects = { brightness_widget }, text = "Brightness" })
     -- poll brightness every 2 seconds for external changes
     local function update_brightness_widget()
         awful.spawn.easy_async("brightnessctl -m info", function(out)
             local pct = out and out:match(",(%d+)%%")
-            if pct then brightness_text.text = pct .. "%" end
+            if pct then
+                brightness_text.text = pct .. "%"
+                brightness_tooltip:set_text("Brightness: " .. pct .. "%")
+            end
         end)
     end
-    gears.timer.start_new(2, function()
+    gears.timer.start_new(2, guarded(function()
         update_brightness_widget()
         return true
-    end)
+    end))
     update_brightness_widget()
 
     -- battery widget: icon + percentage, reads /sys/class/power_supply/BAT0
@@ -2781,6 +2785,7 @@ awful.screen.connect_for_each_screen(function(s)
         left = 2, right = 2,
         widget = wibox.container.margin,
     }
+    local battery_tooltip = awful.tooltip({ objects = { battery_widget }, text = "Battery" })
     local function update_battery_widget()
         local cap_f = io.open("/sys/class/power_supply/BAT0/capacity", "r")
         local sts_f = io.open("/sys/class/power_supply/BAT0/status", "r")
@@ -2807,11 +2812,12 @@ awful.screen.connect_for_each_screen(function(s)
         end
         bat_icon:set_image(bat_icon_dir .. "battery-level-" .. suffix .. "-symbolic.svg")
         bat_text.text = pct .. "%"
+        battery_tooltip:set_text(string.format("Battery: %d%% (%s)", pct, status))
     end
-    gears.timer.start_new(5, function()
+    gears.timer.start_new(5, guarded(function()
         update_battery_widget()
         return true
-    end)
+    end))
     update_battery_widget()
 
     -- media launcher button (bluetooth/wifi/battery/clipboard handled by SNI tray applets)
@@ -2822,11 +2828,40 @@ awful.screen.connect_for_each_screen(function(s)
         resize = true,
         widget = wibox.widget.imagebox,
     }
-    media_btn:connect_signal("button::press", function(_, _, _, button)
+    media_btn:connect_signal("button::press", guarded(function(_, _, _, button)
         if button == 1 then
             awful.spawn.with_shell("playerctl play-pause 2>/dev/null || true")
         end
-    end)
+    end))
+    -- media tooltip: shows current track + status via playerctl
+    local media_tooltip = awful.tooltip({ objects = { media_btn }, text = "No player" })
+    local function update_media_tooltip()
+        awful.spawn.easy_async(
+            "bash -c 's=$(playerctl status 2>/dev/null); t=$(playerctl metadata --format \"{{title}} - {{artist}}\" 2>/dev/null); if [ -n \"$s\" ]; then echo \"$s | $t\"; fi'",
+            function(out)
+                local text = out and out:gsub("^%s+", ""):gsub("%s+$", "")
+                media_tooltip:set_text(text ~= "" and text or "No player")
+            end
+        )
+    end
+    media_btn:connect_signal("mouse::enter", guarded(update_media_tooltip))
+    gears.timer.start_new(5, guarded(function()
+        update_media_tooltip()
+        return true
+    end))
+    update_media_tooltip()
+
+    -- tooltips for remaining systray-area widgets
+    awful.tooltip({ objects = { notification_toggle_widget }, text = "Notifications (click to toggle center)" })
+    local clock_tooltip = awful.tooltip({ objects = { textclock_clr } })
+    local function update_clock_tooltip()
+        clock_tooltip:set_text(os.date("%A, %B %d, %Y"))
+    end
+    update_clock_tooltip()
+    gears.timer.start_new(60, guarded(function()
+        update_clock_tooltip()
+        return true
+    end))
 
     -- previous notification center widget creation: none
 
@@ -2855,11 +2890,11 @@ awful.screen.connect_for_each_screen(function(s)
             wibox.container.margin(brightness_widget, 2, 2, 0, 0),
             -- battery indicator (native widget; no SNI battery tray applet available)
             wibox.container.margin(battery_widget, 2, 2, 0, 0),
+            -- media launcher button (playerctl play-pause on click; tooltip shows current track)
+            wibox.container.margin(media_btn, 2, 0, 0, 0),
             -- add 3px horizontal + 1px top padding to systray and center vertically (only on primary screen)
             -- SNI tray applets (nm-applet, blueman-applet) appear here
             s == screen.primary and wibox.container.margin({ mysystray, valign = "center", widget = wibox.container.place }, 4, 0, 0, 0) or wibox.container.margin({ mysystray, valign = "center", widget = wibox.container.place }, 1, 0, 0, 0),
-            -- launcher buttons for CLI-only tools
-            wibox.container.margin(media_btn, 2, 0, 0, 0),
             -- previous notification center widgets: none
             wibox.container.margin(notification_toggle_widget, 1, 0, 0, 0),
             wibox.container.margin(textclock_clr, 0, 0, 0, 0)
