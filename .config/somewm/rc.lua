@@ -2474,6 +2474,101 @@ awful.screen.connect_for_each_screen(function(s)
 
     -- create an imagebox widget which will contain an icon indicating which layout we're using
     s.mylayoutbox = awful.widget.layoutbox(s)
+    -- descriptive labels for the layout popup tooltips; falls back to the
+    -- layout's internal name for unmapped/custom layouts
+    local layout_labels = {
+        vstack = "Vertical stack",
+        threefifths = "Three-fifths",
+        magnifier = "Magnifier",
+        centerwork = "Centered work area",
+        termfair = "Terminal fair",
+        fair = "Fair",
+        max = "Maximized",
+        carousel = "Carousel",
+        spiral = "Spiral",
+        tile = "Tile",
+        treetile = "Tree tile",
+        equalarea = "Equal area",
+        mstab = "Master/slave tabbed",
+        deck = "Deck",
+        cascade = "Cascade",
+    }
+    local layout_strip = wibox.layout.fixed.horizontal()
+    layout_strip.spacing = 2
+    local layout_popup = awful.popup {
+        widget = wibox.widget {
+            layout_strip,
+            margins = 4,
+            widget = wibox.container.margin,
+        },
+        bg = "#000000",
+        border_width = 1,
+        border_color = "#000000",
+        ontop = true,
+        visible = false,
+        shape = function(cr, w, h) gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3)) end,
+    }
+    local layout_hide_timer = gears.timer { timeout = 0.20, single_shot = true, callback = guarded(function()
+        layout_popup.visible = false
+    end) }
+    local function show_layout_strip()
+        local current = awful.layout.get(s)
+        layout_strip:reset()
+        for _, layout in ipairs(awful.layout.layouts) do
+            local selected_layout = layout
+            local icon = wibox.widget {
+                image = beautiful["layout_" .. (selected_layout.name or "")],
+                forced_width = 28,
+                forced_height = 28,
+                resize = true,
+                widget = wibox.widget.imagebox,
+            }
+            local item = wibox.widget {
+                icon,
+                border_width = selected_layout == current and (beautiful.bar_edge_width or 3) or 0,
+                border_color = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700",
+                bg = selected_layout == current and "#62399755" or "#000000",
+                widget = wibox.container.background,
+            }
+            item:buttons(gears.table.join(awful.button({}, 1, function()
+                awful.layout.set(selected_layout, s.selected_tag)
+                layout_popup.visible = false
+            end)))
+            awful.tooltip { objects = { item }, text = layout_labels[selected_layout.name] or selected_layout.name or "layout" }
+            layout_strip:add(item)
+        end
+        layout_hide_timer:stop()
+        -- force the popup to compute its real width/height before placement.
+        -- on the first open the popup still has its construction-time 1x1
+        -- geometry; awful.placement.next_to centers based on that 1px width,
+        -- shifting the popup right. the delayed apply_size from
+        -- main_widget:layout only resizes without repositioning (widget_geo
+        -- is nil and placement is nil, so set_position returns early), so the
+        -- wrong position sticks. _apply_size_now fits the widget synchronously
+        -- so placement sees the correct dimensions.
+        layout_popup:_apply_size_now(false)
+        awful.placement.next_to(layout_popup, {
+            preferred_positions = "bottom",
+            preferred_anchors = "middle",
+            geometry = mouse.current_widget_geometry,
+        })
+        layout_popup.visible = true
+    end
+
+    -- wheel-changing the layout also refreshes the strip's selection
+    -- highlight so it always shows the actually selected layout
+    local function refresh_layout_selection()
+        if not layout_popup.visible then return end
+        show_layout_strip()
+    end
+    local layout_changed = function(t)
+        if t and t.screen == s then refresh_layout_selection() end
+    end
+    tag.connect_signal("property::layout", guarded(layout_changed))
+    s.mylayoutbox:connect_signal("mouse::enter", guarded(show_layout_strip))
+    s.mylayoutbox:connect_signal("mouse::leave", guarded(function() layout_hide_timer:again() end))
+    layout_popup:connect_signal("mouse::enter", guarded(function() layout_hide_timer:stop() end))
+    layout_popup:connect_signal("mouse::leave", guarded(function() layout_hide_timer:again() end))
     s.mylayoutbox:buttons(gears.table.join(
                            awful.button({ }, 1, function () awful.layout.inc(-1) end),
                            awful.button({ }, 3, function () awful.layout.inc( 1) end),
@@ -2523,8 +2618,8 @@ awful.screen.connect_for_each_screen(function(s)
                                    orig_hide(self)
                                end
                            end),
-                           awful.button({ }, 4, function () awful.layout.inc( 1) end),
-                           awful.button({ }, 5, function () awful.layout.inc(-1) end),
+                           awful.button({ }, 4, function () awful.layout.inc(-1) end),
+                           awful.button({ }, 5, function () awful.layout.inc( 1) end),
                            awful.button({ modkey }, 4, function () rotate_screens("right") end),
                            awful.button({ modkey }, 5, function () rotate_screens("left") end)))
     
