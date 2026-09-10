@@ -4037,7 +4037,7 @@ ruled.client.connect_signal("request::rules", guarded(function()
         id = "floating_extended",
         rule_any = {
             instance = {
-                "DTA", "copyq", "pinentry", "ncmpcpp", "firefox"
+                "DTA", "copyq", "pinentry", "ncmpcpp"
             },
             class = {
                 -- system
@@ -4051,7 +4051,7 @@ ruled.client.connect_signal("request::rules", guarded(function()
                 "vokoscreenNG", "SimpleScreenRecorder", "Indicator-sound-switcher5",
                 -- graphics
                 "Gpick", "Kruler", "emulsion", "Sxiv", "qimgv", "qView", "Image Lounge",
-                "Image Menu", "spectacle", "flameshot",
+                "Image Menu", "spectacle",
                 -- privacy
                  "Tor Browser",
                 -- misc
@@ -4061,7 +4061,7 @@ ruled.client.connect_signal("request::rules", guarded(function()
             },
             name = {
                 "Event Tester", "Choose an application", "File operations", "Blender Preferences",
-                "Options", "Tree View Menu", "menu", "Mozilla Firefox"
+                "Options", "Tree View Menu", "menu"
             },
             role = {
                 "AlarmWindow", "ConfigManager", "pop-up", "page-info", "TfrmFileOp",
