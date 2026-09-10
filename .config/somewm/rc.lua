@@ -308,6 +308,7 @@ require("plugins.power").start()                                        -- power
 require("plugins.systray_dedup").start()                                 -- unregister SNI icons orphaned by hot-reloads (duplicate Steam tray icons)
 local volume_osd = require("plugins.volume_osd")                        -- volume keys OSD (KDE-style bar)
 local media_popup = require("plugins.media_popup")                      -- KDE-style media popup with controls
+local system_widgets = require("plugins.system_widgets")                -- volume, keyboard layout, show desktop
 
 
 -- // MARK: -- shimmer configuration
@@ -3160,19 +3161,29 @@ awful.screen.connect_for_each_screen(function(s)
     end))
     update_media_tooltip()
 
+    local volume_widget = system_widgets.volume {
+        open = toggle_pavucontrol,
+        up = volume_osd.increase,
+        down = volume_osd.decrease,
+        mute = volume_osd.toggle_mute,
+    }
+    local keyboard_widget = system_widgets.keyboard()
+    local show_desktop_widget = system_widgets.show_desktop(s)
+    local resource_widgets = system_widgets.resources()
+
     -- tooltips for remaining systray-area widgets
-    awful.tooltip({ objects = { notification_toggle_widget }, text = "Notifications (click to toggle center)" })
-    local clock_tooltip = awful.tooltip({ objects = { textclock_clr } })
-    local function update_clock_tooltip()
-        clock_tooltip:set_text(os.date("%A, %B %d, %Y"))
-    end
-    update_clock_tooltip()
-    gears.timer.start_new(60, guarded(function()
-        update_clock_tooltip()
-        return true
-    end))
+    awful.tooltip({ objects = { notification_toggle_widget }, text = "Notifications" })
 
     -- previous notification center widget creation: none
+
+    local function centered_bar(widget, left, right, top)
+        return wibox.container.margin({
+            widget,
+            halign = "center",
+            valign = "center",
+            widget = wibox.container.place,
+        }, left or 0, right or 0, top or 0, 0)
+    end
 
     s.mywibox:setup {
         layout = wibox.layout.align.horizontal,
@@ -3180,33 +3191,37 @@ awful.screen.connect_for_each_screen(function(s)
             layout = wibox.layout.fixed.horizontal,
             mylauncher,
             wibox.container.background(
-                wibox.container.margin(tag_pager_widget, 1, 1, 0, 0),
+                wibox.container.margin(tag_pager_widget, 1, 0, 0, 0),
                 "#000000"
             ),
+            {
+                { s.mylayoutbox, margins = { right = 1 }, widget = wibox.container.margin },
+                bg = "#000000",
+                border_width = beautiful.bar_edge_width or 3,
+                border_color = (beautiful.main_purple and beautiful.main_purple.base) or "#623997",
+                widget = wibox.container.background,
+            },
             s.mypromptbox,
         },
-        { -- middle widgets (tasklist expands to fill space)
-            layout = wibox.layout.align.horizontal,
-            wibox.container.background(
-                wibox.container.margin(s.mylayoutbox, 0, 1, 0, 0),
-                "#000000"
-            ), -- should be to the left of tasklist
-            s.mytasklist, -- this will expand to fill available space
-        },
+        s.mytasklist, -- middle: expands to fill available space
         { -- right widgets
             layout = wibox.layout.fixed.horizontal,
-            -- brightness indicator (scroll to adjust)
-            wibox.container.margin(brightness_widget, 2, 2, 0, 0),
-            -- battery indicator (native widget; no SNI battery tray applet available)
-            wibox.container.margin(battery_widget, 2, 2, 0, 0),
-            -- media launcher button (playerctl play-pause on click; tooltip shows current track)
-            wibox.container.margin(media_btn, 2, 0, 0, 0),
-            -- add 3px horizontal + 1px top padding to systray and center vertically (only on primary screen)
-            -- SNI tray applets (nm-applet, blueman-applet) appear here
-            s == screen.primary and wibox.container.margin({ mysystray, valign = "center", widget = wibox.container.place }, 4, 0, 0, 0) or wibox.container.margin({ mysystray, valign = "center", widget = wibox.container.place }, 1, 0, 0, 0),
-            -- previous notification center widgets: none
-            wibox.container.margin(notification_toggle_widget, 1, 0, 0, 0),
-            wibox.container.margin(textclock_clr, 0, 0, 0, 0)
+            centered_bar(resource_widgets.cpu, 11, 4, 2),
+            centered_bar(resource_widgets.gpu, 4, 4, 2),
+            centered_bar(resource_widgets.ram, 4, 2, 2),
+            centered_bar(battery_widget, 2, 2, 1),
+            centered_bar(brightness_widget, 2, 2, 2),
+            centered_bar(volume_widget, 2, 2, 2),
+            centered_bar(media_btn, 3, 0, 2),
+            centered_bar(keyboard_widget, 1, 0, 1),
+            -- notifications sit immediately to the left of the SNI tray
+            centered_bar(notification_toggle_widget, 0, 0, 2),
+            centered_bar(mysystray, s == screen.primary and 2 or 1, 1, 1),
+            -- full-height clock: a plain margin lets fixed.horizontal stretch
+            -- the purple background to bar height (centered_bar's place would
+            -- shrink it to text height); 8px left margin spaces it from the tray
+            wibox.container.margin(textclock_clr, 8, 0, 0, 0),
+            centered_bar(show_desktop_widget, 0, 0),
         },
     }
 

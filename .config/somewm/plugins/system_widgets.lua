@@ -1,0 +1,205 @@
+-- plugins/system_widgets.lua
+-- Compact DE-style bar widgets not supplied by SNI: volume, keyboard layout,
+-- and show desktop. Volume polling is shared by every screen.
+
+local awful = require("awful")
+local wibox = require("wibox")
+local gears = require("gears")
+local beautiful = require("beautiful")
+local keyboardlayout = require("awful.widget.keyboardlayout")
+local guarded = require("error_guard")
+
+local dpi = beautiful.xresources.apply_dpi
+local icon_dir = "/usr/share/icons/Adwaita/symbolic/"
+local M = {}
+local volume_views = {}
+local volume_timer
+local resource_views = {}
+local resource_timer
+local previous_cpu_total, previous_cpu_idle
+local stat_glyphs = { cpu = "󰍛", gpu = "󰢮", ram = "󰘚" }
+
+local function centered(widget)
+    return wibox.widget { widget, halign = "center", valign = "center", widget = wibox.container.place }
+end
+
+local function apply_volume(pct, muted)
+    local icon = muted and "audio-volume-muted-symbolic.svg"
+        or pct < 34 and "audio-volume-low-symbolic.svg"
+        or pct < 67 and "audio-volume-medium-symbolic.svg"
+        or "audio-volume-high-symbolic.svg"
+    local color = muted and "#777777"
+        or pct < 34 and ((beautiful.main_purple and beautiful.main_purple.base) or "#623997")
+        or pct < 67 and ((beautiful.main_gold and beautiful.main_gold.muted) or "#FFD70088")
+        or ((beautiful.main_gold and beautiful.main_gold.base) or "#FFD700")
+    for _, view in ipairs(volume_views) do
+        view.icon.image = gears.color.recolor_image(icon_dir .. "status/" .. icon, color)
+        view.text.text = muted and "mute" or (pct .. "%")
+    end
+end
+
+local function update_volume()
+    awful.spawn.easy_async({ "wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@" }, guarded(function(out)
+        local value = tonumber(out:match("Volume:%s*([%d%.]+)"))
+        if not value then return end
+        apply_volume(math.floor(value * 100 + 0.5), out:find("MUTED") ~= nil)
+    end))
+end
+
+awesome.connect_signal("volume::updated", guarded(apply_volume))
+
+local function ensure_volume_timer()
+    if volume_timer then return end
+    volume_timer = gears.timer { timeout = 2, autostart = true, call_now = true, callback = guarded(update_volume) }
+    awesome.connect_signal("exit", guarded(function() volume_timer:stop() end))
+end
+
+function M.volume(args)
+    args = args or {}
+    local icon = wibox.widget { forced_width = dpi(14), forced_height = dpi(14), resize = true, widget = wibox.widget.imagebox }
+    local text = wibox.widget { text = "--%", valign = "center", widget = wibox.widget.textbox }
+    local content = wibox.widget {
+        icon,
+        { text, left = dpi(2), widget = wibox.container.margin },
+        spacing = dpi(2),
+        layout = wibox.layout.fixed.horizontal,
+    }
+    local widget = centered(content)
+    volume_views[#volume_views + 1] = { icon = icon, text = text }
+    widget:buttons(gears.table.join(
+        awful.button({}, 1, args.open or function() awful.spawn("pavucontrol") end),
+        awful.button({}, 2, args.mute or function() awful.spawn({ "wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle" }) end),
+        awful.button({}, 4, args.up),
+        awful.button({}, 5, args.down)
+    ))
+    ensure_volume_timer()
+    return widget
+end
+
+local function read_cpu()
+    local file = io.open("/proc/stat", "r")
+    if not file then return nil end
+    local line = file:read("*l")
+    file:close()
+    local values = {}
+    for value in line:gmatch("%d+") do values[#values + 1] = tonumber(value) end
+    local total = 0
+    for _, value in ipairs(values) do total = total + value end
+    local idle = (values[4] or 0) + (values[5] or 0)
+    local usage
+    if previous_cpu_total and total > previous_cpu_total then
+        usage = 100 * (1 - (idle - previous_cpu_idle) / (total - previous_cpu_total))
+    end
+    previous_cpu_total, previous_cpu_idle = total, idle
+    return usage
+end
+
+local function read_ram()
+    local file = io.open("/proc/meminfo", "r")
+    if not file then return nil end
+    local total, available
+    for line in file:lines() do
+        total = total or tonumber(line:match("^MemTotal:%s+(%d+)"))
+        available = available or tonumber(line:match("^MemAvailable:%s+(%d+)"))
+        if total and available then break end
+    end
+    file:close()
+    if not total or not available then return nil end
+    return 100 * (total - available) / total, (total - available) / 1048576, total / 1048576
+end
+
+local function read_gpu()
+    for card = 0, 7 do
+        local file = io.open("/sys/class/drm/card" .. card .. "/device/gpu_busy_percent", "r")
+        if file then
+            local usage = tonumber(file:read("*l"))
+            file:close()
+            if usage then return usage end
+        end
+    end
+end
+
+local function update_resources()
+    local cpu = read_cpu()
+    local ram, used, total = read_ram()
+    local gpu = read_gpu()
+    for _, view in ipairs(resource_views) do
+        if cpu then view.cpu.text = string.format("%s %d%%", stat_glyphs.cpu, math.floor(cpu + 0.5)) end
+        if gpu then view.gpu.text = string.format("%s %d%%", stat_glyphs.gpu, math.floor(gpu + 0.5)) end
+        if ram then view.ram.text = string.format("%s %d%%", stat_glyphs.ram, math.floor(ram + 0.5)) end
+        if used and total then view.ram_tip:set_text(string.format("Memory: %.1f / %.1f GiB", used, total)) end
+    end
+end
+
+local function monitor_label(text)
+    return centered(wibox.widget {
+        text = text,
+        valign = "center",
+        widget = wibox.widget.textbox,
+    })
+end
+
+function M.resources()
+    local cpu, gpu, ram = monitor_label(stat_glyphs.cpu .. " --%"), monitor_label(stat_glyphs.gpu .. " --%"), monitor_label(stat_glyphs.ram .. " --%")
+    local view = {
+        cpu = cpu:get_children()[1],
+        gpu = gpu:get_children()[1],
+        ram = ram:get_children()[1],
+        ram_tip = awful.tooltip { objects = { ram }, text = "Memory" },
+    }
+    awful.tooltip { objects = { cpu }, text = "Total CPU usage" }
+    awful.tooltip { objects = { gpu }, text = "GPU busy" }
+    resource_views[#resource_views + 1] = view
+    if not resource_timer then
+        resource_timer = gears.timer { timeout = 2, autostart = true, call_now = true, callback = guarded(update_resources) }
+        awesome.connect_signal("exit", guarded(function() resource_timer:stop() end))
+    end
+    return { cpu = cpu, gpu = gpu, ram = ram }
+end
+
+function M.keyboard()
+    local label = keyboardlayout.new()
+    local widget = centered(wibox.widget {
+        label,
+        left = dpi(4), right = dpi(4),
+        widget = wibox.container.margin,
+    })
+    awful.tooltip { objects = { widget }, text = "Keyboard layout" }
+    return widget
+end
+
+function M.show_desktop(s)
+    local icon = wibox.widget {
+        image = icon_dir .. "devices/video-display-symbolic.svg",
+        forced_width = dpi(14), forced_height = dpi(14), resize = true,
+        widget = wibox.widget.imagebox,
+    }
+    local widget = wibox.widget {
+        { icon, halign = "center", valign = "center", widget = wibox.container.place },
+        forced_width = dpi(32),
+        forced_height = dpi(32),
+        bg = "#000000",
+        widget = wibox.container.background,
+    }
+    local hidden = setmetatable({}, { __mode = "k" })
+    local showing = false
+    widget:buttons(gears.table.join(awful.button({}, 1, function()
+        if showing then
+            for c in pairs(hidden) do if c.valid then c.minimized = false end end
+            hidden = setmetatable({}, { __mode = "k" })
+            showing = false
+            return
+        end
+        for _, c in ipairs(client.get(s)) do
+            if c.valid and not c.minimized and c:isvisible() then
+                hidden[c] = true
+                c.minimized = true
+            end
+        end
+        showing = true
+    end)))
+    awful.tooltip { objects = { widget }, text = "Show desktop" }
+    return widget
+end
+
+return M
