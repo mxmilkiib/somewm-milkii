@@ -371,7 +371,7 @@ function M.build(ctx)
   local notification_center_keys = {}
   if ctx_has_function(ctx, "toggle_notification_center") then
     -- previous binding: Mod+F10 (conflicted with launcher), then Mod+Alt+F10
-    table.insert(notification_center_keys, {{modkey, altkey}, "n", ctx.toggle_notification_center, "toggle notification center", nil, "notification"})
+    table.insert(notification_center_keys, {{modkey, altkey}, "n", ctx.toggle_notification_center, "toggle notifications", nil, "notification"})
     if ctx_has_function(ctx, "clear_notification_history") then
       table.insert(notification_center_keys, {{modkey, altkey, shiftkey}, "n", ctx.clear_notification_history, "clear notification history", nil, "notification"})
     end
@@ -806,9 +806,11 @@ function M.build(ctx)
   --      somewm's C keygrabber ignores the callback's return value, so it
   --      swallowed every key while running and locked text input.
   -- new: plugins/solo_super.lua. No keygrabber: awful.key on Super_L
-  --      press/release plus the class-level key "press" signal (fires for
-  --      every bound key, so any chord disarms the tap). rc.lua appends its
-  --      keys via awful.keyboard.append_global_keybindings.
+  --      press/release to arm/fire the tap. rc.lua appends its keys via
+  --      awful.keyboard.append_global_keybindings, then calls
+  --      solo_super.watch(globalkeys, clientkeys) to hook disarm() onto
+  --      every real keybinding's own "press" signal - the class-level
+  --      "key" signal this used to rely on never reliably fired.
   -- old code preserved below for reference:
   --
   -- // MARK -- chord dispatch

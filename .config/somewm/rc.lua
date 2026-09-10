@@ -1792,15 +1792,23 @@ end))
 --      and the delivered "`" both resolve to keysym 0x60 in objects/key.c.
 -- new: no keygrabber at all. Mod4+grave is a plain awful.key in
 --      rc/keybindings.lua, and solo-Super lives in plugins/solo_super.lua
---      using awful.key press/release plus the class-level key "press"
---      signal to detect chords. The old grabber block is preserved in
---      rc.lua.20260906_0929.bak.
+--      using awful.key press/release to arm/fire the tap.
+-- old (chord detection): relied on the "key" capi class's class-level
+--      "press" signal, on the theory that it fires for every bound key.
+--      In practice the launcher kept appearing after ordinary chorded
+--      binds (Mod4+j, etc.) - it was never actually disarming the tap.
+-- new (chord detection): solo_super.watch(globalkeys, clientkeys) below
+--      hooks disarm() directly onto the "press" signal of every real
+--      keybinding's own underlying key object - the exact same mechanism
+--      that already reliably fires that keybinding's own action.
+--      The old grabber block is preserved in rc.lua.20260906_0929.bak.
 awful.keyboard.append_global_keybindings(solo_super.keys({
     modkey = modkey,
     launcher = "/home/milkii/bin/rofi_nice",
     process = "rofi",   -- tapping Super again closes an open rofi
-    hold = 0.6,
+    hold = 0.25,
 }))
+solo_super.watch(globalkeys, clientkeys)
 
 
 

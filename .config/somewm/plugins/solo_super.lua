@@ -10,14 +10,29 @@
 -- keygrabber.run/stop (bling, collision, awful.keygrabber) fights over it.
 --
 -- How it works instead:
---   * awful.key on Super_L press arms the tap and starts a hold timer.
+--   * awful.key on Super_L press arms the tap and starts a hold timer. Only
+--     the initial press arms; keyboard-repeat events are ignored, otherwise
+--     they would reset the hold timer forever and a held Super would never
+--     disarm (so the launcher would fire on release and interrupt any
+--     Super+drag in progress).
 --   * awful.key on Super_L release fires the launcher if the tap is still
 --     armed. The compositor updates xkb state after emitting the key event,
 --     so the press arrives with no modifiers and the release with Mod4 set;
 --     both variants are bound to be safe either way.
---   * key.connect_signal("press") is a class-level signal that fires for
---     every bound key, so any chord (Super+Z, ...) disarms the tap.
+--   * M.disarm() is wired directly onto the "press" signal of every real
+--     keybinding's underlying key object (see M.watch below), so any chord
+--     (Super+Z, ...) disarms the tap.
 --   * client button presses and the hold timer also disarm it.
+--
+-- old: relied on `key.connect_signal("press", ...)`, the class-level signal
+--      on the "key" capi class, on the theory that it fires for every bound
+--      key regardless of which specific key object triggered it. In
+--      practice the launcher kept popping up after ordinary chorded binds
+--      (Mod4+j, Mod4+Shift+..., etc.) - the tap was never getting disarmed.
+--      Rather than keep guessing at the class-signal semantics, M.watch
+--      below hooks disarm onto the exact same per-instance "press" signal
+--      that already reliably drives every keybinding's own action, so it
+--      cannot silently fail to fire.
 --
 -- The launcher command is a shell toggle, so tapping Super while the
 -- launcher is already open closes it again.
@@ -25,13 +40,45 @@
 local awful = require("awful")
 local gears = require("gears")
 local guarded = require("error_guard")
+local naughty = require("naughty")
 
 local M = {}
 
-local state = { armed = false }
+-- TEMPORARY DIAGNOSTIC: remove once chord-disarm is confirmed working.
+local DEBUG = false
+
+local state = { armed = false, pressed = false }
 
 local function disarm()
     state.armed = false
+end
+
+M.disarm = disarm
+
+--- Wire disarm() onto the "press" signal of every underlying key object in
+-- one or more keybinding tables (as returned by keybindings.build: an array
+-- of awful.key groups, each itself an array of raw capi.key sub-objects).
+-- Call this with the real globalkeys/clientkeys tables once they're built,
+-- so any bound key press - i.e. any chord involving Super - disarms the tap.
+-- @tparam table ... One or more keybinding tables (globalkeys, clientkeys).
+function M.watch(...)
+    local watched = 0
+    for _, keys_table in ipairs({ ... }) do
+        for _, group in ipairs(keys_table or {}) do
+            for _, subkey in ipairs(group) do
+                watched = watched + 1
+                subkey:connect_signal("press", guarded(function()
+                    if DEBUG and state.armed then
+                        naughty.notification { message = "solo_super: chord disarm fired (key=" .. tostring(subkey.key) .. ")", timeout = 2 }
+                    end
+                    disarm()
+                end))
+            end
+        end
+    end
+    if DEBUG then
+        naughty.notification { message = "solo_super: watching " .. watched .. " key objects for chord detection", timeout = 3 }
+    end
 end
 
 --- Build the Super_L key objects.
@@ -48,18 +95,39 @@ function M.keys(opts)
         cmd = string.format("pgrep -x %s >/dev/null && pkill -x %s || %s", opts.process, opts.process, cmd)
     end
 
+    local function on_hold()
+        if DEBUG and state.armed then
+            naughty.notification { message = "solo_super: hold timer fired, disarming (held > " .. tostring(opts.hold or 0.6) .. "s)", timeout = 2 }
+        end
+        disarm()
+    end
+
     local hold_timer = gears.timer {
         timeout = opts.hold or 0.6,
         single_shot = true,
-        callback = guarded(disarm),
+        callback = guarded(on_hold),
     }
 
+    -- old: armed on every press and restarted the hold timer each time.
+    --      Super_L keyboard-repeat events call on_press repeatedly while the
+    --      key is held, so hold_timer:again() reset the 0.6s countdown
+    --      forever - the timer never fired, state.armed stayed true, and the
+    --      launcher spawned on release even after a long hold (which also
+    --      interrupted any Super+drag in progress by grabbing the pointer).
+    --      Guarding on state.armed alone is not enough: once the hold timer
+    --      disarms, the next repeat sees armed == false and re-arms, looping.
+    -- new: a separate state.pressed flag tracks the physical key and is only
+    --      cleared on release, so repeat events never re-arm after the hold
+    --      threshold expires. The timer then reliably disarms a held Super.
     local function on_press()
+        if state.pressed then return end
+        state.pressed = true
         state.armed = true
         hold_timer:again()
     end
 
     local function on_release()
+        state.pressed = false
         hold_timer:stop()
         if state.armed then
             awful.spawn.with_shell(cmd, false)
@@ -67,10 +135,9 @@ function M.keys(opts)
         disarm()
     end
 
-    -- any other bound key while Super is held makes it a chord, not a tap
-    key.connect_signal("press", guarded(function(k)
-        if state.armed and k.key ~= "Super_L" then disarm() end
-    end))
+    -- chord detection: see M.watch, called from rc.lua once globalkeys and
+    -- clientkeys are built, which wires disarm() onto every real
+    -- keybinding's own "press" signal
     client.connect_signal("button::press", guarded(disarm))
 
     local desc = { description = "launcher (tap Super alone)", group = "launcher" }
