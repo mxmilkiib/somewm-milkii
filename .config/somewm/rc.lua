@@ -202,6 +202,59 @@ end
 local menubar = require("menubar")      -- Menu bar library
 local hotkeys_popup = require("awful.hotkeys_popup")  -- Hotkey help system
 
+-- somewm's C keygrabber consumes every key event while active. awful.menu
+-- normally owns one for keyboard navigation, but a missed hide leaves client
+-- text input blocked. All menus in this config remain fully mouse-operable
+-- while releasing that global grab immediately.
+local menu_module = require("awful.menu")
+local menu_show_with_grabber = menu_module.show
+menu_module.show = function(self, args)
+    if keygrabber.isrunning() then keygrabber.stop() end
+    menu_show_with_grabber(self, args)
+    if keygrabber.isrunning() then keygrabber.stop(self._keygrabber) end
+end
+menu_module.hide = function(self)
+    for i = 1, #self.items do self:item_leave(i) end
+    if self.active_child then
+        self.active_child:hide()
+        self.active_child = nil
+    end
+    self.sel = nil
+    self.wibox.visible = false
+end
+
+-- The hotkey overlay uses the same grabber solely for paging/dismissal.
+-- Keep click-to-dismiss, but never let the overlay intercept application text.
+-- Scale the popup 1.25x: widget.show_help routes through get_default_widget(),
+-- which lazily builds widget.new() with no args, so _load_widget_settings
+-- sets width/height to dpi(1200)/dpi(800). Pre-build the default widget with
+-- 1.25x dimensions before awful.hotkeys_popup.keys (required below) calls
+-- add_hotkeys, which would otherwise create the default at standard size.
+-- _load_widget_settings reads args.width/args.height from the constructor
+-- closure, so the constructor is the only injection point.
+local _hk_dpi = beautiful.xresources.apply_dpi
+-- scale the Pango font size in a string like "Hack Nerd Font Mono 9" by 1.25
+local function _hk_scale_font(fs)
+    local name, size = fs:match("^(.-)%s+(%d+)$")
+    if name and size then
+        return string.format("%s %d", name, math.floor(tonumber(size) * 1.25))
+    end
+    return fs
+end
+hotkeys_popup.widget.default_widget = hotkeys_popup.widget.new({
+    width = _hk_dpi(1200) * 1.25,
+    height = _hk_dpi(800) * 1.25,
+    font = _hk_scale_font(beautiful.hotkeys_font or "Monospace Bold 9"),
+    description_font = _hk_scale_font(beautiful.hotkeys_description_font or "Monospace 8"),
+})
+local show_hotkeys_with_grabber = hotkeys_popup.show_help
+hotkeys_popup.show_help = function(...)
+    -- keep the keygrabber running so the popup can handle Esc (hide),
+    -- PageUp/PageDown (page navigation), and Mod4+s (hide on any key).
+    -- the widget's hide() stops the keygrabber itself.
+    return show_hotkeys_with_grabber(...)
+end
+
 local lgi = require("lgi")
 local cairo = lgi.cairo
 
@@ -2084,35 +2137,73 @@ textclock_clr:set_border_width(0)
 -- // MARK: --menu
 
 
+local menu_icon_dir = "/usr/share/icons/Adwaita/symbolic/"
+local menu_action_icons = {
+    help = menu_icon_dir .. "actions/help-about-symbolic.svg",
+    edit = menu_icon_dir .. "actions/document-edit-symbolic.svg",
+    lock = menu_icon_dir .. "status/system-lock-screen-symbolic.svg",
+    suspend = menu_icon_dir .. "actions/media-playback-pause-symbolic.svg",
+    reboot = menu_icon_dir .. "actions/system-reboot-symbolic.svg",
+    power = menu_icon_dir .. "actions/system-shutdown-symbolic.svg",
+    logout = menu_icon_dir .. "actions/system-log-out-rtl-symbolic.svg",
+    terminal = menu_icon_dir .. "legacy/utilities-terminal-symbolic.svg",
+}
+local session_id = os.getenv("XDG_SESSION_ID")
+
 -- Create the awesome submenu contents
 awesomesubmenu = {
-    -- {"Hotkeys", function() hotkeys_popup.show_help(nil, awful.screen.focused()) end},
-    {"Hotkeys", function() hotkeys_popup.show_help(nil, mouse.screen) end},
-    {"Manual", terminal .. " -e man awesome"},
-    {"Edit config", editor_cmd .. " " .. awesome.conffile},
-    {"Restart", function() (ui_scale.debounced_restart or awesome.restart)() end},
-    {"Quit", function() awesome.quit() end}
+    {"Hotkeys", function() hotkeys_popup.show_help(nil, mouse.screen) end, menu_action_icons.help},
+    {"Manual", terminal .. " -e man somewm", menu_action_icons.help},
+    {"Edit config", editor_cmd .. " " .. awesome.conffile, menu_action_icons.edit},
+    {"Restart", function() (ui_scale.debounced_restart or awesome.restart)() end, menu_action_icons.reboot},
+    {"Quit", function() awesome.quit() end, menu_action_icons.logout},
 }
 
 -- Power submenu: session actions that used to need a terminal
 powersubmenu = {
-    {"Lock", "swaylock -f"},
-    {"Suspend", "systemctl suspend"},
-    {"Hibernate", "systemctl hibernate"},
-    {"Reboot", "systemctl reboot"},
-    {"Power off", "systemctl poweroff"},
+    {"Lock", "swaylock -f", menu_action_icons.lock},
+    {"Suspend", "systemctl suspend", menu_action_icons.suspend},
+    {"Hibernate", "systemctl hibernate", menu_action_icons.suspend},
+    {"Logout", session_id and ("loginctl terminate-session " .. session_id) or "loginctl terminate-user $USER", menu_action_icons.logout},
+    {"Reboot", "systemctl reboot", menu_action_icons.reboot},
+    {"Power off", "systemctl poweroff", menu_action_icons.power},
 }
 
+
+-- Root category icons: Adwaita ships no applications-* icons and hicolor's
+-- category dirs are empty, so menubar's icon lookup resolves nothing for the
+-- menu root items. Point each category at AdwaitaLegacy's set; absolute paths
+-- short-circuit the lookup, and a missing file falls back to the default icon.
+local menu_gen = require("menubar.menu_gen")
+local category_icon_dir = "/usr/share/icons/AdwaitaLegacy/48x48/legacy/"
+local category_icon_files = {
+    multimedia  = "applications-multimedia.png",
+    development = "applications-development.png",
+    education   = "applications-science.png",
+    games       = "applications-games.png",
+    graphics    = "applications-graphics.png",
+    office      = "applications-office.png",
+    internet    = "applications-internet.png",
+    science     = "applications-science.png",
+    settings    = "applications-utilities.png",
+    tools       = "applications-system.png",
+    utility     = "applications-accessories.png",
+}
+for key, file in pairs(category_icon_files) do
+    if menu_gen.all_categories[key] then
+        menu_gen.all_categories[key].icon_name = category_icon_dir .. file
+    end
+end
 
 -- Build the main menu with the submenu, app launcher, and terminal entry
 mymainmenu = freedesktop.menu.build({
     before = {
-        {"Awesome", awesomesubmenu, beautiful.awesome_icon}
+        {"somewm", awesomesubmenu, beautiful.awesome_icon}
         -- other triads can be put here
     },
     after = {
-        {"Power", powersubmenu},
-        {"Terminal", terminal}
+        {"Power", powersubmenu, menu_action_icons.power},
+        {"Terminal", terminal, menu_action_icons.terminal}
         -- other triads can be put here
     }
 })
@@ -2131,26 +2222,57 @@ mymainmenu = freedesktop.menu.build({
 --      appeared half over the wibar and at a different spot every time.
 -- new: plain imagebox that toggles the menu anchored just below the bar at
 --      the screen's left edge, with hover feedback on the icon background.
+local menu_icon_normal = "/home/milkii/.config/somewm/milktheme/icons/somewm-logo.svg"
+local menu_icon_hover = "/home/milkii/.config/somewm/milktheme/icons/somewm-logo-hover.svg"
+local menu_icon = wibox.widget {
+    image = menu_icon_normal,
+    forced_width = 32,
+    forced_height = 32,
+    resize = true,
+    widget = wibox.widget.imagebox,
+}
 mylauncher = wibox.widget {
-    {
-        {
-            image = "/home/milkii/.config/somewm/milktheme/icons/awesome-logo.svg",
-            resize = true,
-            widget = wibox.widget.imagebox,
-        },
-        margins = 2,
-        widget = wibox.container.margin,
-    },
-    bg = "transparent",
+    menu_icon,
+    forced_width = 32,
+    forced_height = 32,
     widget = wibox.container.background,
 }
-mylauncher:connect_signal("mouse::enter", guarded(function() mylauncher.bg = beautiful.bg_focus end))
-mylauncher:connect_signal("mouse::leave", guarded(function() mylauncher.bg = "transparent" end))
+mylauncher:connect_signal("mouse::enter", guarded(function() menu_icon.image = menu_icon_hover end))
+mylauncher:connect_signal("mouse::leave", guarded(function() menu_icon.image = menu_icon_normal end))
 mylauncher:connect_signal("button::press", guarded(function(_, _, _, button)
     if button ~= 1 and button ~= 3 then return end
     local s = mouse.screen
     local bar_h = (s.mywibox and s.mywibox.valid and s.mywibox:geometry().height) or 32
-    mymainmenu:toggle({ coords = { x = s.geometry.x, y = s.geometry.y + bar_h } })
+    mymainmenu:toggle({ coords = { x = s.geometry.x + (beautiful.menu_border_width or 0), y = s.geometry.y + bar_h } })
+    -- awful.menu only dismisses on clicks within its own screen; close on a
+    -- click anywhere (any screen, any wibar, any client, the root) while it
+    -- is visible
+    if mymainmenu.wibox and mymainmenu.wibox.visible then
+        local function close_menu()
+            if mymainmenu.wibox and mymainmenu.wibox.visible then mymainmenu:hide() end
+        end
+        client.connect_signal("button::press", close_menu)
+        local bar_handlers = {}
+        for sc in screen do
+            -- skip the current screen's wibox: its button::press fires
+            -- before the launcher's, so close_menu would hide the menu
+            -- before toggle re-opens it. the launcher handles its own bar.
+            if sc.mywibox and sc ~= s then
+                local handler = close_menu
+                sc.mywibox:connect_signal("button::press", handler)
+                bar_handlers[#bar_handlers + 1] = { wibox = sc.mywibox, handler = handler }
+            end
+        end
+        local orig_hide = mymainmenu.hide
+        mymainmenu.hide = function(self)
+            client.disconnect_signal("button::press", close_menu)
+            for _, entry in ipairs(bar_handlers) do
+                entry.wibox:disconnect_signal("button::press", entry.handler)
+            end
+            mymainmenu.hide = orig_hide
+            orig_hide(self)
+        end
+    end
 end))
 awful.tooltip({ objects = { mylauncher }, text = "Applications" })
 
@@ -3667,12 +3789,15 @@ end))
 -- new: use awful.mouse.append_global_mousebindings (modern API)
 awful.mouse.append_global_mousebindings({
     awful.button({ }, 1, function()
+        -- root click anywhere (including other screens) closes an open menu
         if mymainmenu and mymainmenu.wibox and mymainmenu.wibox.visible then
             mymainmenu:hide()
         end
     end),
     awful.button({ }, 3, function()
-        if mymainmenu then
+        if mymainmenu and mymainmenu.wibox and mymainmenu.wibox.visible then
+            mymainmenu:hide()
+        elseif mymainmenu then
             mymainmenu:toggle()
         end
     end),
