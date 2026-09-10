@@ -2054,16 +2054,29 @@ local mytextclock = wibox.widget.textclock()
 local month_calendar = awful.widget.calendar_popup.month({
     start_sunday = false,
     week_numbers = true,
+    font = "Hack Nerd Font 11",
+    spacing = 2,
+    margin = 8,
 })
-month_calendar:attach(mytextclock, "tr", { on_hover = false })
-mytextclock.format = "%a %b %d %H:%M"
+mytextclock:buttons(gears.table.join(
+    awful.button({}, 1, function()
+        local clicked_screen = mouse.screen or awful.screen.focused()
+        month_calendar:call_calendar(0, "tr", clicked_screen)
+        month_calendar.visible = not month_calendar.visible
+    end),
+    awful.button({}, 4, function() month_calendar:call_calendar(-1, "tr", mouse.screen or awful.screen.focused()) end),
+    awful.button({}, 5, function() month_calendar:call_calendar(1, "tr", mouse.screen or awful.screen.focused()) end)
+))
+mytextclock.format = "<span foreground='#ffffff' background='#623997'>%a %b %d %H:%M</span>"
 mytextclock.font = "Hack Nerd Font 11"
 
 local textclock_clr = wibox.container.background()
 -- add at least 4px of purple padding on both sides
 textclock_clr:set_widget(wibox.container.margin(mytextclock, CLOCK_MARGIN, CLOCK_MARGIN, 0, 0))
 textclock_clr:set_fg("#ffffff")
-textclock_clr:set_bg("#623997")
+textclock_clr:set_bg((beautiful.main_purple and beautiful.main_purple.base) or "#623997")
+-- solid purple from the bar's top edge to its bottom edge: no border,
+-- the background fills the whole widget height
 textclock_clr:set_border_width(0)
 
 
