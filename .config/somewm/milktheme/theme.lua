@@ -105,7 +105,7 @@ theme.font          = scale_font("Hack Nerd Font Mono 9")
 -- theme.font          = "Hack regular 12"
 
 -- Menu font (kept with typography for consistency)
-theme.menu_font   = theme.font
+theme.menu_font   = scale_font("Hack Nerd Font Mono 13")
 
 -- Hotkeys popup styling
 -- theme.hotkeys_font = "Hack Nerd Font 12"
@@ -125,12 +125,12 @@ theme.hotkeys_modifiers_fg = "#dddddd"
 --  - add subtle border and spacing between groups
 --  - use focused bg for key label chips with contrasting text
 theme.hotkeys_description_font = scale_font("Sans 9")
-theme.hotkeys_bg = theme.bg_normal
-theme.hotkeys_fg = theme.fg_normal
+theme.hotkeys_bg = "#000000"
+theme.hotkeys_fg = "#ffffff"
 theme.hotkeys_border_width = dpi(1)
 theme.hotkeys_border_color = "#6c6c6c"
 theme.hotkeys_group_margin = dpi(8)
-theme.hotkeys_label_bg = theme.bg_focus
+theme.hotkeys_label_bg = "#623997"
 theme.hotkeys_label_fg = "#000000"  -- black foreground for section titles
 
 
@@ -160,6 +160,22 @@ theme.main_purple = {
     normalstart = "#62399788", 
     normalend = "#62399722"
 }
+
+theme.main_gold = {
+    base = "#FFD700",
+    focus = "#FFD700CC",
+    muted = "#FFD70088",
+}
+theme.bar_edge_width = dpi(3)
+
+-- Calendar cells are approximately one 32px bar-icon square each.
+theme.calendar_style = {
+    padding = dpi(7),
+    border_width = dpi(1),
+    border_color = theme.main_purple.base,
+}
+theme.calendar_focus_bg_color = theme.main_gold.base
+theme.calendar_focus_fg_color = "#000000"
 
 -- theme.main_orange   = "#976239"  -- complementary orange: same saturation/lightness as purple
 theme.main_orange   = "#f97316"
@@ -194,9 +210,9 @@ theme.icon_size = 16
 
 theme.taglist_bg_normal = "#000"
 theme.taglist_fg_normal = "#ffffff"
-theme.taglist_fg_focus = "#ffd700"
+theme.taglist_fg_focus = theme.main_gold.base
 theme.taglist_fg_occupied = "#cccccc"
-theme.taglist_hover_bg = "#b8860b"
+theme.taglist_hover_bg = theme.main_gold.muted
 theme.taglist_hover_fg = "#000000"
 
 -- systray icon size (override or inherit)
@@ -229,7 +245,7 @@ theme.collision_focus_bg_center = "#00ff00"
 
 theme.border_normal = "#535d6c"
 -- theme.border_normal = "#ffffff"
-theme.border_focus  = "#535d6c"
+theme.border_focus  = theme.main_gold.focus
 theme.border_marked = "#91231c"
 
 theme.border_width  = 1
@@ -241,7 +257,7 @@ theme.useless_gap   = 2
 -- theme.useless_gap   = dpi(3)
 
 -- theme.border_radius = 2
-theme.border_radius = dpi(3)
+theme.border_radius = dpi(2)
 
 
 
@@ -361,7 +377,7 @@ theme.titlebar_bg_normal = {
 -- notification_[border_color|border_width|shape|opacity]
 
 -- System tray and notification colors
-theme.notification_bg = "#FFD700"    -- gold background
+theme.notification_bg = theme.main_gold.base    -- gold background
 theme.notification_fg = "#000000"    -- black text
 theme.notification_icon_size = 64
 
@@ -387,11 +403,11 @@ theme.notification_icon_size = 64
 -- Keep theme as the single source of truth
 -- theme.menu_height = 24
 -- old: dpi(20) — cramped rows, hard click targets
-theme.menu_height = dpi(26)
+theme.menu_height = dpi(32)
 -- theme.menu_width = 300
-theme.menu_width  = dpi(300)
-theme.menu_border_width = 1
-theme.menu_border_color = "#623997"
+theme.menu_width  = dpi(340)
+theme.menu_border_width = theme.bar_edge_width
+theme.menu_border_color = theme.main_purple.base
 
 
 -- menu_[bg|fg]_[normal|focus]
@@ -412,14 +428,12 @@ theme.menu_submenu_icon = themes_path.."default/submenu.png"
 -- ╚═╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
 
 
-theme.awesome_icon = theme_assets.awesome_icon(
-    theme.menu_height, theme.bg_focus, theme.fg_focus
-)
+theme.awesome_icon = theme_dir .. "icons/somewm-logo.svg"
 
 
 -- Define the icon theme for application icons. If not set then the icons
 -- from /usr/share/icons and /usr/share/icons/hicolor will be used.
-theme.icon_theme = nil
+theme.icon_theme = "Adwaita"
 
 
 
