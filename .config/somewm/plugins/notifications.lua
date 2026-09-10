@@ -13,6 +13,7 @@ local gtimer = require("gears.timer")
 local gdebug = require("gears.debug")
 local guarded = require("error_guard")
 local dpi = beautiful.xresources.apply_dpi
+local COLOR_GOLD = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
 
 local M = {}
 
@@ -21,18 +22,12 @@ local SLIDE_DURATION = 0.3
 local NOTIF_GAP = dpi(4)
 local NOTIF_TOP_MARGIN = dpi(4)
 local NOTIF_RIGHT_GAP = dpi(6)
-local ANIM_FPS = 60
 local MAX_NOTIF_WIDTH = dpi(800)
 local DEFAULT_TIMEOUT = 50
 
--- Scale a font string's trailing size by `scale` (e.g. "Sans 10" -> "Sans 14")
-local function scale_font(fontstr, scale)
-    if not fontstr then return nil end
-    return fontstr:gsub("(%d+)%s*$", function(n)
-        return tostring(math.floor(tonumber(n) * scale))
-    end)
-end
-local NOTIF_FONT = scale_font(beautiful.notification_font or beautiful.font, 1.4) or "Sans 14"
+-- The title is differentiated by bold markup + gold background, not font size.
+-- Use the theme font directly; the theme already handles DPI + ui_scale scaling.
+local NOTIF_FONT = beautiful.notification_font or beautiful.font or "Sans 10"
 
 
 -- Per-screen active notification boxes (for manual stacking)
@@ -197,40 +192,17 @@ local function build_widget(n, s)
         resize = true,
         halign = "center",
         valign = "center",
-        forced_width = dpi(48),
-        forced_height = dpi(48),
+        forced_width = dpi(36),
+        forced_height = dpi(36),
         widget = wibox.widget.imagebox,
     }
 
     -- title: black bold text on gold background, in its own container
     local title_widget = wibox.widget {
         markup = "<span foreground='#000'><b>" .. (n.title or "") .. "</b></span>",
-        font = scale_font(beautiful.notification_font or beautiful.font, 1.8) or "Sans 18",
+        font = NOTIF_FONT,
         align = "left",
         widget = wibox.widget.textbox,
-    }
-
-    -- close button: black circle with yellow X, right-aligned in the gold title bar
-    local close_button = wibox.widget {
-        {
-            {
-                markup = "<span foreground='#FFD700'><b>x</b></span>",
-                font = "Monospace 8",
-                widget = wibox.widget.textbox,
-            },
-            halign = "center",
-            valign = "center",
-            widget = wibox.container.place,
-        },
-        forced_width = dpi(20),
-        forced_height = dpi(20),
-        shape = function(cr, w, h)
-            gears.shape.circle(cr, w, h)
-        end,
-        border_width = dpi(1),
-        border_color = "#000000",
-        bg = "#000000",
-        widget = wibox.container.background,
     }
 
     -- countdown text (kept as reference for timer updates)
@@ -255,7 +227,7 @@ local function build_widget(n, s)
         value = 100,
         thickness = dpi(2),
         rounded_edge = true,
-        bg = "transparent",
+        start_angle = 2 * math.pi - math.pi / 2,
         colors = { beautiful.main_purple and beautiful.main_purple.base or "#623997" },
     }
 
@@ -263,18 +235,18 @@ local function build_widget(n, s)
         {
             {
                 title_widget,
+                nil,
                 timeout_arc,
-                close_button,
                 expand = "none",
                 layout = wibox.layout.align.horizontal,
             },
             left = dpi(12),
             right = dpi(8),
-            top = dpi(6),
-            bottom = dpi(6),
+            top = dpi(2),
+            bottom = dpi(2),
             widget = wibox.container.margin,
         },
-        bg = "#FFD700",
+        bg = COLOR_GOLD,
         widget = wibox.container.background,
     }
 
@@ -313,7 +285,7 @@ local function build_widget(n, s)
                 widget = wibox.container.background,
                 bg = "#ffffff22",
                 shape = function(cr, w, h)
-                    gears.shape.rounded_rect(cr, w, h, dpi(3))
+                    gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3))
                 end,
                 buttons = {
                     awful.button({}, 1, function()
@@ -381,32 +353,39 @@ local function build_widget(n, s)
         widget = wibox.container.constraint,
     }
 
-    return widget, timeout_arc, countdown_text, close_button
+    -- live-update title/message so in-flight OSD notifications (volume,
+    -- brightness) that mutate n.message and emit property::message actually
+    -- refresh the displayed bar instead of freezing on the first value
+    n:connect_signal("property::message", guarded(function()
+        message_widget:set_markup(n.message or n.text or "")
+    end))
+    n:connect_signal("property::text", guarded(function()
+        message_widget:set_markup(n.message or n.text or "")
+    end))
+    n:connect_signal("property::title", guarded(function()
+        title_widget:set_markup("<span foreground='#000'><b>" .. (n.title or "") .. "</b></span>")
+    end))
+
+    return widget, timeout_arc, countdown_text
 end
 
 
 -- // MARK --display
 
--- pick the screen with the largest pixel area (typically the external monitor)
-local function pick_largest_screen()
-    local best, best_area = nil, 0
-    for scr in screen do
-        if scr.valid then
-            local g = scr.geometry
-            local area = g.width * g.height
-            if area > best_area then
-                best, best_area = scr, area
-            end
-        end
-    end
-    return best or screen.primary or awful.screen.focused()
+-- pick the screen the mouse cursor is on (falls back to focused, then primary)
+local function pick_cursor_screen()
+    local s = mouse.screen
+    if s and s.valid then return s end
+    s = awful.screen.focused()
+    if s and s.valid then return s end
+    return screen.primary
 end
 
 function M.display(n)
-    local s = pick_largest_screen()
+    local s = pick_cursor_screen()
     if not s or not s.valid then return end
 
-    local widget, timeout_arc, countdown_text, close_button = build_widget(n, s)
+    local widget, timeout_arc, countdown_text = build_widget(n, s)
 
     local popup = awful.popup {
         widget = widget,
@@ -418,7 +397,7 @@ function M.display(n)
         fg = "#ffffff",
         border_width = 0,
         shape = function(cr, w, h)
-            gears.shape.rounded_rect(cr, w, h, dpi(4))
+            gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3))
         end,
         maximum_width = MAX_NOTIF_WIDTH,
     }
@@ -484,13 +463,6 @@ function M.display(n)
             end),
         }
     end
-
-    -- close button click in the title bar
-    close_button:buttons(gtable.join(
-        awful.button({}, 1, function()
-            n:destroy(naughty.notification_closed_reason.dismissed_by_user)
-        end)
-    ))
 
     -- hover to pause timeout
     popup:connect_signal("mouse::enter", guarded(function()
