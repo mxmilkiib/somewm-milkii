@@ -252,6 +252,7 @@ require("plugins.shake_cursor").start()                                 -- KDE S
 require("somewm.layout_animation")                                      -- animated tiled-layout transitions (native frame clock)
 require("plugins.window_fx")                                            -- open fade, close shrink, focus dim, floating shadows
 require("plugins.power").start()                                        -- power mgmt: battery, profiles, idle dim/lock/suspend, lid
+require("plugins.systray_dedup").start()                                 -- unregister SNI icons orphaned by hot-reloads (duplicate Steam tray icons)
 local volume_osd = require("plugins.volume_osd")                        -- volume keys OSD (KDE-style bar)
 local media_popup = require("plugins.media_popup")                      -- KDE-style media popup with controls
 
