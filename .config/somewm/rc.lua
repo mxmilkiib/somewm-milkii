@@ -2762,8 +2762,9 @@ awful.screen.connect_for_each_screen(function(s)
     local tag_pager_widget = tag_pager.create_pager_widget(s, 32)
 
     -- brightness widget: icon + percentage, scroll to adjust
+    local brightness_icon_path = "/usr/share/icons/Adwaita/symbolic/status/display-brightness-symbolic.svg"
     local brightness_icon = wibox.widget {
-        image = "/usr/share/icons/Adwaita/symbolic/status/display-brightness-symbolic.svg",
+        image = brightness_icon_path,
         forced_width = 14,
         forced_height = 14,
         resize = true,
@@ -2793,16 +2794,20 @@ awful.screen.connect_for_each_screen(function(s)
         awful.button({}, 4, function() brightness.increase() end),
         awful.button({}, 5, function() brightness.decrease() end)
     ))
-    local brightness_tooltip = awful.tooltip({ objects = { brightness_widget }, text = "Brightness" })
+    local function apply_brightness(pct)
+        local color = pct < 34 and ((beautiful.main_purple and beautiful.main_purple.base) or "#623997")
+            or pct < 67 and ((beautiful.main_gold and beautiful.main_gold.muted) or "#FFD70088")
+            or ((beautiful.main_gold and beautiful.main_gold.base) or "#FFD700")
+        brightness_text.text = pct .. "%"
+        brightness_icon.image = gears.color.recolor_image(brightness_icon_path, color)
+    end
+    awesome.connect_signal("brightness::updated", guarded(apply_brightness))
     -- poll brightness every 2 seconds for external changes
     local function update_brightness_widget()
-        awful.spawn.easy_async("brightnessctl -m info", function(out)
+        awful.spawn.easy_async("brightnessctl -m info", guarded(function(out)
             local pct = out and out:match(",(%d+)%%")
-            if pct then
-                brightness_text.text = pct .. "%"
-                brightness_tooltip:set_text("Brightness: " .. pct .. "%")
-            end
-        end)
+            if pct then apply_brightness(tonumber(pct)) end
+        end))
     end
     gears.timer.start_new(2, guarded(function()
         update_brightness_widget()
