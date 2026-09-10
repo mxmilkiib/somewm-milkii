@@ -251,7 +251,7 @@ local solo_super = require("plugins.solo_super")                        -- tap S
 require("plugins.shake_cursor").start()                                 -- KDE Shake Cursor: shake the pointer to enlarge it briefly
 require("somewm.layout_animation")                                      -- animated tiled-layout transitions (native frame clock)
 require("plugins.window_fx")                                            -- open fade, close shrink, focus dim, floating shadows
-require("plugins.power").start()                                        -- battery warnings and charger events via upower monitor
+require("plugins.power").start()                                        -- power mgmt: battery, profiles, idle dim/lock/suspend, lid
 local volume_osd = require("plugins.volume_osd")                        -- volume keys OSD (KDE-style bar)
 local media_popup = require("plugins.media_popup")                      -- KDE-style media popup with controls
 
@@ -4271,9 +4271,11 @@ end))
 -- PolicyKit authentication agent (polkit-kde-agent works standalone outside Plasma)
 awful.spawn.with_shell("pgrep -u $USER -f polkit-kde-authentication-agent-1 > /dev/null || /usr/lib/polkit-kde-authentication-agent-1")
 
--- Idle and lock management (swayidle: lock after 300s, dpms off after 600s)
--- awful.spawn.with_shell("pgrep -u $USER -x swayidle > /dev/null || swayidle -w before-sleep 'swaylock -f' timeout 300 'swaylock -f' timeout 600 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --off {}' resume 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --on {}'")
-awful.spawn.with_shell("pgrep -u $USER -x swayidle > /dev/null || swayidle -w before-sleep 'swaylock -f' timeout 600 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --off {}' resume 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --on {}'")
+-- Idle and lock management is now owned by plugins/power.lua: swayidle is
+-- launched there with a dim -> lock -> suspend chain whose timeouts adapt to
+-- AC/battery. Old inline launch kept commented for reference (note: it also
+-- used `.[].name` but wlopm -j's field is `output`, so DPMS-off never fired).
+-- awful.spawn.with_shell("pgrep -u $USER -x swayidle > /dev/null || swayidle -w before-sleep 'swaylock -f' timeout 600 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --off {}' resume 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --on {}'")
 
 -- Night light (wlsunset: 3500K at night)
 awful.spawn.with_shell("pgrep -u $USER -x wlsunset > /dev/null || wlsunset -T 6500 -t 3500")
