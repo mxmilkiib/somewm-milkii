@@ -70,8 +70,10 @@ local xresources = get_xresources()
 local dpi = xresources and xresources.apply_dpi or function(v) return v end
 
 -- colors: prefer theme, fall back to constants matching the rest of the config
-local COLOR_GOLD   = beautiful.taglist_fg_focus or "#ffd700"
+local COLOR_GOLD   = (beautiful.main_gold and beautiful.main_gold.base) or beautiful.taglist_fg_focus or "#FFD700"
 local COLOR_PURPLE = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
+local BORDER_WIDTH = beautiful.bar_edge_width or dpi(3)
+local PAGER_EDGE_WIDTH = math.max(1, BORDER_WIDTH - dpi(1))
 local COLOR_FG     = beautiful.taglist_fg_normal or "#ffffff"
 local COLOR_BG     = beautiful.taglist_bg_normal or "#000000"
 local COLOR_OCC    = beautiful.taglist_fg_occupied or "#cccccc"
@@ -385,10 +387,11 @@ local function render_cell_surface(width, height, t)
         end
     end
 
-    -- border: purple (2px) for selected, gold for viewed, black for the rest
+    -- selected tag uses purple; additional viewed tags use gold.
+    local border_width = (is_selected or is_viewed) and PAGER_EDGE_WIDTH or 1
     cr:set_source_rgba(hex_to_rgba(is_selected and COLOR_PURPLE or (is_viewed and COLOR_GOLD or COLOR_BG), 1))
-    cr:set_line_width((is_selected or is_viewed) and 2 or 1)
-    cr:rectangle(0.5, 0.5, width - 1, height - 1)
+    cr:set_line_width(border_width)
+    cr:rectangle(border_width / 2, border_width / 2, width - border_width, height - border_width)
     cr:stroke()
 
     -- tag name (first token, e.g. "1", "0", "-", "=") top-left
@@ -452,25 +455,31 @@ local DRAG_THRESHOLD = 5
 -- find which cell the mouse is over by checking each cell's screen geometry
 -- via the wibar's widget hierarchy
 local function find_cell_under_mouse(mx, my)
-    local wb = mouse.current_wibox
-    if not wb then return nil end
-
-    -- find_widgets expects coordinates relative to the wibox drawable
-    local wgeo = wb:geometry()
-    local lx = mx - wgeo.x
-    local ly = my - wgeo.y
-
-    local hits = wb:find_widgets(lx, ly)
-    if not hits then return nil end
-
-    for _, hit in ipairs(hits) do
-        for _, entry in ipairs(cells) do
-            if hit.widget == entry.imagebox and entry.tag and entry.tag.valid then
-                return entry.tag
+    -- mouse.current_wibox becomes nil while mousegrabber owns the pointer,
+    -- so inspect every visible bar directly using global coordinates.
+    for s in screen do
+        local wb = s.mywibox
+        if wb and wb.valid and wb.visible then
+            local geo = wb:geometry()
+            if mx >= geo.x and mx < geo.x + geo.width
+                and my >= geo.y and my < geo.y + geo.height
+            then
+                local hits = wb:find_widgets(mx - geo.x, my - geo.y) or {}
+                for _, hit in ipairs(hits) do
+                    for _, entry in ipairs(cells) do
+                        if hit.widget == entry.imagebox and entry.tag and entry.tag.valid then
+                            return entry.tag, entry.imagebox
+                        end
+                    end
+                end
             end
         end
     end
     return nil
+end
+
+function M.tag_at_coords(x, y)
+    return find_cell_under_mouse(x, y)
 end
 
 
@@ -550,20 +559,38 @@ local function start_drag(c, source_tag, start_x, start_y)
                         -- first and the pager renders it correctly.
                         local src_screen = source_tag and source_tag.valid and source_tag.screen
                         if src_screen and src_screen.valid then
+                            -- arrange_done gates the two paths (arrange signal
+                            -- vs 0.1s fallback timer) so view_only runs exactly
+                            -- once. arrange_handler is the guarded wrapper itself
+                            -- (NOT guarded(raw_fn)) so disconnect_signal matches
+                            -- the exact object connect_signal registered; a
+                            -- previous version connected guarded(arrange_handler)
+                            -- but disconnected the raw arrange_handler, leaving
+                            -- the wrapper connected forever. every later arrange
+                            -- then re-ran view_only with the stale target_tag,
+                            -- which snapped the view back after any tag switch and,
+                            -- on a second drag, paired two stale wrappers into an
+                            -- arrange<->view_only infinite loop that froze the
+                            -- compositor and pinned the cursor.
+                            local arrange_done = false
                             local arrange_handler
-                            arrange_handler = function()
+                            arrange_handler = guarded(function()
+                                if arrange_done then return end
+                                arrange_done = true
                                 src_screen:disconnect_signal("arrange", arrange_handler)
                                 if target_tag and target_tag.valid then
                                     target_tag:view_only()
                                 end
                                 debounced_refresh()
-                            end
-                            src_screen:connect_signal("arrange", guarded(arrange_handler))
+                            end)
+                            src_screen:connect_signal("arrange", arrange_handler)
                             -- safety fallback in case arrange never fires
                             gears.timer {
                                 timeout = 0.1,
                                 single_shot = true,
                                 callback = guarded(function()
+                                    if arrange_done then return end
+                                    arrange_done = true
                                     src_screen:disconnect_signal("arrange", arrange_handler)
                                     if target_tag and target_tag.valid then
                                         target_tag:view_only()
@@ -702,7 +729,11 @@ local refresh_pending = false
 local REFRESH_DELAY = 1 / 60  -- one frame; fast enough to feel immediate
 
 debounced_refresh = function()
-    if refresh_pending then return end
+    -- proper debounce: always reset the timer so the refresh fires
+    -- REFRESH_DELAY after the LAST signal. the previous guard
+    -- (if refresh_pending then return end) dropped later signals,
+    -- so screen::arrange (which fires after layout reflow) was lost
+    -- and the pager rendered stale client geometry.
     refresh_pending = true
     if not refresh_timer then
         refresh_timer = gears.timer {
@@ -743,7 +774,7 @@ local function build_detail_tile(c, t)
     local ntags = #(c:tags() or {})
     local badge = ntags > 1 and string.format("  x%d", ntags) or ""
     local badge_w = wibox.widget {
-        markup = "<span fgcolor='" .. COLOR_GOLD .. "' size='small'>" .. badge .. "</span>",
+        markup = "<span foreground='" .. COLOR_GOLD .. "' size='small'>" .. badge .. "</span>",
         widget = wibox.widget.textbox,
     }
     local inner = wibox.widget {
@@ -781,9 +812,9 @@ local function build_detail_body(tag)
     local per_row = math.max(1, math.ceil(math.sqrt(#clients)))
 
     local header = wibox.widget {
-        markup = "<span fgcolor='" .. COLOR_GOLD .. "'><b>"
+        markup = "<span foreground='" .. COLOR_GOLD .. "'><b>"
             .. gstring.xml_escape(tag.name)
-            .. "</b></span>  <span fgcolor='" .. COLOR_OCC .. "'>"
+            .. "</b></span>  <span foreground='" .. COLOR_OCC .. "'>"
             .. gstring.xml_escape((tag.layout and tag.layout.name) or "?")
             .. "</span>",
         align  = "center",
@@ -946,6 +977,13 @@ function M.init()
     client.connect_signal("unfocus", guarded_refresh)
     -- somewm emits this on tag view changes
     screen.connect_signal("tag::history::update", guarded_refresh)
+    -- screen::arrange fires after the layout has updated client geometries.
+    -- without this, a debounced refresh from tagged/untagged can fire before
+    -- the layout's timer.delayed_call runs, rendering cells with stale
+    -- geometry (e.g. a remaining client still at half-screen after its
+    -- neighbour was dragged to another tag). the arrange signal guarantees a
+    -- refresh after geometries have settled.
+    screen.connect_signal("arrange", guarded_refresh)
 end
 
 -- pre-build the popup so the first open has no delay

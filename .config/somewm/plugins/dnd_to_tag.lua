@@ -50,6 +50,7 @@
 local awful = require("awful")
 local gears = require("gears")
 local beautiful = require("beautiful")
+local tag_pager = require("plugins.tag_pager")
 local mouse = mouse
 local mousegrabber = mousegrabber
 
@@ -291,52 +292,13 @@ function M.update_hover_from_mouse()
         return
     end
 
-    local found_tag = nil
-    local found_widget = nil
-
-    -- calculate tag based on known 23px tag width
-    for s in screen do
-        if s.mywibox and s.mywibox.visible then
-            local wibox_geo = s.mywibox:geometry()
-            if mc.x >= wibox_geo.x and mc.x <= wibox_geo.x + wibox_geo.width and
-               mc.y >= wibox_geo.y and mc.y <= wibox_geo.y + wibox_geo.height then
-                
-                if s.tags and #s.tags > 0 then
-                    local tag_width = 23  -- exact width from user feedback
-                    local taglist_start_x = wibox_geo.x + 32  -- launcher + spacing
-                    local taglist_end_x = taglist_start_x + (#s.tags * tag_width)
-                    
-                    if mc.x >= taglist_start_x and mc.x <= taglist_end_x then
-                        local rel_x = mc.x - taglist_start_x
-                        local idx = math.floor(rel_x / tag_width) + 1
-                        if idx >= 1 and idx <= #s.tags then
-                            found_tag = s.tags[idx]
-                        end
-                    end
-                end
-            end
+    local found_tag, found_widget = tag_pager.tag_at_coords(mc.x, mc.y)
+    if found_tag ~= M.hovered_tag then
+        if found_tag then
+            M.set_hover(found_tag, found_widget)
+        else
+            M.clear_hover()
         end
-        if found_tag then break end
-    end
-
-    -- always either set hover or clear it
-    if found_tag then
-        -- try to locate the corresponding widget via shimmer integrations (if present)
-        if not found_widget then
-            local ok, integrations = pcall(require, 'plugins.shimmer.integrations')
-            if ok and integrations and integrations._get_registered_widgets then
-                local widgets = integrations._get_registered_widgets()
-                if widgets and widgets.taglist then
-                    local screen_index = found_tag.screen and found_tag.screen.index or nil
-                    if screen_index and widgets.taglist[screen_index] then
-                        found_widget = widgets.taglist[screen_index][found_tag]
-                    end
-                end
-            end
-        end
-        M.set_hover(found_tag, found_widget)
-    else
-        M.clear_hover()
     end
 end
 
@@ -346,31 +308,7 @@ function M.resolve_drop_target()
     end
     local mc = mouse.coords()
     if not mc then return nil end
-
-    -- calculate based on known 23px tag width
-    for s in screen do
-        if s.mywibox and s.mywibox.visible then
-            local wibox_geo = s.mywibox:geometry()
-            if mc.x >= wibox_geo.x and mc.x <= (wibox_geo.x + wibox_geo.width) and
-               mc.y >= wibox_geo.y and mc.y <= (wibox_geo.y + wibox_geo.height) then
-                
-                if s.tags and #s.tags > 0 then
-                    local tag_width = 23  -- exact width from user feedback
-                    local taglist_start_x = wibox_geo.x + 32  -- launcher + spacing
-                    local taglist_end_x = taglist_start_x + (#s.tags * tag_width)
-                    
-                    if mc.x >= taglist_start_x and mc.x <= taglist_end_x then
-                        local rel_x = mc.x - taglist_start_x
-                        local idx = math.floor(rel_x / tag_width) + 1
-                        if idx >= 1 and idx <= #s.tags then
-                            return s.tags[idx]
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return nil
+    return tag_pager.tag_at_coords(mc.x, mc.y)
 end
 
 return M
