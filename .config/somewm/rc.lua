@@ -2558,6 +2558,8 @@ awful.screen.connect_for_each_screen(function(s)
                 layout = wibox.layout.fixed.horizontal,
             },
             id = 'background_role',
+            border_width = 0,
+            border_color = (beautiful.main_purple and beautiful.main_purple.base) or "#623997",
             widget = wibox.container.background,
             create_callback = guarded(function(self, t, index, objects)
                 local text_widget = self:get_children_by_id('text_role')[1]
@@ -2565,6 +2567,7 @@ awful.screen.connect_for_each_screen(function(s)
                     -- shimmer: register + wire hover via module helper
                     shimmer.register_taglist(self, s.index, t)
                     shimmer.attach_tag_hover(self, t)
+                    self.border_width = t.selected and (beautiful.bar_edge_width or 3) or 0
                 end
             end)
             ,
@@ -2572,6 +2575,7 @@ awful.screen.connect_for_each_screen(function(s)
                 local text_widget = self:get_children_by_id('text_role')[1]
                 if text_widget and t then
                     -- taglist update handled automatically by shimmer
+                    self.border_width = t.selected and (beautiful.bar_edge_width or 3) or 0
                 end
             end)
         }
@@ -2641,7 +2645,7 @@ awful.screen.connect_for_each_screen(function(s)
             bg_urgent   = TASKLIST_BG_VISIBLE,
         },
         layout   = {
-            spacing = 1,
+            spacing = 0,
             layout = wibox.layout.flex.horizontal
         },
         -- robust template: always provide an icon widget + split prefix/title
@@ -2676,6 +2680,7 @@ awful.screen.connect_for_each_screen(function(s)
                 widget  = wibox.container.margin,
             },
             id     = 'background_role',
+            border_width = 0,
             widget = wibox.container.background,
             create_callback = guarded(function(self, c, index, objects)
                 local ib = self:get_children_by_id('icon_role')[1]
@@ -2705,6 +2710,10 @@ awful.screen.connect_for_each_screen(function(s)
                 -- purple only when the app is actually visible on screen
                 -- delayed_call: re-apply after common.list_update overwrites self.bg
                 local visible = on_selected and not c.minimized
+                self._task_visible = visible
+                -- purple border for inactive (not focused) tasks on the current tag
+                self.border_width = (visible and not c.active) and (beautiful.bar_edge_width or 3) or 0
+                self.border_color = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
                 gears.timer.delayed_call(guarded(function()
                     self.bg = visible and TASKLIST_BG_VISIBLE or TASKLIST_BG_OFFSCREEN
                 end))
@@ -2742,6 +2751,10 @@ awful.screen.connect_for_each_screen(function(s)
                 -- purple only when the app is actually visible on screen
                 -- delayed_call: re-apply after common.list_update overwrites self.bg
                 local visible = on_selected and not c.minimized
+                self._task_visible = visible
+                -- purple border for inactive (not focused) tasks on the current tag
+                self.border_width = (visible and not c.active) and (beautiful.bar_edge_width or 3) or 0
+                self.border_color = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
                 gears.timer.delayed_call(guarded(function()
                     self.bg = visible and TASKLIST_BG_VISIBLE or TASKLIST_BG_OFFSCREEN
                 end))
