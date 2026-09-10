@@ -109,10 +109,10 @@ local xresources = get_xresources()
 local dpi = xresources and xresources.apply_dpi or function(value) return value end
 
 -- Color Constants
-local COLOR_PURPLE = "#623997"
+local COLOR_PURPLE = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
 local COLOR_BLACK = "#000000"
 local COLOR_WHITE = "#FFFFFF"
-local COLOR_GOLD = "#FFD700"
+local COLOR_GOLD = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
 local COLOR_GREY = "#AAAAAA"
 local COLOR_HOVER = "#ffffff33"
 
@@ -177,7 +177,7 @@ local header_count = wibox.widget {
 }
 
 local header_title_text = wibox.widget {
-    markup = "<span size='large'><b>notification centre</b></span>",
+    markup = "<span size='large'><b>notifications</b></span>",
     align = "left",
     valign = "center",
     widget = wibox.widget.textbox,
@@ -336,7 +336,7 @@ end
 
 local function apply_shape(shape, cr, w, h, radius)
     if not shape then
-        gshape.rounded_rect(cr, w, h, radius or dpi(1))
+        gshape.rounded_rect(cr, w, h, radius or beautiful.border_radius or dpi(3))
         return
     end
 
@@ -349,7 +349,7 @@ local function apply_shape(shape, cr, w, h, radius)
 
     local ok = pcall(shape, cr, w, h)
     if not ok then
-        gshape.rounded_rect(cr, w, h, radius or dpi(1))
+        gshape.rounded_rect(cr, w, h, radius or beautiful.border_radius or dpi(3))
     end
 end
 
@@ -590,13 +590,23 @@ local function create_small_button(label, callback, compact)
     if label == "X" then
         -- center X with slight right offset
         inner_widget = wibox.widget {
-            text_widget,
+            {
+                text_widget,
+                halign = "center",
+                valign = "center",
+                widget = wibox.container.place,
+            },
             right = dpi(1),
             widget = wibox.container.margin,
         }
     else
         inner_widget = wibox.widget {
-            text_widget,
+            {
+                text_widget,
+                halign = "center",
+                valign = "center",
+                widget = wibox.container.place,
+            },
             top = dpi(2),
             bottom = dpi(2),
             widget = wibox.container.margin,
@@ -610,7 +620,7 @@ local function create_small_button(label, callback, compact)
         bg = (label == "X") and COLOR_PURPLE or COLOR_BLACK,
         fg = (label == "X") and COLOR_BLACK or button_fg,
         shape = function(cr, w, h)
-            apply_shape(popup_shape, cr, w, h, dpi(1))
+            apply_shape(popup_shape, cr, w, h, beautiful.border_radius or dpi(3))
         end,
         border_width = 1,
         border_color = (label == "X") and COLOR_BLACK or COLOR_PURPLE,
@@ -916,7 +926,7 @@ local function create_popup_header()
         bg = header_bg,
         fg = header_fg,
         shape = function(cr, w, h)
-            apply_shape(popup_shape, cr, w, h, dpi(1))
+            apply_shape(popup_shape, cr, w, h, beautiful.border_radius or dpi(3))
         end,
         height = beautiful.icon_size and beautiful.icon_size + 2 or 18,
         widget = wibox.container.background,
@@ -969,8 +979,9 @@ local function ensure_popup()
     popup_instance = awful.popup {
         ontop = true,
         visible = false,
+        placement = false,
         shape = function(cr, w, h)
-            apply_shape(popup_shape, cr, w, h, dpi(1))
+            apply_shape(popup_shape, cr, w, h, beautiful.border_radius or dpi(3))
         end,
         border_width = beautiful.notification_center_border_width or 2,
         border_color = beautiful.notification_center_border_color or COLOR_GOLD,
@@ -992,21 +1003,40 @@ function M.show()
     
     local s = awful.screen.focused()
     popup.screen = s
-    
-    -- place relative to workarea to avoid covering the bar and wrong multi-screen coords
-    local wa = s and s.workarea or s.geometry
-    if wa then
-        local bw = popup.border_width or 0
-        local x = wa.x + wa.width - popup_width - (2*bw) - dpi(9)
-        local y = wa.y + dpi(9)
-        popup:geometry({ x = x, y = y, width = popup_width })
-    end
 
     if s and s.workarea and s.workarea.height then
         popup.maximum_height = math.floor(s.workarea.height * 0.85)
     end
-    
+
+    -- force the popup to compute its real width/height before positioning.
+    -- on the first open the popup still has its construction-time 1x1
+    -- geometry; the Wayland surface commits at that size before the delayed
+    -- apply_size from main_widget:layout runs, so the first frame appears at
+    -- the wrong position. _apply_size_now fits the widget synchronously so
+    -- the drawin has the correct dimensions before x/y are set.
+    popup:_apply_size_now(false)
+
+    -- position before the first map: on a freshly created popup the surface's
+    -- initial commit uses whatever x/y it had at construction (~0,0), and a
+    -- Wayland surface's position doesn't always update visually until the
+    -- next unmap/remap - hence the popup appearing off-screen only on the
+    -- very first open. Setting x/y here ensures the first commit is already
+    -- correct.
+    local wa = s and s.workarea or s.geometry
+    local function reposition()
+        if not wa then return end
+        local bw = popup.border_width or 0
+        popup.x = wa.x + wa.width - popup_width - (2*bw) - dpi(9)
+        popup.y = wa.y + dpi(9)
+    end
+    reposition()
+
     popup.visible = true
+
+    -- re-apply in a delayed_call so it runs after the popup's internal
+    -- layout pass (which uses timer.delayed_call to set width/height and
+    -- would reset x/y if we set them synchronously)
+    gears.timer.delayed_call(guarded(reposition))
     
     -- Rebuild Content Now That Popup Is Visible
     M._rebuild_history()
@@ -1155,8 +1185,10 @@ function ToggleIndicator:new()
         },
         bg = button_bg,
         fg = button_fg,
-        forced_height = dpi(22),
-        forced_width = dpi(27),
+        forced_height = dpi(32),
+        forced_width = dpi(32),
+        border_width = beautiful.bar_edge_width or dpi(3),
+        border_color = COLOR_BLACK,
         widget = wibox.container.background,
     }
 
