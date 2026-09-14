@@ -49,6 +49,13 @@ local DEBUG = false
 
 local state = { armed = false, pressed = false }
 
+-- module-level so repeated M.keys() calls (hot-reload) do not stack a new
+-- client button::press handler each time (B5): the connection is made once
+local button_press_connected = false
+-- module-level hold timer reused across M.keys() calls; a fresh timer per
+-- call leaked the previous one (B5). timeout is (re)set per call from opts.hold
+local hold_timer
+
 local function disarm()
     state.armed = false
 end
@@ -102,11 +109,21 @@ function M.keys(opts)
         disarm()
     end
 
-    local hold_timer = gears.timer {
-        timeout = opts.hold or 0.6,
-        single_shot = true,
-        callback = guarded(on_hold),
-    }
+    -- reuse the module-level hold timer (created once, stopped before each
+    -- arm) instead of allocating a new one per M.keys() call (B5 leak). the
+    -- callback is refreshed each call so a new opts.hold / debug message
+    -- takes effect without leaking a new timer object.
+    if not hold_timer then
+        hold_timer = gears.timer {
+            timeout = opts.hold or 0.6,
+            single_shot = true,
+            callback = guarded(on_hold),
+        }
+    else
+        hold_timer.timeout = opts.hold or 0.6
+        hold_timer.callback = guarded(on_hold)
+        hold_timer:stop()
+    end
 
     -- old: armed on every press and restarted the hold timer each time.
     --      Super_L keyboard-repeat events call on_press repeatedly while the
@@ -137,8 +154,12 @@ function M.keys(opts)
 
     -- chord detection: see M.watch, called from rc.lua once globalkeys and
     -- clientkeys are built, which wires disarm() onto every real
-    -- keybinding's own "press" signal
-    client.connect_signal("button::press", guarded(disarm))
+    -- keybinding's own "press" signal. connected once at module level (B5)
+    -- so repeated M.keys() calls do not stack handlers.
+    if not button_press_connected then
+        client.connect_signal("button::press", guarded(disarm))
+        button_press_connected = true
+    end
 
     local desc = { description = "launcher (tap Super alone)", group = "launcher" }
     return {
