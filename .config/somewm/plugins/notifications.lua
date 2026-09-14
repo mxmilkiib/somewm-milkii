@@ -11,9 +11,14 @@ local gears = require("gears")
 local gtable = require("gears.table")
 local gtimer = require("gears.timer")
 local gdebug = require("gears.debug")
+local gstring = require("gears.string")
 local guarded = require("error_guard")
+local font_utils = require("rc.font_utils")
 local dpi = beautiful.xresources.apply_dpi
 local COLOR_GOLD = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
+local COLOR_PURPLE = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
+local COLOR_BLACK  = "#000000"
+local COLOR_WHITE  = "#FFFFFF"
 
 local M = {}
 
@@ -27,7 +32,14 @@ local DEFAULT_TIMEOUT = 50
 
 -- The title is differentiated by bold markup + gold background, not font size.
 -- Use the theme font directly; the theme already handles DPI + ui_scale scaling.
-local NOTIF_FONT = beautiful.notification_font or beautiful.font or "Sans 10"
+-- local NOTIF_FONT = beautiful.notification_font or beautiful.font or "Sans 10"
+-- Widget-Popup Fonts (same as the resource/battery/volume/displays popups)
+local FONT           = font_utils.FONT
+local FONT_HEAD      = font_utils.FONT_HEAD
+local FONT_VALUE     = font_utils.FONT_BOLD
+-- local FONT_COUNTDOWN = font_utils.FONT
+-- local FONT_COUNTDOWN = font_utils.FONT_INFO
+local FONT_COUNTDOWN = font_utils.FONT_SMALL
 
 
 -- Per-screen active notification boxes (for manual stacking)
@@ -186,6 +198,9 @@ end
 
 -- // MARK --widget-template
 
+-- Widget-Popup Form (same as resource/battery/volume/displays popups):
+-- Purple Header Bar (Title left, Sender + Countdown Arc right in Gold),
+-- Black Body (Icon left, Message filling the rest), Actions Section below.
 local function build_widget(n, s)
     local icon_widget = wibox.widget {
         image = n.icon,
@@ -197,21 +212,16 @@ local function build_widget(n, s)
         widget = wibox.widget.imagebox,
     }
 
-    -- title: black bold text on gold background, in its own container
-    local title_widget = wibox.widget {
-        markup = "<span foreground='#000'><b>" .. (n.title or "") .. "</b></span>",
-        font = NOTIF_FONT,
-        align = "left",
-        widget = wibox.widget.textbox,
-    }
-
     -- countdown text (kept as reference for timer updates)
     local countdown_text = wibox.widget {
-        markup = "<span foreground='#000' size='x-small'>0s</span>",
+        markup = "<span foreground='" .. COLOR_GOLD .. "'>0s</span>",
+        font = FONT_COUNTDOWN,
+        align = "center",
+        valign = "center",
         widget = wibox.widget.textbox,
     }
 
-    -- countdown arc with countdown text inside it (goes in header centre)
+    -- countdown arc with countdown text inside it (header right edge)
     local timeout_arc = wibox.widget {
         {
             countdown_text,
@@ -220,15 +230,34 @@ local function build_widget(n, s)
             widget = wibox.container.place,
         },
         widget = wibox.container.arcchart,
-        forced_width = dpi(24),
-        forced_height = dpi(24),
+        forced_width = dpi(28),
+        forced_height = dpi(28),
         max_value = 100,
         min_value = 0,
         value = 100,
         thickness = dpi(2),
         rounded_edge = true,
         start_angle = 2 * math.pi - math.pi / 2,
-        colors = { beautiful.main_purple and beautiful.main_purple.base or "#623997" },
+        colors = { COLOR_GOLD },
+    }
+
+    -- title: white bold text on the purple header bar
+    local title_widget = wibox.widget {
+        markup = "<b>" .. (n.title or "") .. "</b>",
+        font = FONT_HEAD,
+        align = "left",
+        valign = "center",
+        widget = wibox.widget.textbox,
+    }
+
+    -- sender: gold value text in the header's right slot (widget-popup form)
+    local app_name_widget = wibox.widget {
+        markup = "<span foreground='" .. COLOR_GOLD .. "'>"
+            .. gstring.xml_escape(n.app_name or "") .. "</span>",
+        font = FONT_VALUE,
+        align = "right",
+        valign = "center",
+        widget = wibox.widget.textbox,
     }
 
     local title_bar = wibox.widget {
@@ -236,39 +265,30 @@ local function build_widget(n, s)
             {
                 title_widget,
                 nil,
-                timeout_arc,
-                expand = "none",
+                {
+                    app_name_widget,
+                    (n.timeout or DEFAULT_TIMEOUT) > 5 and timeout_arc or nil,
+                    spacing = dpi(6),
+                    layout = wibox.layout.fixed.horizontal,
+                },
                 layout = wibox.layout.align.horizontal,
             },
-            left = dpi(12),
-            right = dpi(8),
-            top = dpi(2),
-            bottom = dpi(2),
+            left = dpi(10), right = dpi(10),
+            top = dpi(6), bottom = dpi(6),
             widget = wibox.container.margin,
         },
-        bg = COLOR_GOLD,
+        bg = COLOR_PURPLE,
+        fg = COLOR_WHITE,
         widget = wibox.container.background,
     }
 
     local message_widget = wibox.widget {
         markup = n.message or n.text or "",
-        font = NOTIF_FONT,
+        font = FONT,
         align = "left",
+        valign = "center",
         wrap = "word_char",
         widget = wibox.widget.textbox,
-    }
-
-    -- app name row (small grey text in the lower black section)
-    local app_name_widget = wibox.widget {
-        markup = "<span size='small' foreground='#888'>" .. (n.app_name or "") .. "</span>",
-        widget = wibox.widget.textbox,
-    }
-
-    -- right column: just the icon (countdown arc moved to header)
-    local right_col = wibox.widget {
-        icon_widget,
-        spacing = dpi(4),
-        layout = wibox.layout.fixed.vertical,
     }
 
     local actions_widget
@@ -277,9 +297,13 @@ local function build_widget(n, s)
         for _, action in ipairs(n.actions) do
             table.insert(action_buttons, wibox.widget {
                 {
-                    text = action.name,
-                    align = "center",
-                    widget = wibox.widget.textbox,
+                    {
+                        text = action.name,
+                        widget = wibox.widget.textbox,
+                    },
+                    halign = "center",
+                    fill_horizontal = true,
+                    widget = wibox.container.place,
                 },
                 forced_height = dpi(24),
                 widget = wibox.container.background,
@@ -294,49 +318,64 @@ local function build_widget(n, s)
                 },
             })
         end
-        actions_widget = wibox.layout.flex.horizontal()
-        actions_widget.spacing = dpi(4)
+        local actions_row = wibox.layout.flex.horizontal()
+        actions_row.spacing = dpi(4)
         for _, btn in ipairs(action_buttons) do
-            actions_widget:add(btn)
+            actions_row:add(btn)
         end
+        -- actions get their own black Section under a Purple Separator
         actions_widget = wibox.widget {
-            actions_widget,
-            spacing = dpi(4),
-            layout = wibox.layout.fixed.vertical,
+            {
+                {
+                    forced_height = dpi(1),
+                    bg = COLOR_PURPLE,
+                    widget = wibox.container.background,
+                },
+                {
+                    actions_row,
+                    left = dpi(10), right = dpi(10),
+                    top = dpi(4), bottom = dpi(6),
+                    widget = wibox.container.margin,
+                },
+                layout = wibox.layout.fixed.vertical,
+            },
+            bg = COLOR_BLACK,
+            fg = COLOR_WHITE,
+            widget = wibox.container.background,
         }
     end
 
-    -- body: content on left, icon + countdown on right
-    local body_content = wibox.widget {
+    -- body: icon left, message filling the remaining width
+    local body = wibox.widget {
         {
             {
-                app_name_widget,
+                {
+                    icon_widget,
+                    right = dpi(8),
+                    widget = wibox.container.margin,
+                },
                 message_widget,
-                spacing = dpi(2),
-                layout = wibox.layout.fixed.vertical,
+                nil,
+                layout = wibox.layout.align.horizontal,
             },
-            nil,
-            right_col,
-            expand = "none",
-            layout = wibox.layout.align.horizontal,
+            left = dpi(10), right = dpi(10),
+            top = dpi(6), bottom = dpi(6),
+            widget = wibox.container.margin,
         },
-        margins = dpi(10),
-        widget = wibox.container.margin,
+        bg = COLOR_BLACK,
+        fg = COLOR_WHITE,
+        widget = wibox.container.background,
     }
 
     local inner = wibox.widget {
         {
             title_bar,
-            {
-                body_content,
-                bg = "#000000",
-                widget = wibox.container.background,
-            },
+            body,
             actions_widget,
             spacing = dpi(0),
             layout = wibox.layout.fixed.vertical,
         },
-        bg = "#000000",
+        bg = COLOR_BLACK,
         widget = wibox.container.background,
     }
 
@@ -363,7 +402,7 @@ local function build_widget(n, s)
         message_widget:set_markup(n.message or n.text or "")
     end))
     n:connect_signal("property::title", guarded(function()
-        title_widget:set_markup("<span foreground='#000'><b>" .. (n.title or "") .. "</b></span>")
+        title_widget:set_markup("<b>" .. (n.title or "") .. "</b>")
     end))
 
     return widget, timeout_arc, countdown_text
@@ -395,7 +434,9 @@ function M.display(n)
         type = "notification",
         bg = "#000000",
         fg = "#ffffff",
-        border_width = 0,
+        -- border_width = 0,
+        border_width = beautiful.bar_edge_width or beautiful.border_width or dpi(1),
+        border_color = COLOR_GOLD,
         shape = function(cr, w, h)
             gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3))
         end,
@@ -449,7 +490,7 @@ function M.display(n)
                 timeout_arc.value = remaining * 100
                 local secs_left = math.ceil(remaining * arc_duration)
                 countdown_text:set_markup(string.format(
-                    "<span foreground='#000' size='x-small'>%ds</span>", secs_left))
+                    "<span foreground='%s'>%ds</span>", COLOR_GOLD, secs_left))
                 if remaining <= 0 then arc_timer:stop() end
             end),
         }
@@ -462,6 +503,19 @@ function M.display(n)
                 n:destroy(naughty.notification_closed_reason.expired)
             end),
         }
+
+        -- OSD plugins (volume, brightness) call n:reset_timeout() to extend
+        -- the popup on each scroll; restart our own timeout_timer to match so
+        -- the notification doesn't close on the original timer's schedule
+        n:connect_signal("property::timeout", guarded(function(_, new_t)
+            if timeout_timer and timeout_timer.started then
+                timeout_timer:stop()
+            end
+            if new_t and new_t > 0 then
+                timeout_timer.timeout = new_t
+                timeout_timer:start()
+            end
+        end))
     end
 
     -- hover to pause timeout

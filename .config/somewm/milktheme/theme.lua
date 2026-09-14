@@ -18,6 +18,7 @@
 local theme_assets = require("beautiful.theme_assets")
 local xresources = require("beautiful.xresources")
 local ui_scale = require("rc.ui_scale")
+local font_utils = require("rc.font_utils")
 
 -- UI scale factor: multiplies all dpi() values and font sizes
 local scale = ui_scale.get_scale()
@@ -28,15 +29,9 @@ local function dpi(size)
     return _dpi(size) * scale
 end
 
--- scale the numeric size in a Pango font string like "Hack Nerd Font Mono 9"
-local function scale_font(font_str, s)
-    s = s or scale
-    local name, size = font_str:match("^(.-)%s+(%d+)$")
-    if name and size then
-        return string.format("%s %d", name, math.floor(tonumber(size) * s))
-    end
-    return font_str
-end
+-- scale the numeric size in a Pango font string like "Hack Nerd Font Mono 9".
+-- delegated to rc.font_utils so theme and plugins share one scaler
+local scale_font = font_utils.scale_font
 
 local gfs = require("gears.filesystem")
 local themes_path = gfs.get_themes_dir()
@@ -380,6 +375,7 @@ theme.titlebar_bg_normal = {
 theme.notification_bg = theme.main_gold.base    -- gold background
 theme.notification_fg = "#000000"    -- black text
 theme.notification_icon_size = 64
+theme.notification_font = scale_font("Hack Nerd Font Mono 12")
 
 
 
