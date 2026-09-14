@@ -10,6 +10,7 @@ local keyboardlayout = require("awful.widget.keyboardlayout")
 local guarded = require("error_guard")
 
 local font_utils = require("rc.font_utils")
+local ai_popup = require("plugins.ai_popup")
 local dpi = beautiful.xresources.apply_dpi
 local icon_dir = "/usr/share/icons/Adwaita/symbolic/"
 local WIDGET_FONT = font_utils.FONT_MONO
@@ -18,9 +19,13 @@ local volume_views = {}
 local volume_timer
 local resource_views = {}
 local resource_timer
+local ai_views = {}
+local ai_timer
 local previous_cpu_total, previous_cpu_idle
 local stat_glyphs = { cpu = "󰍛", gpu = "󰢮", ram = "󰘚", temp = "󰔏" }
 local STAT_GAP = dpi(2)  -- px between stat glyph and value
+-- guard against duplicate signal connections on hot-reload (P11)
+local signals_connected = false
 
 local function centered(widget)
     return wibox.widget { widget, halign = "center", valign = "center", widget = wibox.container.place }
@@ -49,7 +54,10 @@ local function update_volume()
     end))
 end
 
-awesome.connect_signal("volume::updated", guarded(apply_volume))
+if not signals_connected then
+    awesome.connect_signal("volume::updated", guarded(apply_volume))
+    signals_connected = true
+end
 
 local function ensure_volume_timer()
     if volume_timer then return end
@@ -149,6 +157,8 @@ local function read_cpu_temp()
     file:close()
     return temp and temp / 1000
 end
+
+M.read_cpu_temp = read_cpu_temp
 
 -- stepped colour ramp for the stat glyphs (same bands as the popup's sensor
 -- figures): low = lime, mid = gold, high = orange, very high = red
@@ -275,6 +285,51 @@ function M.show_desktop(s)
         showing = true
     end)))
     awful.tooltip { objects = { widget }, text = "Show desktop" }
+    return widget
+end
+
+
+-- // MARK -- ai status
+
+-- Single bar icon for local AI services. Coloured by overall status:
+-- green when llama-server is running (main LLM available), gold when
+-- other services are up but llama-server is down, grey when all are down.
+-- Left-click opens the AI popup (attached in rc.lua). Polls every 3s
+-- and also refreshes on the "ai::status_changed" signal emitted by the
+-- popup after a toggle.
+local function update_ai_status()
+    ai_popup.query_status(guarded(function(status)
+        local llama = status.llama == "active"
+        local whisper = status.whisper == "active"
+        local openwebui = status.openwebui == "active"
+        local any = llama or whisper or openwebui
+        local color = llama and "#69D665" or any and "#FFD700" or "#AAAAAA"
+        for _, view in ipairs(ai_views) do
+            view.glyph.markup = string.format('<span foreground="%s">\u{F06A9}</span>', color)
+        end
+    end))
+end
+
+function M.ai_status(args)
+    args = args or {}
+    local glyph = wibox.widget {
+        markup = '<span foreground="#AAAAAA">\u{F06A9}</span>',
+        font = font_utils.mono_size(13),
+        valign = "center",
+        widget = wibox.widget.textbox,
+    }
+    local widget = centered(glyph)
+    ai_views[#ai_views + 1] = { glyph = glyph }
+    widget:buttons(gears.table.join(
+        awful.button({}, 1, args.open or function() end)
+    ))
+    if not ai_timer then
+        ai_timer = gears.timer { timeout = 3, autostart = true, call_now = true,
+            callback = guarded(update_ai_status) }
+        awesome.connect_signal("exit", guarded(function() ai_timer:stop() end))
+        awesome.connect_signal("ai::status_changed", guarded(update_ai_status))
+    end
+    awful.tooltip { objects = { widget }, text = "Local AI services" }
     return widget
 end
 

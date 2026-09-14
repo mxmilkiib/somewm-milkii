@@ -22,13 +22,14 @@ local STEP = 5  -- percent change per key press
 local OSD_TIMEOUT = 1.5
 
 -- socket path for wlr-brightnessd (software brightness + color temperature)
+local BRIGHTNESSD_SOCK
 local function get_brightnessd_sock()
-    local f = io.popen("id -u 2>/dev/null")
-    local uid = f and f:read("*l") or "1000"
-    if f then f:close() end
-    return "/tmp/wlr-brightnessd-" .. uid .. ".sock"
+    awful.spawn.easy_async("id -u", function(out)
+        local uid = (out or ""):gmatch("(%d+)")() or "1000"
+        BRIGHTNESSD_SOCK = "/tmp/wlr-brightnessd-" .. uid .. ".sock"
+    end)
 end
-local BRIGHTNESSD_SOCK = get_brightnessd_sock()
+get_brightnessd_sock()
 
 -- cached notification object so rapid presses replace the same popup
 local current_notification
@@ -51,16 +52,17 @@ local function backlight_devices(callback)
 end
 
 -- read current brightness as a percentage (0-100) from the first backlight
-local function get_percent()
-    local f = io.popen("brightnessctl -m info 2>/dev/null")
-    if not f then return nil end
-    local line = f:read("*l")
-    f:close()
-    if not line then return nil end
-    -- brightnessctl -m output: device,class,brightness/max,percent,icon
-    -- e.g. amdgpu_bl1,backlight,400000/400000,100%,display-brightness-symbolic
-    local pct = line:match(",(%d+)%%")
-    return pct and tonumber(pct)
+local function get_percent(callback)
+    awful.spawn.easy_async("brightnessctl -m info 2>/dev/null", function(line)
+        if not line or line == "" then
+            if callback then callback(nil) end
+            return
+        end
+        -- brightnessctl -m output: device,class,brightness/max,percent,icon
+        -- e.g. amdgpu_bl1,backlight,400000/400000,100%,display-brightness-symbolic
+        local pct = line:match(",(%d+)%%")
+        if callback then callback(pct and tonumber(pct)) end
+    end)
 end
 
 -- show or replace the OSD notification with a text progress bar
@@ -127,8 +129,9 @@ end
 local function set_all(arg, show_pct)
     backlight_devices(function(devices)
         if #devices == 0 then
-            local pct = get_percent()
-            if pct then show_osd(show_pct or pct) end
+            get_percent(function(pct)
+                if pct then show_osd(show_pct or pct) end
+            end)
             return
         end
         local pending = #devices
@@ -138,11 +141,12 @@ local function set_all(arg, show_pct)
                 function()
                     pending = pending - 1
                     if pending == 0 then
-                        local pct = get_percent()
-                        if pct then
-                            set_brightnessd(pct)
-                            show_osd(pct)
-                        end
+                        get_percent(function(pct)
+                            if pct then
+                                set_brightnessd(pct)
+                                show_osd(pct)
+                            end
+                        end)
                     end
                 end)
         end
