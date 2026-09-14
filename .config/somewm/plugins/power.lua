@@ -6,8 +6,10 @@
 --      warnings and a forced suspend at the empty threshold (unchanged from
 --      the original power.lua).
 --   2. Power-profile switching — power-profiles-daemon profile is flipped to
---      `profile_ac` on charger and `profile_batt` on battery, on every
---      transition.
+--      `profile_ac` on charger and `profile_batt` on battery, on every real
+--      AC/battery transition and once on boot. A config reload does NOT switch
+--      (detected via awesome.startup), so a manually-chosen profile survives
+--      reloads.
 --   3. Idle management        — swayidle is launched here with a dim -> lock
 --      -> suspend timeout chain. The dim/undim stages signal back into this
 --      module via `awesome-client` so brightness is saved and restored in Lua.
@@ -58,6 +60,7 @@ local state = {
     dimmed = false,
     dim_saved = nil,  -- brightness percent captured before dim
     profile = nil,    -- last power-profile set by this module
+    is_boot = false,  -- true only on a real boot (awesome.startup), not a reload
 }
 
 -- swayidle runs each command through a shell, so these pipe into awesome-client
@@ -166,7 +169,7 @@ local function launch_swayidle()
     undim()
     awful.spawn.with_shell("pkill -u $USER -x swayidle 2>/dev/null")
     gears.timer.start_new(0.3, guarded(function()
-        awful.spawn(build_swayidle_argv())
+        awful.spawn(build_swayidle_argv(), false)
         return false  -- one-shot
     end))
 end
@@ -231,10 +234,18 @@ local function on_state(s)
     if state.charging == charging then return end
     local first = state.charging == nil
     state.charging = charging
-    -- switch profile and (re)launch swayidle with timeouts for this source
-    set_profile(charging and M.profile_ac or M.profile_batt)
+    -- (re)launch swayidle with timeouts for this source
     launch_swayidle()
-    if first then return end  -- don't notify on the priming report
+    if first then
+        -- priming report: auto-switch only on a real boot. On a reload this
+        -- is skipped so a manually-chosen profile (or one left from a previous
+        -- session) survives.
+        if state.is_boot then
+            set_profile(charging and M.profile_ac or M.profile_batt)
+        end
+        return
+    end
+    set_profile(charging and M.profile_ac or M.profile_batt)
     if charging then
         state.warned, state.criticaled = false, false
         notify("Power", "Charger connected" .. (state.pct and (" — " .. state.pct .. "%") or ""))
@@ -247,6 +258,11 @@ end
 -- MARK: STARTUP
 
 function M.start()
+    -- true only during the initial startup phase, false on a config reload;
+    -- captured synchronously here because the upower priming callback fires
+    -- later, after awesome.startup has already gone false
+    state.is_boot = awesome.startup and true or false
+
     -- idle dim/undim signals (fired by swayidle via awesome-client)
     awesome.connect_signal("power_idle_dim", guarded(dim))
     awesome.connect_signal("power_idle_resume", guarded(undim))
