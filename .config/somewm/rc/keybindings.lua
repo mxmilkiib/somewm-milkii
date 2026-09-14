@@ -360,6 +360,13 @@ function M.build(ctx)
     {{modkey, shiftkey, altkey}, "p", shimmer.toggle_notification_persistence, "toggle notification persistence", nil, "shimmer"}
   }
 
+  -- shimmer on/off toggle (off by default for CPU load)
+  if ctx_has_function(ctx, "toggle_shimmer") then
+    add_keys({
+      {{modkey, shiftkey, altkey}, "space", ctx.toggle_shimmer, "toggle shimmer animation", nil, "shimmer"},
+    })
+  end
+
   -- // MARK -- notification copy keys
   local notification_keys = {}
   if ctx_has_function(ctx, "copy_last_notification") then
