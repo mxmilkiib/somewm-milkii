@@ -180,6 +180,9 @@ profiler.install()
 -- Standard awesome libraries
 local gears = require("gears")
 local awful = require("awful")
+-- Home and config dir for portable paths (P3)
+local home = os.getenv("HOME") or "/home/milkii"
+local config_dir = gears.filesystem.get_configuration_dir()
 -- Per-handler protected-call wrapper: wraps a callback so errors surface with
 -- a full debug.traceback via gears.debug instead of hitting luaA_panic (which
 -- prints only the message and tears down the WM). Use on synchronous signal
@@ -1934,7 +1937,7 @@ end))
 --      The old grabber block is preserved in rc.lua.20260906_0929.bak.
 awful.keyboard.append_global_keybindings(solo_super.keys({
     modkey = modkey,
-    launcher = "/home/milkii/bin/rofi_nice",
+    launcher = home .. "/bin/rofi_nice",
     process = "rofi",   -- tapping Super again closes an open rofi
     hold = 0.25,
 }))
@@ -2393,8 +2396,8 @@ end
 --      appeared half over the wibar and at a different spot every time.
 -- new: plain imagebox that toggles the menu anchored just below the bar at
 --      the screen's left edge, with hover feedback on the icon background.
-local menu_icon_normal = "/home/milkii/.config/somewm/milktheme/icons/somewm-logo.svg"
-local menu_icon_hover = "/home/milkii/.config/somewm/milktheme/icons/somewm-logo-hover.svg"
+local menu_icon_normal = config_dir .. "milktheme/icons/somewm-logo.svg"
+local menu_icon_hover = config_dir .. "milktheme/icons/somewm-logo-hover.svg"
 local menu_icon = wibox.widget {
     image = menu_icon_normal,
     forced_width = 32,

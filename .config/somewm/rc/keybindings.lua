@@ -62,6 +62,8 @@ local naughty = require("naughty")
 local shimmer = require("plugins/shimmer") -- For shimmer mode functions
 local floating_rules = require("plugins.floating_rules") -- Dynamic floating rules (Super+Alt+F)
 local guarded = require("error_guard")
+-- Home dir for portable paths (P3)
+local home = os.getenv("HOME") or "/home/milkii"
 
 -- Matcher generator for rules - supports class or instance matching
 -- old: used awful.rules.match, but somewm removed awful.rules in favour of ruled.client
@@ -250,7 +252,7 @@ function M.build(ctx)
     {{modkey, altkey}, "Right", function() if ctx_has_function(ctx, "cycle_tags_with_clients") then ctx.cycle_tags_with_clients("next") end end,
       "view next tag with client", nil, "tag"},
     {{modkey}, "Escape", function() awful.tag.history.restore() end, "go back", nil, "tag"},
-    {{modkey, shiftkey}, "Escape", "/home/milkii/bin/rofi_power", "power menu (lock/suspend/reboot/off)", nil, "awesome"},
+    {{modkey, shiftkey}, "Escape", home .. "/bin/rofi_power", "power menu (lock/suspend/reboot/off)", nil, "awesome"},
     {{modkey}, "j", function() awful.client.focus.byidx(1) end, "focus next client", nil, "client"},
     {{modkey}, "k", function() awful.client.focus.byidx(-1) end, "focus previous client", nil, "client"},
     {{modkey}, "Tab", function() awful.client.focus.history.previous() if client.focus then client.focus:raise() end end, "go back", nil, "client"}
@@ -536,8 +538,8 @@ function M.build(ctx)
   -- // MARK: LAUNCHER
   -- Application launcher keys
   local launcher_keys = {
-    -- old: {{modkey}, "space", "/home/milkii/bin/rofi_nice", "rofi app launcher", nil, "launcher"},
-    {{modkey, altkey}, "space", "/home/milkii/bin/rofi_nice_run", "rofi command launcher", nil, "launcher"}
+    -- old: {{modkey}, "space", home .. "/bin/rofi_nice", "rofi app launcher", nil, "launcher"},
+    {{modkey, altkey}, "space", home .. "/bin/rofi_nice_run", "rofi command launcher", nil, "launcher"}
   }
 
   -- Add all the keys to globalkeys
