@@ -47,6 +47,10 @@ local active_profile  = nil
 local hide
 local is_pinned  -- getter set in build_content (see popup_common.pin)
 
+-- charge mode state: "maximize" (80% cap) or "auto" (HP managed / full)
+local charge_mode_text, charge_mode_btn
+local current_charge_mode = nil
+
 
 -- MARK: SYS READERS
 
@@ -58,16 +62,45 @@ local function read_file(path)
     return s
 end
 
+-- Discover the battery sysfs directory once. Probes BAT0, BAT1, BATT, BAT
+-- in order; falls back to the first /sys/class/power_supply/BAT* entry.
+-- Caches the result so repeated reads don't rescan the directory (P5).
+local battery_path
+local function find_battery_path()
+    if battery_path then return battery_path end
+    for _, name in ipairs({ "BAT0", "BAT1", "BATT", "BAT" }) do
+        if gears.filesystem.file_readable("/sys/class/power_supply/" .. name .. "/capacity") then
+            battery_path = "/sys/class/power_supply/" .. name
+            return battery_path
+        end
+    end
+    -- last resort: glob the directory for the first BAT*
+    local f = io.popen("ls -d /sys/class/power_supply/BAT* 2>/dev/null | head -1")
+    if f then
+        local p = f:read("*l")
+        f:close()
+        if p and p ~= "" then
+            battery_path = p
+            return p
+        end
+    end
+    battery_path = "/sys/class/power_supply/BAT0"  -- legacy fallback
+    return battery_path
+end
+
+M.find_battery_path = find_battery_path
+
 local function battery_info()
+    local bat = find_battery_path()
     local num = function(p) return tonumber(read_file(p)) end
     return {
-        pct        = num("/sys/class/power_supply/BAT0/capacity") or 0,
-        status     = read_file("/sys/class/power_supply/BAT0/status") or "Unknown",
-        energy_now = num("/sys/class/power_supply/BAT0/energy_now") or 0,        -- µWh
-        energy_full= num("/sys/class/power_supply/BAT0/energy_full") or 0,
-        energy_design = num("/sys/class/power_supply/BAT0/energy_full_design") or 0,
-        power_now  = num("/sys/class/power_supply/BAT0/power_now") or 0,         -- µW
-        cycles     = read_file("/sys/class/power_supply/BAT0/cycle_count") or "?",
+        pct        = num(bat .. "/capacity") or 0,
+        status     = read_file(bat .. "/status") or "Unknown",
+        energy_now = num(bat .. "/energy_now") or 0,        -- µWh
+        energy_full= num(bat .. "/energy_full") or 0,
+        energy_design = num(bat .. "/energy_full_design") or 0,
+        power_now  = num(bat .. "/power_now") or 0,         -- µW
+        cycles     = read_file(bat .. "/cycle_count") or "?",
         ac         = read_file("/sys/class/power_supply/AC/online"),
     }
 end
@@ -77,6 +110,50 @@ local function fmt_time(hours)
     local h = math.floor(hours)
     local m = math.floor((hours - h) * 60)
     return string.format("%dh %02dm", h, m)
+end
+
+
+-- MARK: CHARGE MODE
+
+-- HP Battery Health Manager policy via hp-bioscfg firmware-attributes.
+-- "maximize" caps charging at ~80% for daily longevity; "auto" lets HP
+-- firmware manage (full charge for trips). Toggled via ~/bin/hp-battery-mode
+-- which needs a sudoers rule for passwordless writes (see script header).
+local CHARGE_MODE_ATTR = "/sys/class/firmware-attributes/hp-bioscfg/attributes/Battery Health Manager/current_value"
+
+local function read_charge_mode()
+    local f = io.open(CHARGE_MODE_ATTR, "r")
+    if not f then return nil end
+    local val = f:read("*l") or ""
+    f:close()
+    if val:match("Maximize") then return "maximize"
+    elseif val:match("Let HP Manage") then return "auto"
+    else return nil end
+end
+
+local function charge_mode_label(mode)
+    if mode == "maximize" then return "80% Cap (Health)"
+    elseif mode == "auto" then return "HP Managed (Full)"
+    else return "Unknown" end
+end
+
+local function toggle_charge_mode()
+    local cur = read_charge_mode()
+    local target = (cur == "maximize") and "auto" or "maximize"
+    awful.spawn.easy_async("hp-battery-mode " .. target, guarded(function(_, stderr, exit_code)
+        -- only update the UI label if the command actually succeeded; on
+        -- failure, keep the old label so the display reflects reality
+        if exit_code ~= 0 then
+            if charge_mode_text and stderr and stderr ~= "" then
+                charge_mode_text.text = "Error"
+            end
+            return
+        end
+        current_charge_mode = target
+        if charge_mode_text then
+            charge_mode_text.text = charge_mode_label(target)
+        end
+    end))
 end
 
 
@@ -119,18 +196,18 @@ local function make_profile_button(p)
     end
     bg.paint = paint
 
-    bg:connect_signal("mouse::enter", function()
+    bg:connect_signal("mouse::enter", guarded(function()
         if p.key ~= active_profile then bg.bg = COLOR_HOVER end
-    end)
-    bg:connect_signal("mouse::leave", function()
+    end))
+    bg:connect_signal("mouse::leave", guarded(function()
         if p.key ~= active_profile then bg.bg = bg._inactive_bg end
-    end)
-    bg:buttons(gears.table.join(awful.button({}, 1, function()
+    end))
+    bg:buttons(gears.table.join(awful.button({}, 1, guarded(function()
         awful.spawn.easy_async("powerprofilesctl set " .. p.key, guarded(function()
             active_profile = p.key
             for _, b in ipairs(profile_buttons) do b:paint() end
         end))
-    end)))
+    end))))
     paint()
     return bg
 end
@@ -223,12 +300,45 @@ local function build_content()
         widget = wibox.container.margin,
     }
 
+    -- charge mode toggle: shows current HP battery health policy;
+    -- click flips between 80% cap and HP managed (full charge)
+    charge_mode_text = make_text(charge_mode_label(read_charge_mode() or "auto"), COLOR_WHITE)
+    charge_mode_btn = wibox.widget {
+        {
+            charge_mode_text,
+            halign = "center",
+            valign = "center",
+            fill_horizontal = true,
+            widget = wibox.container.place,
+        },
+        forced_width = CONTENT_W,
+        bg = COLOR_BLACK,
+        fg = COLOR_WHITE,
+        widget = wibox.container.background,
+    }
+    charge_mode_btn:connect_signal("mouse::enter", guarded(function()
+        charge_mode_btn.bg = COLOR_HOVER
+    end))
+    charge_mode_btn:connect_signal("mouse::leave", guarded(function()
+        charge_mode_btn.bg = COLOR_BLACK
+    end))
+    charge_mode_btn:buttons(gears.table.join(awful.button({}, 1, guarded(toggle_charge_mode))))
+
+    local charge_mode_label_widget = wibox.widget {
+        make_text("Charge Mode", COLOR_GREY),
+        left = dpi(10), top = dpi(8), bottom = dpi(4),
+        widget = wibox.container.margin,
+    }
+
     return wibox.widget {
         header,
         info_block,
         separator(),
         profile_label,
         profile_list,
+        separator(),
+        charge_mode_label_widget,
+        charge_mode_btn,
         layout = wibox.layout.fixed.vertical,
     }
 end
@@ -268,6 +378,13 @@ local function refresh_popup()
             for _, b in ipairs(profile_buttons) do b:paint() end
         end
     end))
+
+    -- refresh charge mode display
+    local mode = read_charge_mode()
+    if mode and charge_mode_text then
+        current_charge_mode = mode
+        charge_mode_text.text = charge_mode_label(mode)
+    end
 end
 
 

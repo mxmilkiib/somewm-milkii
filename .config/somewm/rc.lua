@@ -3339,9 +3339,37 @@ awful.screen.connect_for_each_screen(function(s)
         widget = wibox.container.margin,
     }
     local battery_tooltip = awful.tooltip({ objects = { battery_widget }, text = "Battery" })
+    -- CPU thermal blink: flash the battery widget when Tctl exceeds 90°C
+    -- (k10temp on Ryzen AI MAX+ PRO 395; Tjmax is 100°C). The blink draws
+    -- attention to sustained thermal load without a separate notification.
+    -- Reuses system_widgets' CPU temp discovery (probes k10temp/coretemp/zenpower
+    -- by name rather than a hardcoded hwmon index, which can shift across boots).
+    local TEMP_THRESHOLD = 90  -- degrees Celsius
+    local temp_blink_on = false
+    local temp_blink_timer = gears.timer({ timeout = 0.5 })
+    temp_blink_timer:connect_signal("timeout", function()
+        temp_blink_on = not temp_blink_on
+        battery_widget.opacity = temp_blink_on and 0.3 or 1.0
+    end)
+    local function update_temp_blink()
+        local t = system_widgets.read_cpu_temp and system_widgets.read_cpu_temp()
+        if not t then return end
+        if t > TEMP_THRESHOLD then
+            if not temp_blink_timer.started then
+                temp_blink_timer:start()
+            end
+        else
+            if temp_blink_timer.started then
+                temp_blink_timer:stop()
+                battery_widget.opacity = 1.0
+            end
+        end
+    end
     local function update_battery_widget()
-        local cap_f = io.open("/sys/class/power_supply/BAT0/capacity", "r")
-        local sts_f = io.open("/sys/class/power_supply/BAT0/status", "r")
+        local bat_path = battery_popup and battery_popup.find_battery_path
+            and battery_popup.find_battery_path() or "/sys/class/power_supply/BAT0"
+        local cap_f = io.open(bat_path .. "/capacity", "r")
+        local sts_f = io.open(bat_path .. "/status", "r")
         if not cap_f or not sts_f then
             if cap_f then cap_f:close() end
             if sts_f then sts_f:close() end
@@ -3379,9 +3407,11 @@ awful.screen.connect_for_each_screen(function(s)
     end
     track_timer(gears.timer.start_new(5, guarded(function()
         update_battery_widget()
+        update_temp_blink()
         return true
     end)))
     update_battery_widget()
+    update_temp_blink()
     -- left-click the battery widget for info + power-profile switcher popup;
     -- attached to its centered_bar wrapper below so the padding counts
 
