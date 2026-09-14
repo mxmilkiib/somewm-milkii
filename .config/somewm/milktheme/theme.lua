@@ -486,50 +486,68 @@ theme.layout_icon_config = {
 
 -- // MARK: svg
 
--- You can use your own layout icons like this:
-theme.layout_fairh = themes_path.."default/layouts/fairhw.png"
-theme.layout_fairv = themes_path.."default/layouts/fairvw.png"
-theme.layout_floating  = themes_path.."default/layouts/floatingw.png"
-theme.layout_magnifier = themes_path.."default/layouts/magnifierw.png"
-theme.layout_max = themes_path.."default/layouts/maxw.png"
-theme.layout_fullscreen = themes_path.."default/layouts/fullscreenw.png"
-theme.layout_tilebottom = themes_path.."default/layouts/tilebottomw.png"
-theme.layout_tileleft   = themes_path.."default/layouts/tileleftw.png"
-theme.layout_tile = themes_path.."default/layouts/tilew.png"
-theme.layout_tiletop = themes_path.."default/layouts/tiletopw.png"
-theme.layout_spiral  = themes_path.."default/layouts/spiralw.png"
-theme.layout_dwindle = themes_path.."default/layouts/dwindlew.png"
-theme.layout_cornernw = themes_path.."default/layouts/cornernww.png"
-theme.layout_cornerne = themes_path.."default/layouts/cornernew.png"
-theme.layout_cornersw = themes_path.."default/layouts/cornersww.png"
-theme.layout_cornerse = themes_path.."default/layouts/cornersew.png"
+-- All layout icons use unified SVG format (purple margin, black bg, grey windows)
+local function li(name) return theme.layout_icons .. name .. theme.layout_icon_config.current_suffix .. ".svg" end
 
--- theme.layout_dovetail = themes_path.."default/layouts/cornersew.png"
+-- Custom layouts
+theme.layout_threefifths = li("threefifths")       -- lain.layout.threefifths
+theme.layout_centerwork_adaptiveh = li("centerwork_adaptiveh")
+theme.layout_centerwork_twothirdsh = li("centerwork_twothirdsh")
+theme.layout_vstack = li("vstack")                 -- vstack layout
+theme.layout_bsp = li("bsp")                       -- layouts.bsp
+theme.layout_tabbed = li("tabbed")                 -- layouts.tabbed
+theme.layout_grid = li("grid")                     -- layouts.grid
+theme.layout_threecol = li("threecol")             -- layouts.threecol
+theme.layout_scroller = li("scroller")             -- layouts.scroller
+theme.layout_quarter = li("quarter")               -- layouts.quarter
+theme.layout_tatami = li("tatami")                 -- layouts.tatami
+theme.layout_slice = li("slice")                   -- layouts.slice
 
+-- Exotic layouts
+theme.layout_msv = li("msv")                       -- layouts.msv
+theme.layout_fibh = li("fibh")                     -- layouts.fibh
+theme.layout_panes = li("panes")                   -- layouts.panes
+theme.layout_widetile = li("widetile")             -- layouts.widetile
+theme.layout_expose = li("expose")                 -- layouts.expose
 
+-- Lain layouts
+theme.layout_centerworkh = li("centerworkh")       -- lain.layout.centerwork.horizontal
+theme.layout_centerwork = li("centerwork")         -- lain.layout.centerwork (vertical)
+theme.layout_centerfair = li("centerfair")         -- lain.layout.termfair.center
+theme.layout_termfair = li("termfair")             -- lain.layout.termfair
+theme.layout_cascade = li("cascade")               -- lain.layout.cascade
+theme.layout_cascadetile = li("cascadetile")       -- lain.layout.cascade.tile
 
-theme.layout_threefifths = theme.layout_icons .. "threefifths" .. theme.layout_icon_config.current_suffix .. ".svg" -- lain.layout.threefifths (adaptive 3/5 active)
-theme.layout_centerwork_adaptiveh = theme.layout_icons .. "centerwork_adaptiveh" .. theme.layout_icon_config.current_suffix .. ".svg" -- centerwork_adaptive.horizontal
-theme.layout_centerwork_twothirdsh = theme.layout_icons .. "centerwork_twothirdsh" .. theme.layout_icon_config.current_suffix .. ".svg" -- centerwork_twothirds.horizontal
-theme.layout_centerworkh = theme.layout_icons .. "centerworkh" .. theme.layout_icon_config.current_suffix .. ".svg" -- lain.layout.centerwork.horizontal
-theme.layout_centered = theme.layout_icons .. "centered" .. theme.layout_icon_config.current_suffix .. ".svg" -- bling.layout.centered
-theme.layout_deck = theme.layout_icons .. "deck" .. theme.layout_icon_config.current_suffix .. ".svg" -- bling.layout.deck
-theme.layout_equalarea = theme.layout_icons .. "equalarea" .. theme.layout_icon_config.current_suffix .. ".svg" -- bling.layout.equalarea
-theme.layout_mstab = theme.layout_icons .. "mstab" .. theme.layout_icon_config.current_suffix .. ".svg" -- bling.layout.mstab
-theme.layout_tile = theme.layout_icons .. "tile" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.tile
-theme.layout_tiletop = theme.layout_icons .. "tiletop" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.tile.top
-theme.layout_tilebottom = theme.layout_icons .. "tilebottom" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.tile.bottom
-theme.layout_tileleft = theme.layout_icons .. "tileleft" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.tile.left
-theme.layout_magnifier = theme.layout_icons .. "magnifier" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.magnifier
-theme.layout_max = theme.layout_icons .. "max" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.max
-theme.layout_floating = theme.layout_icons .. "floating" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.floating
-theme.layout_cascade = theme.layout_icons .. "cascade" .. theme.layout_icon_config.current_suffix .. ".svg" -- lain.layout.cascade
-theme.layout_treetile = theme.layout_icons .. "treetile" .. theme.layout_icon_config.current_suffix .. ".svg" -- treetile layout
-theme.layout_trizen = theme.layout_icons .. "trizen" .. theme.layout_icon_config.current_suffix .. ".svg" -- trizen layout
-theme.layout_vstack = theme.layout_icons .. "vstack" .. theme.layout_icon_config.current_suffix .. ".svg" -- vstack layout (single-column vertical)
-theme.layout_carousel = theme.layout_icons .. "carousel" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.carousel
-theme.layout_spiral = theme.layout_icons .. "spiral" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.spiral
-theme.layout_fairh = theme.layout_icons .. "fairh" .. theme.layout_icon_config.current_suffix .. ".svg" -- awful.layout.suit.fair.horizontal
+-- Bling layouts
+theme.layout_centered = li("centered")             -- bling.layout.centered
+theme.layout_deck = li("deck")                     -- bling.layout.deck
+theme.layout_equalarea = li("equalarea")           -- bling.layout.equalarea
+theme.layout_mstab = li("mstab")                   -- bling.layout.mstab
+theme.layout_horizontal = li("horizontal")         -- bling.layout.horizontal
+theme.layout_vertical = li("vertical")             -- bling.layout.vertical
+
+-- Awful layouts
+theme.layout_tile = li("tile")                     -- awful.layout.suit.tile
+theme.layout_tiletop = li("tiletop")               -- awful.layout.suit.tile.top
+theme.layout_tilebottom = li("tilebottom")         -- awful.layout.suit.tile.bottom
+theme.layout_tileleft = li("tileleft")             -- awful.layout.suit.tile.left
+theme.layout_magnifier = li("magnifier")           -- awful.layout.suit.magnifier
+theme.layout_max = li("max")                       -- awful.layout.suit.max
+theme.layout_fullscreen = li("fullscreen")         -- awful.layout.suit.max.fullscreen
+theme.layout_floating = li("floating")             -- awful.layout.suit.floating
+theme.layout_carousel = li("carousel")            -- awful.layout.suit.carousel
+theme.layout_spiral = li("spiral")                 -- awful.layout.suit.spiral
+theme.layout_dwindle = li("dwindle")               -- awful.layout.suit.spiral.dwindle
+theme.layout_fairh = li("fairh")                   -- awful.layout.suit.fair.horizontal
+theme.layout_fairv = li("fairv")                   -- awful.layout.suit.fair
+theme.layout_cornernw = li("cornernw")             -- awful.layout.suit.corner.nw
+theme.layout_cornerne = li("cornerne")             -- awful.layout.suit.corner.ne
+theme.layout_cornersw = li("cornersw")             -- awful.layout.suit.corner.sw
+theme.layout_cornerse = li("cornerse")             -- awful.layout.suit.corner.se
+
+-- Other layouts
+theme.layout_treetile = li("treetile")             -- treetile layout
+theme.layout_thrizen = li("trizen")                -- thrizen layout
 
 theme.layout_leavedright  = "~/.config/awesome/awesome-leaved/icons/leavedright.png"
 theme.layout_leavedleft   = "~/.config/awesome/awesome-leaved/icons/leavedleft.png"
@@ -560,14 +578,8 @@ theme.child_filter_list = {}
 
 
 -- // MARK: PLUGIN LAYOUT ICONS
-theme.layout_thrizen = themes_path.."thrizen/themes/default/thrizen.png"
-
-theme.layout_termfair    = theme.lain_icons  .. "termfair.png"
-theme.layout_centerfair  = theme.layout_icons .. "centerfair" .. theme.layout_icon_config.current_suffix .. ".svg"  -- lain.layout.termfair.center (unified SVG)
--- cascade uses the unified SVG above; lain PNG superseded
-theme.layout_cascadetile = theme.lain_icons  .. "cascadetile.png" -- cascade.tile
-theme.layout_centerwork  = theme.lain_icons  .. "centerwork.png"
--- theme.layout_centerworkh = theme.lain_icons  .. "centerworkh.png" -- centerwork.horizontal (lain default PNG, superseded by unified SVG below)
+-- All layout icons now use unified SVG format defined above via li() helper.
+-- Old lain/default PNG assignments superseded.
 
 
 -- NOTE: PNG fallback intentionally disabled to avoid overriding unified SVG icon above
