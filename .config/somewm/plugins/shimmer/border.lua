@@ -25,6 +25,9 @@ local guarded = require("error_guard")
 
 local M = {}
 
+-- guard against duplicate signal connections on hot-reload (P11)
+local signals_connected = false
+
 -- // MARK: CONSTANT FOLDING & MATH OPTIMIZATION
 -- pre-calculated mathematical constants
 local HALF = 0.5
@@ -264,6 +267,7 @@ end
 generate_default_palette()
 
 -- set up client signals
+if not signals_connected then
 client.connect_signal("focus", guarded(function(c)
     border_loop = 0.0
     border_step = border_params.step_size or 0.5
@@ -282,6 +286,8 @@ end))
 -- listen for external pause/resume requests (e.g., DnD)
 awesome.connect_signal("shimmer::border_pause", guarded(function() M.pause() end))
 awesome.connect_signal("shimmer::border_resume", guarded(function() M.resume() end))
+signals_connected = true
+end
 
 -- respond to shimmer mode changes
 function M.on_mode_changed(mode)

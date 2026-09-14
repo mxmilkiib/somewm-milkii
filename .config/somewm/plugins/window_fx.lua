@@ -24,6 +24,9 @@ local M = {
     shadow = { enabled = true, radius = 24, offset_x = 0, offset_y = 6, opacity = 0.5 },
 }
 
+-- guard against duplicate signal connections on hot-reload (P11)
+local signals_connected = false
+
 -- per-client running animation handles, weak keys so clients can be collected
 local anims = setmetatable({}, { __mode = "k" })
 
@@ -52,15 +55,18 @@ end
 
 -- // MARK -- open fade
 
+if not signals_connected then
 client.connect_signal("request::manage", guarded(function(c)
     if awesome.startup then return end
     c.opacity = 0
     animate_opacity(c, 1, M.open_duration)
 end))
+end
 
 
 -- // MARK -- close animation
 
+if not signals_connected then
 client.connect_signal("request::unmanage", guarded(function(c)
     if awesome.startup then return end
     local geo = c:geometry()
@@ -93,10 +99,12 @@ client.connect_signal("request::unmanage", guarded(function(c)
             ghost = nil
         end)
 end))
+end
 
 
 -- // MARK -- focus dim
 
+if not signals_connected then
 client.connect_signal("focus", guarded(function(c)
     c.border_color = beautiful.border_focus
     animate_opacity(c, 1, M.dim_duration)
@@ -107,6 +115,7 @@ client.connect_signal("unfocus", guarded(function(c)
     if c.fullscreen then return end  -- don't dim videos and games
     animate_opacity(c, M.dim_opacity, M.dim_duration)
 end))
+end
 
 
 -- // MARK -- floating shadows
@@ -120,9 +129,12 @@ local function apply_shadow(c)
     end
 end
 
+if not signals_connected then
 client.connect_signal("request::manage", guarded(apply_shadow))
 client.connect_signal("property::floating", guarded(apply_shadow))
 client.connect_signal("property::fullscreen", guarded(apply_shadow))
 client.connect_signal("property::maximized", guarded(apply_shadow))
+signals_connected = true
+end
 
 return M
