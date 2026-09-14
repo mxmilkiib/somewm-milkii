@@ -60,6 +60,7 @@ local menubar = require("menubar")
 local hotkeys_popup = require("awful.hotkeys_popup")
 local naughty = require("naughty")
 local shimmer = require("plugins/shimmer") -- For shimmer mode functions
+local floating_rules = require("plugins.floating_rules") -- Dynamic floating rules (Super+Alt+F)
 local guarded = require("error_guard")
 
 -- Matcher generator for rules - supports class or instance matching
@@ -411,7 +412,7 @@ function M.build(ctx)
     {{modkey}, "F8", function() if ctx.toggle_keepassxc then ctx.toggle_keepassxc() end end, "toggle keepassxc", "keepassxc", "launcher"},
     {{modkey}, "F9", function() if ctx.toggle_doublecmd then ctx.toggle_doublecmd() end end, "toggle doublecmd", "doublecmd", "launcher"},
     {{modkey, shiftkey}, "F9", "oneko", "run oneko", "oneko", "launcher", true},  -- use instance matching
-    {{modkey}, "F11", "quasselclient", "run quasselclient", "quassel", "launcher", true},  -- use instance matching (instance = "quassel")
+    {{modkey}, "F11", "env QT_QPA_PLATFORMTHEME=qt5ct quasselclient", "run quasselclient", "quassel", "launcher", true},  -- use instance matching (instance = "quassel"); qt5ct for dark theme (Qt5 app under qt6ct)
     -- previous binding: run_or_raise via command string
     {{modkey}, "F12", function() if ctx.toggle_firefox then ctx.toggle_firefox() end end, "toggle firefox", "firefox", "launcher"},
     {{modkey, shiftkey}, "F12", "chromium", "run chromium", nil, "launcher"}
@@ -428,9 +429,10 @@ function M.build(ctx)
     {{modkey, altkey}, "q", function() local c = client.focus; if c then c:kill() end end, "kill focused window", nil, "utility"},
     -- old: {{modkey, altkey}, "c", "xcolor -s clipboard", "colour picker to clipboard", nil, "utility"},
     {{modkey, altkey}, "c", "hyprpicker -a", "colour picker to clipboard", nil, "utility"},
-    -- add focused window's identifier to rc.lua floating rules (helper script)
+    -- add focused window's identifier to floating rules (Lua module)
     -- old: {{modkey, altkey}, "f", "$HOME/.config/awesome/rc/add-floating-rule.sh", "add focused window to floating rules", nil, "utility"},
-    {{modkey, altkey}, "f", "$HOME/.config/somewm/rc/add-floating-rule.sh", "add focused window to floating rules", nil, "utility"},
+    -- old: {{modkey, altkey}, "f", "$HOME/.config/somewm/rc/add-floating-rule.sh", "add focused window to floating rules", nil, "utility"},
+    {{modkey, altkey}, "f", function() floating_rules.add_focused() end, "add focused window to floating rules", nil, "utility"},
     -- old: {{modkey, ctrlkey}, "a", "arandr", "run arandr", nil, "utility"},
     {{modkey, ctrlkey}, "a", "monitor_rofi.sh", "monitor layout menu", nil, "utility"},
     -- screen blanking / DPMS controls
