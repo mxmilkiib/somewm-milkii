@@ -34,7 +34,7 @@ function M.create(opts)
         local layout = awful.layout.get(c.screen)
 
         -- if client is not floating and layout has mouse_resize_handler, use it
-        if not c.floating and layout.mouse_resize_handler then
+        if not c.floating and layout and layout.mouse_resize_handler then
 
             local initial_coords = mouse.coords()
             local geo = c:geometry()
@@ -182,18 +182,16 @@ function M.create(opts)
                 height = math.floor(new_height)
             })
 
-            return m.buttons[3] or m.buttons[2]  -- continue as long as right or middle button is pressed
+            local continuing = m.buttons[3] or m.buttons[2]
+            if not continuing and c.floating and window_centers then
+                local new_geo = c:geometry()
+                window_centers[c] = {
+                    x = new_geo.x + new_geo.width / 2,
+                    y = new_geo.y + new_geo.height / 2
+                }
+            end
+            return continuing  -- continue as long as right or middle button is pressed
         end, "fleur")
-
-        -- update center position for our center-locked resizing
-        -- once resize is complete
-        if c.floating and window_centers then
-            local new_geo = c:geometry()
-            window_centers[c] = {
-                x = new_geo.x + new_geo.width / 2,
-                y = new_geo.y + new_geo.height / 2
-            }
-        end
     end
 end
 

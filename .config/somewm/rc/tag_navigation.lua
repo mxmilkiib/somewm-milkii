@@ -70,7 +70,9 @@ function M.cycle_tags_with_clients(direction)
     local current_screen = awful.screen.focused()
     local all_tags = current_screen.tags
     local current_tag = current_screen.selected_tag
+    if not current_tag then return end
     local current_index = gears.table.hasitem(all_tags, current_tag)
+    if not current_index then return end
 
     local count = #all_tags
 
@@ -95,7 +97,9 @@ function M.cycle_tags_with_visible_clients(direction)
     local current_screen = awful.screen.focused()
     local all_tags = current_screen.tags
     local current_tag = current_screen.selected_tag
+    if not current_tag then return end
     local current_index = gears.table.hasitem(all_tags, current_tag)
+    if not current_index then return end
 
     for i = 1, #all_tags - 1 do
         local idx

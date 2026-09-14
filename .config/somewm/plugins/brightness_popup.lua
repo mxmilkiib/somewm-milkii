@@ -37,6 +37,8 @@ local refresh_popup  -- forward declaration (used by make_refresh_button before 
 -- build_content) needs this bound as an upvalue
 local hide
 local is_pinned  -- getter set in build_content (see popup_common.pin)
+-- active debounce timers from slider rows; stopped on hide/rebuild (B27)
+local active_send_timers = {}
 
 
 -- MARK: DAEMON COMMUNICATION
@@ -258,6 +260,8 @@ end
 
 function refresh_popup(on_done)
     if not rows_container_ref then return end
+    for _, t in ipairs(active_send_timers) do t:stop() end
+    active_send_timers = {}
     rows_container_ref:reset()
 
     get_display_info(guarded(function(info)
@@ -347,6 +351,7 @@ function refresh_popup(on_done)
                     if pending_val then set_display_brightness(d, pending_val) end
                 end,
             }
+            active_send_timers[#active_send_timers + 1] = send_timer
             slider:connect_signal("property::value", function(_, val)
                 val = math.max(1, math.min(100, math.floor(val + 0.5)))
                 pending_val = val
@@ -503,6 +508,7 @@ end
 
 hide = function()
     if not popup then return end
+    for _, t in ipairs(active_send_timers) do t:stop() end
     popup_common.hide(popup)
 end
 

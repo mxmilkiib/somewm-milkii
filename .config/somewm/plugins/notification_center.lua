@@ -1319,6 +1319,7 @@ function M.clear_history()
     end
 
     history = {}
+    M.history = history
     M._rebuild_history()
     
     -- close popup after clearing all notifications

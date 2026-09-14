@@ -36,6 +36,8 @@ local refresh_popup  -- forward declaration (used by make_slider_row before defi
 -- build_content) needs this bound as an upvalue
 local hide
 local is_pinned  -- getter set in build_content (see popup_common.pin)
+-- active debounce timers from slider rows; stopped on hide/rebuild (B27)
+local active_send_timers = {}
 -- refs to the default-sink row's slider + pct, refreshed whenever the popup
 -- rebuilds; used to update that row in place on volume::updated (e.g. when
 -- scrolling the wibar icon) without a full popup rebuild
@@ -227,6 +229,7 @@ local function make_slider_row(device, device_type)
                     end
                 end,
             }
+            active_send_timers[#active_send_timers + 1] = send_timer
         end
         send_timer:stop()
         send_timer:start()
@@ -280,6 +283,8 @@ end
 
 function refresh_popup(on_done)
     if not rows_container_ref then if on_done then on_done() end return end
+    for _, t in ipairs(active_send_timers) do t:stop() end
+    active_send_timers = {}
     default_sink_view = nil
     rows_container_ref:reset()
 
@@ -378,6 +383,7 @@ end
 
 hide = function()
     if not popup then return end
+    for _, t in ipairs(active_send_timers) do t:stop() end
     popup_common.hide(popup)
 end
 

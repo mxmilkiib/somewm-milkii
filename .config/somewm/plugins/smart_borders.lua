@@ -12,6 +12,8 @@ local guarded = require("error_guard")
 
 local M = {}
 
+local initialized = false
+
 
 -- // MARK: -- border width helpers
 
@@ -50,6 +52,8 @@ end
 -- connect all signals needed for dynamic border updates.
 -- call once after client rules are registered.
 function M.init()
+    if initialized then return end
+    initialized = true
     client.connect_signal("request::manage", guarded(function(c)
         gears.timer.delayed_call(guarded(function()
             if not c or not c.valid then return end
