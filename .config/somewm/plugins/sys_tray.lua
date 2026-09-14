@@ -134,9 +134,11 @@ end
 
 
 local function show_clipboard_history()
-    -- use wl-paste to get current clipboard, rofi for selection
-    -- requires cliphist or a simple wl-paste history approach
-    awful.spawn.easy_async("bash -c 'wl-paste --watch cliphist store 2>/dev/null; cliphist list 2>/dev/null | rofi -dmenu -p clipboard | cliphist decode | wl-copy 2>/dev/null || wl-paste'", function()
+    -- one-shot store of the current clipboard contents into cliphist, then
+    -- list + rofi + decode + copy. wl-paste --watch is a long-running daemon
+    -- that belongs in autostart, not here: it blocks forever and the `;`
+    -- after it meant the rofi menu never ran (B4).
+    awful.spawn.easy_async("bash -c 'wl-paste 2>/dev/null | cliphist store 2>/dev/null; cliphist list 2>/dev/null | rofi -dmenu -p clipboard | cliphist decode 2>/dev/null | wl-copy 2>/dev/null || wl-paste'", function()
     end)
 end
 
