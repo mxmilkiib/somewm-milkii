@@ -167,8 +167,8 @@ local string_format, string_byte, string_sub, string_len =
       string.format, string.byte, string.sub, string.len
 
 -- cached table functions for performance
-local table_concat, table_insert, table_unpack = 
-      table.concat, table.insert, table.unpack
+local table_concat, table_insert, table_unpack =
+      table.concat, table.insert, unpack or table.unpack
 
 -- additional mathematical constants
 local THREE_QUARTERS = 0.75
@@ -484,11 +484,10 @@ end
 --     return global_speed_multiplier
 -- end
 
--- new: lock global user speed at 1.0 for now; keep preset speed active
+-- set the global user speed multiplier; affects timer interval and all
+-- progression speeds. 1.0 = default, 0.5 = half speed, 2.0 = double.
 function M.set_speed_multiplier(multiplier)
-    -- global user speed locked at 1.0; ignore external multiplier
-    -- global_speed_multiplier = 1.0
-    global_speed_multiplier = 0.5
+    global_speed_multiplier = multiplier or 1.0
     update_timer_interval()
 end
 
@@ -2167,6 +2166,7 @@ local function generate_letter_markup_internal(text, base_phase_offset, options)
     options = options or {}
     local colour_prog_mode = options.colour_prog_mode or current_colour_prog_mode
     local shine_prog_mode = options.shine_prog_mode or current_shine_prog_mode
+    local mode_name = shimmer_mode
     
     -- validate UTF-8 and escape XML before processing
     local escaped_text = gears.string.xml_escape(text)
@@ -2229,6 +2229,7 @@ local function generate_differential_markup(text, base_phase_offset, options)
     options = options or {}
     local colour_prog_mode = options.colour_prog_mode or current_colour_prog_mode
     local shine_prog_mode = options.shine_prog_mode or current_shine_prog_mode
+    local mode_name = shimmer_mode
     
     local cache_key = get_diff_cache_key(text, colour_prog_mode, shine_prog_mode)
     local cached_entry = differential_markup_cache[cache_key]
@@ -2550,6 +2551,10 @@ function M.stop()
         shimmer_timer:stop()
         shimmer_timer = nil
     end
+end
+
+function M.is_running()
+    return shimmer_timer ~= nil
 end
 
 function M.restart()

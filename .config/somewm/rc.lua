@@ -671,9 +671,11 @@ local layout_panes = require("layouts.panes")                         -- Fixed-p
 local layout_widetile = require("layouts.widetile")                   -- Wide-master tile
 local layout_expose = require("layouts.expose")                       -- Exposé-style overview
 
--- local shimmer = require("plugins.shimmer")                         -- Unified shimmer & border animation system
-local noop = function() end;                                          -- no-op stub for temp disable
-local shimmer = setmetatable({}, { __index = function() return noop end })
+local shimmer = require("plugins.shimmer")                        -- Unified shimmer & border animation system
+-- shimmer is loaded and configured but the animation timer is NOT started
+-- automatically; call shimmer.start() (or the toggle keybinding) to enable.
+-- This keeps CPU load at zero until the user opts in.
+local SHIMMER_ENABLED = false
 
 local mode_glyphs = require("plugins.mode_glyphs")                    -- stable tasklist mode glyphs
 local hotkey_dupe_detector = require("plugins.hotkey_dupe_detector")  -- duplicate hotkey detection
@@ -726,6 +728,18 @@ shimmer.configure({
 
 -- minimal startup timer for shimmer - just enough for tasklist widgets to initialize
 shimmer.post_startup_init()  -- defer small init to module (tasklist mapping + focused init)
+
+-- toggle shimmer animation on/off (off by default for CPU load)
+local function toggle_shimmer()
+    SHIMMER_ENABLED = not SHIMMER_ENABLED
+    if SHIMMER_ENABLED then
+        shimmer.start()
+        naughty.notify({ title = "shimmer", text = "enabled", timeout = 2 })
+    else
+        shimmer.stop()
+        naughty.notify({ title = "shimmer", text = "disabled", timeout = 2 })
+    end
+end
 
 -- configure reworked client mode task entry glyphs
 mode_glyphs.configure({ style = "basic" })
@@ -1837,6 +1851,7 @@ local keys = keybindings.build({
     toggle_tasklist_mode = toggle_tasklist_mode,
     -- mode glyphs toggle hotkey
     toggle_mode_glyphs_style = toggle_mode_glyphs_style,
+    toggle_shimmer = toggle_shimmer,
     -- old: cycle_tags_with_clients used locally in module
     -- new: pass global implementation so there's a single source of truth
     cycle_tags_with_clients = cycle_tags_with_clients,

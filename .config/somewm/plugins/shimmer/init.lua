@@ -617,6 +617,10 @@ M.get_color = animation.get_color
 M.start = animation.start
 M.stop = animation.stop
 M.restart = animation.restart
+M.is_running = animation.is_running or function() return false end
+M.toggle = function()
+    if M.is_running() then M.stop() else M.start() end
+end
 M.apply_to_widget = animation.apply_to_widget
 
 -- // MARK: PRESET MANAGEMENT
