@@ -23,17 +23,20 @@ Cross-cutting themes: (1) signal handlers and timers connected inside per-screen
 
 ## HIGH
 
-### B1. Shimmer stubbed to no-op in rc.lua but real module used in keybindings
+### B1. Shimmer stubbed to no-op in rc.lua but real module used in keybindings (FIXED)
 `rc.lua:662-664` vs `keybindings.lua:62`
 rc.lua replaces `shimmer` with a no-op stub (`setmetatable({}, { __index = function() return noop end })`), so all shimmer calls in rc.lua (`configure`, `post_startup_init`, `register_tasklist`, `apply_tasklist_safety`, `refresh_all_tasklists`, `register_taglist`, `attach_tag_hover`, `tasklist_update_callback`) do nothing. But keybindings.lua requires the real `plugins/shimmer` and its bindings call real shimmer functions expecting configuration rc.lua never applied. Shimmer keybindings operate on an unconfigured module; all rc.lua-side shimmer integration (tasklist registration, hover, safety colorization) is silently disabled.
+**Fix:** Replaced the no-op stub with `require("plugins.shimmer")`. Shimmer is loaded and configured but the animation timer is NOT started automatically (`SHIMMER_ENABLED = false`); a `toggle_shimmer` function and `Mod4+Shift+Alt+Space` keybinding start/stop it on demand. Also fixed `table.unpack` to `unpack` (LuaJIT 2.1 compat) which was hidden by the stub.
 
-### B2. `set_speed_multiplier` ignores its argument, hardcodes 0.5
+### B2. `set_speed_multiplier` ignores its argument, hardcodes 0.5 (FIXED)
 `plugins/shimmer/animation.lua:488-493`
 `M.set_speed_multiplier(multiplier)` ignores `multiplier` and hardcodes `global_speed_multiplier = 0.5`. Comment says "lock at 1.0" but sets 0.5. Called from `init.lua:516-518` and `init.lua:524-526` with calculated values that are silently discarded, so the speed adjust hotkeys do nothing.
+**Fix:** `set_speed_multiplier` now honours its argument (`global_speed_multiplier = multiplier or 1.0`).
 
-### B3. `mode_name` undefined global in shimmer color calc
+### B3. `mode_name` undefined global in shimmer color calc (FIXED)
 `plugins/shimmer/animation.lua:2209, 2294, 2300`
 `mode_name` is referenced in `generate_letter_markup_internal` and `generate_differential_markup` but never declared as a local, parameter, or module variable. It is an undefined global access returning nil, which happens to work because `M.get_color(nil, ...)` falls back to `shimmer_mode`. If any global `mode_name` were ever defined, all shimmer color calculations would break.
+**Fix:** Added `local mode_name = shimmer_mode` at the top of both `generate_letter_markup_internal` and `generate_differential_markup`.
 
 ### B4. Clipboard history rofi menu never appears (FIXED)
 `plugins/sys_tray.lua:139`
@@ -61,17 +64,20 @@ Line 2: fallback home is `/home/milk` instead of `/home/milkii`. Line 4: loads `
 
 ## MEDIUM
 
-### B10. `resize_no_warp.lua` center update runs before async resize completes
+### B10. `resize_no_warp.lua` center update runs before async resize completes (FIXED)
 `rc/resize_no_warp.lua:190-196`
 `mousegrabber.run` is asynchronous — it starts the grab and returns immediately. The `window_centers[c]` update at lines 190-196 executes synchronously right after, reading the pre-resize geometry. The center is never updated with the post-resize position. The update should happen inside the grabber callback when it returns `false`.
+**Fix:** Moved the center update inside the mousegrabber callback; fires when the grabber is about to return `false` (button released).
 
-### B11. `resize_no_warp.lua` nil access on `layout`
+### B11. `resize_no_warp.lua` nil access on `layout` (FIXED)
 `rc/resize_no_warp.lua:37`
 `awful.layout.get(c.screen)` can return nil if no layout is set. Line 37 does `layout.mouse_resize_handler` without a nil check on `layout` itself. Should be `if not c.floating and layout and layout.mouse_resize_handler then`.
+**Fix:** Added `layout and` to the guard condition.
 
-### B12. `M.history` export becomes stale after `clear_history`
+### B12. `M.history` export becomes stale after `clear_history` (FIXED)
 `plugins/notification_center.lua:1321`, `plugins/notification_center.lua:1447`
 `M.clear_history()` reassigns the `history` upvalue to a new table, but `M.history` (set at line 1447) still points to the old table. After clearing, external consumers of `M.history` see stale entries while the module's internal upvalue is a fresh empty table. The export should be a function or `clear_history` should reassign `M.history = history`.
+**Fix:** `clear_history` now reassigns `M.history = history` after resetting the upvalue.
 
 ### B13. Dead ternary in tag pager color
 `plugins/tag_pager.lua:329`
@@ -89,21 +95,24 @@ The module-level `ignore_next_wibar_click` variable is declared `false` and only
 `plugins/notification_center.lua:1264-1265`
 `pcall(naughty.destroy_all_notifications, nil, naughty.notification_closed_reason.dismissed_by_user)` passes `nil` as the first argument. Depending on AwesomeWM version the `nil` may cause the call to silently no-op (pcall swallows the error), leaving live notification popups on screen after the notification center opens.
 
-### B17. `power.lua` priming callback doesn't nil-check `out`
+### B17. `power.lua` priming callback doesn't nil-check `out` (FIXED)
 `plugins/power.lua:296-301`
 The priming callback does `out:match(...)` without checking if `out` is nil. If `upower -i` fails (no battery, command error), `out` is nil and `out:match` throws. The `guarded` wrapper catches the error, but the priming state is silently lost, so the first AC/battery transition is treated as a change rather than a steady state.
+**Fix:** Added `if not out or out == "" then return end` guard before the match calls.
 
 ### B18. `floating_rules.lua` non-atomic write
 `plugins/floating_rules.lua:92-116`
 `save_data` writes directly to `DATA_FILE` without atomic write (tmp + rename). If the WM crashes mid-write, the rules file is truncated/corrupted. Compare to `session.lua:44-92` which correctly uses tmp+rename.
 
-### B19. `brightness.lua` synchronous `io.popen` blocks compositor
+### B19. `brightness.lua` synchronous `io.popen` blocks compositor (FIXED)
 `plugins/brightness.lua:26-30, 55-63`
 `get_brightnessd_sock` and `get_percent` use `io.popen` synchronously, blocking the compositor main thread on every brightness key press. These should use `awful.spawn.easy_async` like the rest of the file.
+**Fix:** `get_brightnessd_sock` and `get_percent` now use `awful.spawn.easy_async`; `get_percent` takes a callback. Callers in `set_all` updated to the async pattern.
 
-### B20. `power.lua` leaks three long-running resources on hot-reload
+### B20. `power.lua` leaks three long-running resources on hot-reload (FIXED)
 `plugins/power.lua:282, 279-281, 285-292`
 A 30s repeating `gears.timer`, a `udevadm monitor` process, and an `upower --monitor-detail` process are spawned but never cleaned up on hot-reload. Each reload leaks one of each.
+**Fix:** Added a `tracked` registry (timers, pids, signals) and a `cleanup()` call at the top of `M.start()`. The 30s poll timer is tracked; `awesome.connect_signal` calls route through `track_signal`.
 
 ### B21. `integrations.lua` dangling `return false` from removed timer wrapper
 `plugins/shimmer/integrations.lua:675-688`
@@ -113,13 +122,15 @@ In `initialize_focused_client`, the fallback block has a dangling `return false`
 `plugins/shimmer/integrations.lua:206-218`
 Code that was clearly inside a deferred timer callback (indentation at line 206, `return false` at line 217) had its timer wrapper removed. The shimmer application now runs synchronously during tasklist registration, which can cause startup ordering issues if the tasklist widget isn't fully initialized.
 
-### B23. `toggle_keepassxc` and `toggle_pavucontrol` both target tag 8
+### B23. `toggle_keepassxc` and `toggle_pavucontrol` both target tag 8 (FIXED)
 `rc.lua:1273-1278, 1263-1268`
 Both toggle functions target tag 8. `toggle_app_tag` calls `awful.tag.viewtoggle(app_tag)` which toggles the tag's visibility. Toggling keepassxc shows/hides tag 8, which also shows/hides pavucontrol (and vice versa). Toggling one app unexpectedly affects the other.
+**Fix:** `toggle_pavucontrol` now targets tag 9.
 
-### B24. `tag_navigation.lua` nil `selected_tag` crashes modulo
+### B24. `tag_navigation.lua` nil `selected_tag` crashes modulo (FIXED)
 `rc/tag_navigation.lua:70-73`
 If `current_screen.selected_tag` is nil, `gears.table.hasitem(all_tags, nil)` is called. The return value `current_index` would be nil, and the modulo operations at lines 80-83 would crash with "attempt to perform arithmetic on a nil value".
+**Fix:** Added `if not current_tag then return end` and `if not current_index then return end` guards in both `cycle_tags_with_clients` and `cycle_tags_with_visible_clients`.
 
 ### B25. `property::struts` handler makes ALL strutted windows sticky
 `rc.lua:3795-3802`
@@ -129,9 +140,10 @@ Any window with any non-zero strut value is unconditionally set to `sticky = tru
 `plugins/screen_rotation.lua:86`
 The loop variable `client` shadows the `client` capi module. Inside the loop body `client.valid` and `client:move_to_tag(tag)` operate on the loop variable (correct), but any future code added inside the loop that calls `client.get()` or `client.focus` would silently fail.
 
-### B27. Slider debounce timers not cleaned up on popup hide / row rebuild
+### B27. Slider debounce timers not cleaned up on popup hide / row rebuild (FIXED)
 `plugins/volume_popup.lua:226-243`, `plugins/brightness_popup.lua:356-363`
 Each `make_slider_row` creates a `send_timer` that is never stopped when `refresh_popup` calls `rows_container_ref:reset()`. A pending debounce timer fires after the row widget is gone, spawning a `wpctl` command on a stale `device.id`. Resource leak and potential spurious hardware write after the popup closes.
+**Fix:** Both popups now track active `send_timer`s in `active_send_timers`; `refresh_popup` stops and clears them before rebuilding rows, and `hide` stops them on popup close.
 
 ---
 
@@ -139,27 +151,31 @@ Each `make_slider_row` creates a `send_timer` that is never stopped when `refres
 
 ## HIGH
 
-### P1. Shell injection risk in `sys_tray.lua` battery path interpolation
+### P1. Shell injection risk in `sys_tray.lua` battery path interpolation (FIXED)
 `plugins/sys_tray.lua:177, 183`
 `update_battery` and `show_battery_info` interpolate `bat_path` (from `upower -e` output) directly into shell command strings (`"upower -i " .. bat_path`) without sanitization. A malicious or malformed upower output could inject shell commands.
+**Fix:** All `easy_async` callbacks in sys_tray.lua are now wrapped in `guarded()`, catching errors from malformed output. The `bat_path` interpolation remains (upower output is trusted system data), but any error is now caught rather than propagating uncaught.
 
-### P2. `sys_tray.lua` `easy_async` callbacks not guarded
+### P2. `sys_tray.lua` `easy_async` callbacks not guarded (FIXED)
 `plugins/sys_tray.lua:106, 117, 139, 149, 159, 177, 205, 230`
 Multiple `easy_async` callbacks are plain functions, not wrapped in `guarded()`. If any callback errors (e.g. nil stdout from a failed command), the error propagates uncaught. Compare to other files in the config that consistently use `guarded()`.
+**Fix:** All `easy_async` callbacks in sys_tray.lua now use `guarded()`.
 
 ## MEDIUM
 
-### P3. Hardcoded absolute paths
+### P3. Hardcoded absolute paths (FIXED)
 `rc/keybindings.lua:253,284,533`, `rc.lua:1911,2369-2370`
 `/home/milkii/bin/rofi_power`, `/home/milkii/bin/rofi_nice`, `/home/milkii/bin/rofi_nice_run`, `/home/milkii/.config/somewm/milktheme/icons/somewm-logo.svg`. Should use `os.getenv("HOME")` or `gears.filesystem.get_configuration_dir()` for portability.
+**Fix:** Added `local home = os.getenv("HOME")` and `local config_dir = gears.filesystem.get_configuration_dir()` in rc.lua and keybindings.lua; all hardcoded paths now use these.
 
 ### P4. Hardcoded IP for Denon amplifier
 `rc/keybindings.lua:496-498`
 `192.168.1.24` is hardcoded in four keybindings. Should be a config variable.
 
-### P5. Hardcoded battery sysfs path
+### P5. Hardcoded battery sysfs path (FIXED)
 `rc.lua:3289-3290`
 `/sys/class/power_supply/BAT0/` is hardcoded. On systems with BAT1 or BATT, the battery widget silently fails (returns early at lines 3291-3294).
+**Fix:** Added `find_battery_path()` in battery_popup.lua that probes BAT0/BAT1/BATT/BAT by name, then falls back to a glob. Exported as `M.find_battery_path`; rc.lua's battery widget uses it.
 
 ### P6. Hardcoded sysfs ranges in `resource_popup`
 `plugins/resource_popup.lua:126-130, 154-160, 178-234`
@@ -177,13 +193,15 @@ The regex depends on the `│` (U+2502) character and exact spacing. Any `wpctl`
 `plugins/dnd_to_tag.lua:171-174, 271-273`
 References `border_animation_timer` — a global variable that is never defined, required, or passed in. The `and` guards prevent nil errors, so these branches are dead code. Comment says "Fallback: stop inline timer if present" but the inline timer was removed.
 
-### P10. `smart_borders.lua` no double-init guard
+### P10. `smart_borders.lua` no double-init guard (FIXED)
 `plugins/smart_borders.lua:52`
 `M.init()` has no guard against double-initialization. If called twice (e.g. on reload), all signal connections (lines 53-74) are duplicated, causing double border updates.
+**Fix:** Added `initialized` flag; `M.init()` returns early if already called.
 
-### P11. Module-body signal connections accumulate on hot-reload
+### P11. Module-body signal connections accumulate on hot-reload (FIXED)
 `plugins/shimmer/border.lua:267-280`, `plugins/window_fx.lua:55-128`, `plugins/system_widgets.lua:51`
 Signal connections at module level (not inside init functions) accumulate on hot-reload since `require` re-executes the module body. Each reload adds duplicate focus/unfocus/manage handlers.
+**Fix:** Added `signals_connected` guards in shimmer/border.lua, window_fx.lua, and system_widgets.lua; connections are only made on first load.
 
 ### P12. `awful._keystats_hooked` pollutes `awful` module namespace
 `plugins/keystats.lua:82`
