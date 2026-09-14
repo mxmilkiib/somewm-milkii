@@ -32,10 +32,11 @@
 --
 -- TEXT WRAPPING:
 --   • Width constraint applied to text column container, not individual textboxes
---   • Calculation: popup_width - icon - margins - footer_buttons_min - safety padding
+--   • Calculation: Popup Width - Section Margins - Icon - Safety Padding
 --   • ellipsize="none" + wrap="word_char" allows unlimited vertical expansion
 --   • Text wraps at constrained width but grows vertically to show full content
---   • Footer always 3 lines (app name, time, date) with forced_height for consistency
+--   • Entries use the Widget-Popup Section Form (Title left, App + Timestamp
+--     right in Gold, Message below) with Purple Separators between Sections
 --
 -- NOTIFICATION PROCESSING:
 --   • pcall(require, "naughty.dbus") early to ensure DBus service registers
@@ -81,14 +82,12 @@ local naughty = require("naughty")
 local wibox = require("wibox")
 local menubar = require("menubar")
 local root = root
-local mouse = mouse
-local client = client
-local screen = screen
 
 local gtable = require("gears.table")
 local gstring = require("gears.string")
 local gshape = require("gears.shape")
 local guarded = require("error_guard")
+local popup_common = require("plugins.popup_common")
 
 local M = {}
 
@@ -109,24 +108,35 @@ local xresources = get_xresources()
 local dpi = xresources and xresources.apply_dpi or function(value) return value end
 
 -- Color Constants
-local COLOR_PURPLE = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
-local COLOR_BLACK = "#000000"
-local COLOR_WHITE = "#FFFFFF"
-local COLOR_GOLD = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
-local COLOR_GREY = "#AAAAAA"
-local COLOR_HOVER = "#ffffff33"
+local COLOR_PURPLE = popup_common.theme.PURPLE
+local COLOR_BLACK = popup_common.theme.BLACK
+local COLOR_WHITE = popup_common.theme.WHITE
+local COLOR_GOLD = popup_common.theme.GOLD
+local COLOR_GREY = popup_common.theme.GREY
+local COLOR_HOVER = popup_common.theme.HOVER
+local FONT_HEAD  = popup_common.fonts.FONT_HEAD
+local FONT_WIDGET = popup_common.fonts.FONT_MONO
+-- local NOTIF_FONT = beautiful.notification_font or beautiful.font or "Sans 10"
+-- local FONT_CLEAR = "Hack Nerd Font 12"
+local FONT_CLEAR = popup_common.fonts.FONT_CLEAR
+-- local FONT_FOOTER = "Hack Nerd Font Mono 11"
+-- Widget-Popup Section Fonts (same as the resource/battery/volume popups)
+local FONT       = popup_common.fonts.FONT
+local FONT_VALUE = popup_common.fonts.FONT_BOLD
 
 -- Button Size Constants
 local BUTTON_HEIGHT_CLOSE = dpi(15)
 local BUTTON_WIDTH_CLOSE = dpi(16)
 local BUTTON_WIDTH_TEST = dpi(42)
-local BUTTON_WIDTH_COMPACT = dpi(52)
+local BUTTON_WIDTH_COMPACT = dpi(62)
 local BUTTON_WIDTH_NORMAL = dpi(68)
-local BUTTON_HEIGHT_NORMAL = dpi(10)
+local BUTTON_HEIGHT_NORMAL = dpi(24)
 
 local history_limit = beautiful.notification_history_limit or 50
+-- local popup_width = beautiful.notification_center_width or dpi(600)
+-- local popup_width = beautiful.notification_center_width or dpi(720)
 local popup_width = beautiful.notification_center_width
-    or dpi(600)
+    or dpi(800)
 
 local popup_margins = beautiful.notification_center_margins or {
     top = dpi(48),
@@ -165,19 +175,29 @@ local button_hover_bg = beautiful.notification_center_button_hover_bg
 local history = {}
 local suppressed_notifications = setmetatable({}, { __mode = "k" })
 
+-- transient OSD app_names whose notifications show a live popup but should
+-- not be retained in the notification centre history
+local osd_app_names = {
+    volume = true,
+    brightness = true,
+}
+
 local history_list = wibox.layout.fixed.vertical()
 history_list.spacing = dpi(0)
 -- no max_widget_size limit - allow text to wrap fully without truncation
 
 local header_count = wibox.widget {
-    markup = "<span size='large'>0</span>",
+    markup = "0",
+    -- font = popup_common.fonts.FONT_STAR,
+    font = popup_common.fonts.FONT_CLEAR,
     align = "center",
     valign = "center",
     widget = wibox.widget.textbox,
 }
 
 local header_title_text = wibox.widget {
-    markup = "<span size='large'><b>notifications</b></span>",
+    text  = "Notifications",
+    font  = FONT_HEAD,
     align = "left",
     valign = "center",
     widget = wibox.widget.textbox,
@@ -185,9 +205,6 @@ local header_title_text = wibox.widget {
 
 local header_title = wibox.widget {
     header_title_text,
-    top = dpi(3),
-    left = dpi(6),
-    bottom = dpi(3),
     widget = wibox.container.margin,
 }
 
@@ -195,7 +212,8 @@ local popup_instance
 local toggle_indicators = setmetatable({}, { __mode = "v" })
 local icon_cache = {}  -- cache for icon path validation to avoid repeated file I/O
 local rebuild_pending = false  -- flag to defer rebuilds when popup not visible
-local ignore_next_wibar_click = false  -- prevent wibar handler from interfering with toggle widget
+local is_pinned  -- pin-toggle getter set in create_popup_header (see popup_common.pin)
+local header_click_from_pin = false  -- pin clicks bubble up to the header's close binding
 
 local HISTORY_SIGNAL = "notification_center::history_changed"
 
@@ -487,96 +505,112 @@ local function create_icon_widget(entry)
 end
 
 -- create text column with title and message
-local function create_text_column(entry, max_width)
-    local title_widget = wibox.widget {
-        markup = "<b>" .. (sanitize_text(entry.title) or "(untitled)") .. "</b>",
-        wrap = "word_char",
-        ellipsize = "none",
-        widget = wibox.widget.textbox,
-    }
-
-    local message_widget = wibox.widget {
-        text = sanitize_text(entry.text) or sanitize_text(entry.original_message) or "(no message)",
-        wrap = "word_char",
-        ellipsize = "none",
-        widget = wibox.widget.textbox,
-    }
-
-    local column = wibox.widget {
-        {
-            title_widget,
-            top = dpi(1),
-            widget = wibox.container.margin,
-        },
-        {
-            message_widget,
-            top = dpi(0),
-            widget = wibox.container.margin,
-        },
-        spacing = dpi(0),
-        layout = wibox.layout.fixed.vertical,
-    }
-    
-    -- wrap column with width constraint but no height limit
-    return wibox.widget {
-        column,
-        width = max_width,
-        widget = wibox.container.constraint,
-    }
-end
-
--- create footer with app name and timestamp (always 3 lines)
-local function create_footer_widget(entry)
-    local app_text = sanitize_text(entry.app_name) or "awesomewm"
-    local footer_app = wibox.widget {
-        markup = "<span foreground='" .. COLOR_WHITE .. "' size='small'>" .. app_text .. "</span>",
-        align = "right",
-        widget = wibox.widget.textbox,
-    }
-    
-    local time_str = os.date("%H:%M", entry.timestamp)
-    local date_str = os.date("%Y-%m-%d", entry.timestamp)
-    local time_label = wibox.widget {
-        markup = "<span size='small'>" .. time_str .. "</span>",
-        align = "right",
-        opacity = 0.7,
-        widget = wibox.widget.textbox,
-    }
-    local date_label = wibox.widget {
-        markup = "<span size='small'>" .. date_str .. "</span>",
-        align = "right",
-        opacity = 0.7,
-        widget = wibox.widget.textbox,
-    }
-    
-    local time_date_stack = wibox.widget {
-        time_label,
-        date_label,
-        spacing = dpi(-1),
-        layout = wibox.layout.fixed.vertical,
-    }
-    
-    -- ensure footer always maintains consistent 3-line height
-    return wibox.widget {
-        footer_app,
-        time_date_stack,
-        spacing = dpi(-1),
-        forced_height = dpi(36), -- approximate height for 3 small lines
-        layout = wibox.layout.fixed.vertical,
-    }
-end
+-- local function create_text_column(entry, max_width)
+--     local title_widget = wibox.widget {
+--         markup = "<b>" .. (sanitize_text(entry.title) or "(untitled)") .. "</b>",
+--         font = NOTIF_FONT,
+--         wrap = "word_char",
+--         ellipsize = "none",
+--         widget = wibox.widget.textbox,
+--     }
+--
+--     local message_widget = wibox.widget {
+--         text = sanitize_text(entry.text) or sanitize_text(entry.original_message) or "(no message)",
+--         font = NOTIF_FONT,
+--         wrap = "word_char",
+--         ellipsize = "none",
+--         widget = wibox.widget.textbox,
+--     }
+--
+--     local column = wibox.widget {
+--         {
+--             title_widget,
+--             top = dpi(1),
+--             widget = wibox.container.margin,
+--         },
+--         {
+--             message_widget,
+--             top = dpi(0),
+--             widget = wibox.container.margin,
+--         },
+--         spacing = dpi(0),
+--         layout = wibox.layout.fixed.vertical,
+--     }
+--
+--     -- wrap column with width constraint but no height limit
+--     return wibox.widget {
+--         column,
+--         width = max_width,
+--         widget = wibox.container.constraint,
+--     }
+-- end
+--
+-- -- Create Footer with App Name and Timestamp (always 2 Lines)
+-- local function create_footer_widget(entry)
+--     local app_text = sanitize_text(entry.app_name) or "awesomewm"
+--     local footer_app = wibox.widget {
+--         markup = "<span foreground='" .. COLOR_WHITE .. "' size='small'>" .. app_text .. "</span>",
+--         align = "right",
+--         widget = wibox.widget.textbox,
+--     }
+--
+--     -- local time_str = os.date("%H:%M", entry.timestamp)
+--     -- local date_str = os.date("%Y-%m-%d", entry.timestamp)
+--     -- local time_label = wibox.widget {
+--     --     markup = "<span size='small'>" .. time_str .. "</span>",
+--     --     align = "right",
+--     --     opacity = 0.7,
+--     --     widget = wibox.widget.textbox,
+--     -- }
+--     -- local date_label = wibox.widget {
+--     --     markup = "<span size='small'>" .. date_str .. "</span>",
+--     --     align = "right",
+--     --     opacity = 0.7,
+--     --     widget = wibox.widget.textbox,
+--     -- }
+--     --
+--     -- local time_date_stack = wibox.widget {
+--     --     time_label,
+--     --     date_label,
+--     --     spacing = dpi(0),
+--     --     layout = wibox.layout.fixed.vertical,
+--     -- }
+--
+--     -- Date and Time on one Line at Font Size 11
+--     local datetime_str = os.date("%Y-%m-%d %H:%M", entry.timestamp)
+--     local datetime_label = wibox.widget {
+--         text = datetime_str,
+--         font = FONT_FOOTER,
+--         align = "right",
+--         opacity = 0.7,
+--         widget = wibox.widget.textbox,
+--     }
+--
+--     -- footer sizes naturally from its text so fonts remain consistent
+--     return wibox.widget {
+--         footer_app,
+--         datetime_label,
+--         spacing = dpi(0),
+--         layout = wibox.layout.fixed.vertical,
+--     }
+-- end
 
 -- create small button widget
-local function create_small_button(label, callback, compact)
+-- full_height drops the forced_height so the Button fills its Row (X Strip)
+local function create_small_button(label, callback, compact, font, full_height)
     local markup = (label == "X") and "<span size='x-small' foreground='" .. COLOR_BLACK .. "'>X</span>" or label
     local text_widget = wibox.widget {
         markup = markup,
+        font = font,
         align = "center",
         valign = "center",
         widget = wibox.widget.textbox,
     }
 
-    local button_height = (label == "X" and BUTTON_HEIGHT_CLOSE) or BUTTON_HEIGHT_NORMAL
+    -- local button_height = (label == "X" and BUTTON_HEIGHT_CLOSE) or BUTTON_HEIGHT_NORMAL
+    local button_height = not full_height
+        and ((label == "X" and BUTTON_HEIGHT_CLOSE) or BUTTON_HEIGHT_NORMAL)
+        or nil
     local button_width
     if label == "X" then
         button_width = BUTTON_WIDTH_CLOSE
@@ -648,7 +682,143 @@ local function create_small_button(label, callback, compact)
 end
 
 -- create button row with delete and action buttons
-local function create_button_row(entry)
+-- local function create_button_row(entry)
+--     local forget_button = create_small_button("X", function()
+--         remove_entry_by_id(entry.id)
+--         M._rebuild_history()
+--         -- close popup if no notifications remain
+--         if #history == 0 and popup_instance and popup_instance.visible then
+--             M.hide()
+--         end
+--     end)
+--
+--     local button_row = wibox.widget {
+--         {
+--             forget_button,
+--             top = 0,
+--             bottom = 0,
+--             right = 2,
+--             widget = wibox.container.margin,
+--         },
+--         layout = wibox.layout.fixed.horizontal,
+--     }
+--
+--     if entry.action_count and entry.action_count > 0 then
+--         button_row:add(create_small_button("actions", function()
+--             naughty.notify({
+--                 title = "actions unavailable",
+--                 text = "stored notifications list actions for reference only",
+--                 timeout = 2,
+--                 flags = { suppress_history = true },
+--             })
+--         end))
+--     end
+--
+--     return button_row
+-- end
+
+-- local function create_history_row(entry)
+--     local icon_widget = create_icon_widget(entry)
+--
+--     -- calculate max width for text to wrap before overlapping footer
+--     -- popup_width - icon(32) - icon_margins(16) - footer_buttons_min(120) - safety(20)
+--     local text_max_width = popup_width - dpi(32) - dpi(16) - dpi(120) - dpi(20)
+--
+--     local text_column = create_text_column(entry, text_max_width)
+--     local footer_widget = create_footer_widget(entry)
+--     local button_row = create_button_row(entry)
+--
+--     -- wrap icon in a place container for vertical centering
+--     local icon_placed = wibox.container.place(icon_widget)
+--     icon_placed.valign = "center"
+--
+--     local left_content = wibox.widget {
+--         {
+--             icon_placed,
+--             left = dpi(4),
+--             right = dpi(4),
+--             top = dpi(4),
+--             bottom = dpi(4),
+--             widget = wibox.container.margin,
+--         },
+--         {
+--             text_column,
+--             left = dpi(0),
+--             top = dpi(4),
+--             bottom = dpi(4),
+--             widget = wibox.container.margin,
+--         },
+--         spacing = dpi(0),
+--         layout = wibox.layout.fixed.horizontal,
+--     }
+--
+--     local date_and_actions = wibox.widget {
+--         {
+--             footer_widget,
+--             right = dpi(2),
+--             widget = wibox.container.margin,
+--         },
+--         button_row,
+--         spacing = dpi(2),
+--         layout = wibox.layout.fixed.horizontal,
+--     }
+--
+--     local date_and_actions_placed = wibox.container.place(date_and_actions)
+--     date_and_actions_placed.valign = "center"
+--
+--     local top_row = wibox.widget {
+--         left_content,
+--         nil,
+--         date_and_actions_placed,
+--         layout = wibox.layout.align.horizontal,
+--     }
+--
+--     local row = wibox.widget {
+--         {
+--             top_row,
+--             widget = wibox.container.margin,
+--         },
+--         bg = COLOR_BLACK,
+--         fg = body_fg,
+--         widget = wibox.container.background,
+--     }
+--
+--     return row
+-- end
+
+-- Entry in the Widget-Popup Section Form (resource/battery/volume style):
+-- Icon left, then a Column with a Header Row (Title left, App + Timestamp
+-- Value right in Gold, Actions Button if any) and the Message below.
+-- A full-height X Strip sits flush at the Row's right Edge.
+local function create_history_row(entry)
+    local icon_widget = create_icon_widget(entry)
+
+    local title_text = sanitize_text(entry.title) or "(untitled)"
+    local message_text = sanitize_text(entry.text)
+        or sanitize_text(entry.original_message) or "(no message)"
+    local app_text = sanitize_text(entry.app_name) or "awesomewm"
+    local datetime_str = os.date("%Y-%m-%d %H:%M", entry.timestamp)
+
+    local title_label = wibox.widget {
+        text = title_text,
+        font = FONT_HEAD,
+        align = "left",
+        valign = "center",
+        widget = wibox.widget.textbox,
+    }
+
+    -- fg only exists on wibox.container.background in somewm, so the Gold
+    -- Value is coloured via Pango Markup instead
+    local value_label = wibox.widget {
+        markup = "<span foreground='" .. COLOR_GOLD .. "'>"
+            .. gstring.xml_escape(app_text .. "  ·  " .. datetime_str) .. "</span>",
+        font = FONT_VALUE,
+        align = "right",
+        valign = "center",
+        widget = wibox.widget.textbox,
+    }
+
+    -- full-height X Strip flush at the Row's right Edge
     local forget_button = create_small_button("X", function()
         remove_entry_by_id(entry.id)
         M._rebuild_history()
@@ -656,21 +826,16 @@ local function create_button_row(entry)
         if #history == 0 and popup_instance and popup_instance.visible then
             M.hide()
         end
-    end)
+    end, nil, nil, true)
 
-    local button_row = wibox.widget {
-        {
-            forget_button,
-            top = 0,
-            bottom = 0,
-            right = 2,
-            widget = wibox.container.margin,
-        },
+    local right_side = wibox.widget {
+        value_label,
+        spacing = dpi(6),
         layout = wibox.layout.fixed.horizontal,
     }
 
     if entry.action_count and entry.action_count > 0 then
-        button_row:add(create_small_button("actions", function()
+        right_side:add(create_small_button("actions", function()
             naughty.notify({
                 title = "actions unavailable",
                 text = "stored notifications list actions for reference only",
@@ -679,77 +844,102 @@ local function create_button_row(entry)
             })
         end))
     end
-    
-    return button_row
-end
 
-local function create_history_row(entry)
-    local icon_widget = create_icon_widget(entry)
-    
-    -- calculate max width for text to wrap before overlapping footer
-    -- popup_width - icon(32) - icon_margins(16) - footer_buttons_min(120) - safety(20)
-    local text_max_width = popup_width - dpi(32) - dpi(16) - dpi(120) - dpi(20)
-    
-    local text_column = create_text_column(entry, text_max_width)
-    local footer_widget = create_footer_widget(entry)
-    local button_row = create_button_row(entry)
+    local message_label = wibox.widget {
+        text = message_text,
+        font = FONT,
+        wrap = "word_char",
+        ellipsize = "none",
+        align = "left",
+        widget = wibox.widget.textbox,
+    }
+
+    local text_column = wibox.widget {
+        {
+            title_label,
+            nil,
+            right_side,
+            layout = wibox.layout.align.horizontal,
+        },
+        message_label,
+        spacing = dpi(2),
+        layout = wibox.layout.fixed.vertical,
+    }
+
+    -- Width Constraint so the Message wraps and the Header Row's right Side
+    -- (Value + Buttons) sits flush at the Section Edge:
+    -- popup_width - section_margins(20) - icon(32) - icon_gap(8)
+    -- local text_max_width = popup_width - dpi(20) - dpi(32) - dpi(8) - dpi(12)
+    -- local text_max_width = popup_width - dpi(20) - dpi(32) - dpi(8)
 
     -- wrap icon in a place container for vertical centering
     local icon_placed = wibox.container.place(icon_widget)
     icon_placed.valign = "center"
-    
-    local left_content = wibox.widget {
+
+    -- align.horizontal gives the middle Child all remaining Width, so the
+    -- Text Column always reaches the Section Edge (the old max-width
+    -- Constraint let short Rows shrink away from it)
+    -- local content = wibox.widget {
+    --     {
+    --         icon_placed,
+    --         right = dpi(8),
+    --         widget = wibox.container.margin,
+    --     },
+    --     {
+    --         text_column,
+    --         width = text_max_width,
+    --         widget = wibox.container.constraint,
+    --     },
+    --     layout = wibox.layout.fixed.horizontal,
+    -- }
+    -- local content = wibox.widget {
+    --     {
+    --         icon_placed,
+    --         right = dpi(8),
+    --         widget = wibox.container.margin,
+    --     },
+    --     text_column,
+    --     nil,
+    --     layout = wibox.layout.align.horizontal,
+    -- }
+    --
+    -- return wibox.widget {
+    --     {
+    --         content,
+    --         left = dpi(10), right = dpi(10),
+    --         top = dpi(6), bottom = dpi(6),
+    --         widget = wibox.container.margin,
+    --     },
+    --     bg = COLOR_BLACK,
+    --     fg = body_fg,
+    --     widget = wibox.container.background,
+    -- }
+
+    -- Margins go on the Icon and Text Column only, so the X Strip stays
+    -- flush with the Row's top, bottom and right Edges
+    local row_content = wibox.widget {
         {
             icon_placed,
-            left = dpi(4),
-            right = dpi(4),
-            top = dpi(4),
-            bottom = dpi(4),
+            left = dpi(10), right = dpi(8),
+            top = dpi(6), bottom = dpi(6),
             widget = wibox.container.margin,
         },
         {
             text_column,
-            left = dpi(0),
-            top = dpi(4),
-            bottom = dpi(4),
+            right = dpi(10),
+            top = dpi(6), bottom = dpi(6),
             widget = wibox.container.margin,
         },
-        spacing = dpi(0),
-        layout = wibox.layout.fixed.horizontal,
-    }
-
-    local date_and_actions = wibox.widget {
-        {
-            footer_widget,
-            right = dpi(2),
-            widget = wibox.container.margin,
-        },
-        button_row,
-        spacing = dpi(2),
-        layout = wibox.layout.fixed.horizontal,
-    }
-
-    local date_and_actions_placed = wibox.container.place(date_and_actions)
-    date_and_actions_placed.valign = "center"
-
-    local top_row = wibox.widget {
-        left_content,
-        nil,
-        date_and_actions_placed,
+        forget_button,
         layout = wibox.layout.align.horizontal,
     }
 
-    local row = wibox.widget {
-        {
-            top_row,
-            widget = wibox.container.margin,
-        },
+    return wibox.widget {
+        row_content,
         bg = COLOR_BLACK,
         fg = body_fg,
         widget = wibox.container.background,
     }
-
-    return row
 end
 
 function M._rebuild_history()
@@ -763,7 +953,8 @@ function M._rebuild_history()
             if i > 1 then
                 history_list:add(wibox.widget {
                     forced_height = dpi(1),
-                    bg = COLOR_GOLD,
+                    -- bg = COLOR_GOLD,
+                    bg = COLOR_PURPLE,
                     widget = wibox.container.background,
                 })
             end
@@ -771,7 +962,7 @@ function M._rebuild_history()
         end
     end
 
-    header_count.markup = "<span size='large'>(" .. tostring(#history) .. ")</span>"
+    header_count.markup = "(" .. tostring(#history) .. ")"
 
     -- update clear button text color based on availability of notifications
     if M._clear_button then
@@ -795,6 +986,12 @@ end
 
 local function store_notification(n)
     if n.flags and n.flags.suppress_history then
+        return
+    end
+
+    -- skip transient OSD notifications (volume, brightness) that only exist
+    -- to show a live progress popup, not to be kept as history
+    if n.app_name and osd_app_names[n.app_name] then
         return
     end
 
@@ -878,7 +1075,7 @@ end))
 local function create_popup_header()
     M._clear_button = create_small_button("clear", function()
         M.clear_history()
-    end, true)
+    end, true, FONT_CLEAR)
 
     -- set initial clear button fg based on whether there are notifications
     if #history == 0 then
@@ -887,12 +1084,35 @@ local function create_popup_header()
         M._clear_button.fg = COLOR_WHITE
     end
 
+    -- pin toggle: gold = stays open on outside clicks, grey = any outside
+    -- click closes it
+    local pin_btn, pinned = popup_common.pin("notification_center", function(on)
+        -- the press bubbles up to the header's click-to-close binding; mark
+        -- it so the popup stays open on a pin toggle
+        header_click_from_pin = true
+        gears.timer.delayed_call(function() header_click_from_pin = false end)
+        if popup_instance and popup_instance.visible then
+            if on then popup_common.outside_click_teardown(popup_instance)
+            else popup_common.outside_click_setup(popup_instance, M.hide) end
+        end
+    end)
+    is_pinned = pinned
+
     local controls = wibox.widget {
         {
-            M._clear_button,
-            top = dpi(2),
+            pin_btn,
+            top = dpi(0),
             right = dpi(2),
-            bottom = dpi(2),
+            bottom = dpi(0),
+            widget = wibox.container.margin,
+        },
+        {
+            M._clear_button,
+            -- top = dpi(2),
+            top = dpi(0),
+            right = dpi(2),
+            -- bottom = dpi(2),
+            bottom = dpi(0),
             widget = wibox.container.margin,
         },
         spacing = dpi(4),
@@ -905,36 +1125,32 @@ local function create_popup_header()
                 header_title,
                 nil,
                 {
-                    {
-                        header_count,
-                        top = -dpi(2.5),
-                        widget = wibox.container.margin,
-                    },
+                    -- {
+                    --     header_count,
+                    --     top = -dpi(2.5),
+                    --     widget = wibox.container.margin,
+                    -- },
+                    header_count,
                     controls,
                     spacing = dpi(4),
                     layout = wibox.layout.fixed.horizontal,
                 },
-                bottom = dpi(8),
                 layout = wibox.layout.align.horizontal,
             },
-            top = dpi(0),
-            bottom = dpi(0),
-            left = dpi(0),
-            right = dpi(0),
+            left = dpi(10), right = dpi(10),
+            -- top = dpi(6), bottom = dpi(6),
+            top = dpi(2), bottom = dpi(2),
             widget = wibox.container.margin,
         },
         bg = header_bg,
         fg = header_fg,
-        shape = function(cr, w, h)
-            apply_shape(popup_shape, cr, w, h, beautiful.border_radius or dpi(3))
-        end,
-        height = beautiful.icon_size and beautiful.icon_size + 2 or 18,
         widget = wibox.container.background,
     }
     
-    -- clicking header closes popup
+    -- clicking header closes popup (except a press that hit the pin toggle)
     header:buttons(gtable.join(
         awful.button({}, 1, function()
+            if header_click_from_pin then return end
             M.hide()
         end)
     ))
@@ -993,14 +1209,16 @@ local function ensure_popup()
     return popup_instance
 end
 
-function M.show()
+function M.show(anchor)
     local popup = ensure_popup()
-    
+
     -- avoid redundant work if already visible
     if popup.visible then
         return
     end
-    
+
+    awesome.emit_signal("popup::opening")
+
     local s = awful.screen.focused()
     popup.screen = s
 
@@ -1016,63 +1234,43 @@ function M.show()
     -- the drawin has the correct dimensions before x/y are set.
     popup:_apply_size_now(false)
 
-    -- position before the first map: on a freshly created popup the surface's
-    -- initial commit uses whatever x/y it had at construction (~0,0), and a
-    -- Wayland surface's position doesn't always update visually until the
-    -- next unmap/remap - hence the popup appearing off-screen only on the
-    -- very first open. Setting x/y here ensures the first commit is already
-    -- correct.
-    local wa = s and s.workarea or s.geometry
-    local function reposition()
-        if not wa then return end
-        local bw = popup.border_width or 0
-        popup.x = wa.x + wa.width - popup_width - (2*bw) - dpi(9)
-        popup.y = wa.y + dpi(9)
+    if anchor then
+        -- anchored to a wibar widget: place above it like the other popups
+        awful.placement.next_to(popup, {
+            widget = anchor,
+            preferred_positions = "top",
+            preferred_anchors = "back",
+            honor_workarea = true,
+        })
+    else
+        -- no anchor (e.g. keybinding): fall back to top-right corner
+        local wa = s and s.workarea or s.geometry
+        local function reposition()
+            if not wa then return end
+            local bw = popup.border_width or 0
+            popup.x = wa.x + wa.width - popup_width - (2*bw) - dpi(9)
+            popup.y = wa.y + dpi(9)
+        end
+        reposition()
+        -- re-apply in a delayed_call so it runs after the popup's internal
+        -- layout pass (which uses timer.delayed_call to set width/height and
+        -- would reset x/y if we set them synchronously)
+        gears.timer.delayed_call(guarded(reposition))
     end
-    reposition()
 
     popup.visible = true
 
-    -- re-apply in a delayed_call so it runs after the popup's internal
-    -- layout pass (which uses timer.delayed_call to set width/height and
-    -- would reset x/y if we set them synchronously)
-    gears.timer.delayed_call(guarded(reposition))
-    
+    -- Dismiss any live Notification Popups (they remain in History)
+    pcall(naughty.destroy_all_notifications, nil,
+        naughty.notification_closed_reason.dismissed_by_user)
+
     -- Rebuild Content Now That Popup Is Visible
     M._rebuild_history()
     
-    -- outside-click detection via client + wibar button::press signals
+    -- outside-click detection via client + wibar button::press signals,
+    -- installed only when the pin is off (auto-close); see plugins/popup_common.lua
     -- (root:get_buttons()/set_buttons() are X11-only and not available in somewm)
-    popup._client_click_handler = function(c)
-        if popup_instance and popup_instance.visible then
-            M.hide()
-        end
-    end
-    client.connect_signal("button::press", popup._client_click_handler)
-
-    -- connect to all screens' wibars to detect taskbar clicks
-    -- note: widget clicks may not propagate to wibar, but this catches background/spacing clicks
-    popup._screen_handlers = {}
-    for s in screen do
-        if s.mywibox then
-            local handler = function()
-                if not popup_instance or not popup_instance.visible then
-                    return
-                end
-
-                -- if toggle widget is handling the click, skip
-                if ignore_next_wibar_click then
-                    ignore_next_wibar_click = false
-                    return
-                end
-
-                -- close popup on any wibar click (toggle widget excluded via flag above)
-                M.hide()
-            end
-        s.mywibox:connect_signal("button::press", handler)
-        table.insert(popup._screen_handlers, {wibox = s.mywibox, handler = handler})
-    end
-    end
+    if not is_pinned() then popup_common.outside_click_setup(popup, M.hide) end
 
     -- add Escape keybinding to close popup (only active while popup is visible)
     -- (root:get_keys()/set_keys() are X11-only; somewm uses root._append_key/_remove_key)
@@ -1099,30 +1297,19 @@ function M.hide()
         popup_instance._escape_key = nil
     end
 
-    -- disconnect client click handler
-    if popup_instance._client_click_handler then
-        client.disconnect_signal("button::press", popup_instance._client_click_handler)
-        popup_instance._client_click_handler = nil
-    end
-    
-    -- disconnect wibar handlers
-    if popup_instance._screen_handlers then
-        for _, entry in ipairs(popup_instance._screen_handlers) do
-            entry.wibox:disconnect_signal("button::press", entry.handler)
-        end
-        popup_instance._screen_handlers = nil
-    end
-    
+    -- disconnect outside-click handlers
+    popup_common.outside_click_teardown(popup_instance)
+
     popup_instance.visible = false
 end
 
-function M.toggle()
+function M.toggle(anchor)
     local popup = ensure_popup()
 
     if popup.visible then
         M.hide()
     else
-        M.show()
+        M.show(anchor)
     end
 end
 
@@ -1144,101 +1331,105 @@ local ToggleIndicator = {}
 ToggleIndicator.__index = ToggleIndicator
 
 function ToggleIndicator:new()
-    local count_label = wibox.widget {
-        markup = "0",
-        align = "center",
-        valign = "center",
-        widget = wibox.widget.textbox,
-    }
-
-    local icon_label = wibox.widget {
-        markup = beautiful.notification_center_icon_markup or "<b>🛈</b>",
+    -- icon and count share one textbox (same baseline, same plane as the
+    -- stats) and the icon is a Nerd Font glyph — the 🛈 emoji fallback has a
+    -- much taller line box and dragged the shared baseline off
+    local label = wibox.widget {
+        markup = "",
+        font = FONT_WIDGET,
         align = "center",
         valign = "center",
         widget = wibox.widget.textbox,
     }
 
     local inner_content = wibox.widget {
-        {
-            {
-                icon_label,
-                bottom = dpi(1),
-                widget = wibox.container.margin,
-            },
-            {
-                count_label,
-                top = dpi(1),
-                widget = wibox.container.margin,
-            },
-            spacing = dpi(1),
-            layout = wibox.layout.fixed.horizontal,
-        },
-        top = dpi(2),
-        widget = wibox.container.margin,
+        label,
+        valign = "center",
+        halign = "center",
+        widget = wibox.container.place,
     }
 
     local container = wibox.widget {
         {
             inner_content,
-            left = dpi(3),
+            left = dpi(1),
             widget = wibox.container.margin,
         },
         bg = button_bg,
         fg = button_fg,
         forced_height = dpi(32),
-        forced_width = dpi(32),
+        forced_width = dpi(40),
         border_width = beautiful.bar_edge_width or dpi(3),
         border_color = COLOR_BLACK,
         widget = wibox.container.background,
     }
 
+    -- buttons and hover live on the outer margin so a press anywhere in the
+    -- toggle's padded area (not just the bordered box) fires them; presses
+    -- on the inner container propagate up to it
+    local outer = wibox.widget {
+        container,
+        left = dpi(6),
+        right = dpi(2),
+        widget = wibox.container.margin,
+    }
+
     local instance = setmetatable({
-        widget = container,
+        widget = outer,
         _container = container,
-        _count_label = count_label,
-        _icon_label = icon_label,
+        _label = label,
     }, ToggleIndicator)
 
-    container:buttons(gtable.join(
+    outer:buttons(gtable.join(
         awful.button({}, 1, function()
-            ignore_next_wibar_click = true
-            M.toggle()
+            -- widget_press arms the wibar handler's ignore flag and returns
+            -- true if that handler already closed the popup on this press
+            if not popup_common.widget_press(ensure_popup()) then
+                M.toggle(container)
+            end
         end),
         awful.button({}, 2, function()
-            ignore_next_wibar_click = true
+            popup_common.swallow_next_wibar_click(ensure_popup())
             M.clear_history()
         end)
     ))
 
-    container:connect_signal("mouse::enter", guarded(function()
+    outer:connect_signal("mouse::enter", guarded(function()
         container.fg = COLOR_GOLD
     end))
 
-    container:connect_signal("mouse::leave", guarded(function()
+    outer:connect_signal("mouse::leave", guarded(function()
         container.fg = button_fg
     end))
 
     -- store indicator on widget to prevent garbage collection
-    container._indicator = instance
+    outer._indicator = instance
 
     return instance
 end
 
 function ToggleIndicator:set_count(value)
     local count = value or 0
-    if count > 0 then
-        self._count_label.markup = "<span foreground='" .. COLOR_GOLD .. "'>" .. tostring(count) .. "</span>"
-    else
-        self._count_label.markup = tostring(count)
-    end
+    local icon = beautiful.notification_center_icon_markup or "<b>󰂚</b>"
+    local count_markup = count > 0
+        and ("<span foreground='" .. COLOR_GOLD .. "'>" .. tostring(count) .. "</span>")
+        or tostring(count)
+    self._label.markup = icon .. "\226\128\137" .. count_markup
     
     -- adjust width based on count
+    -- if count >= 100 then
+    --     self._container.forced_width = dpi(36)
+    -- elseif count >= 10 then
+    --     self._container.forced_width = dpi(32)
+    -- else
+    --     self._container.forced_width = dpi(28)
+    -- end
     if count >= 100 then
-        self._container.forced_width = dpi(36)
+        self._container.forced_width = dpi(48)
     elseif count >= 10 then
-        self._container.forced_width = dpi(32)
+        self._container.forced_width = dpi(40)
     else
-        self._container.forced_width = dpi(28)
+        self._container.forced_width = dpi(32)
     end
 end
 
@@ -1270,5 +1461,8 @@ M.keybindings = {
         end
     end,
 }
+
+-- close this popup when any other popup opens
+popup_common.register_closer(M.hide)
 
 return M
