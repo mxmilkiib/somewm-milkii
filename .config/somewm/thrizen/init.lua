@@ -8,14 +8,16 @@ local thrizen = {
     name = "thrizen",
 }
 
-function thrizen.arrange(screen)
+function thrizen.arrange(p)
     local desiredColumns = 3
 
     -- Get the offset/size of this screen
-    local screenArea = screen.workarea
+    local screenArea = p.workarea
 
     -- Get the number of clients
-    local numClients = #screen.clients
+    local numClients = #p.clients
+
+    if numClients == 0 then return end
 
     -- Determine the number of columns (min of numClients and desired columns)
     local numColumns = numClients > desiredColumns and desiredColumns or numClients
@@ -28,7 +30,7 @@ function thrizen.arrange(screen)
     local targetHeight = screenArea.height / numRows
 
     -- Iterate over the clients
-    for i, c in pairs(screen.clients) do
+    for i, c in ipairs(p.clients) do
         -- Use the current index to determine the current column and row
         local currentColumn = ((i - 1) % numColumns)
         local currentRow = math.floor((i - 1) / numColumns)
@@ -40,7 +42,7 @@ function thrizen.arrange(screen)
         local clientOffsetX = currentColumn * targetWidth
         local clientOffsetY = currentRow * targetHeight
 
-        screen.geometries[c] = {
+        p.geometries[c] = {
             x = screenArea.x + clientOffsetX,
             y = screenArea.y + clientOffsetY,
             width = targetWidth,
