@@ -103,18 +103,18 @@ end
 
 local bt_widget
 local function update_bluetooth()
-    awful.spawn.easy_async("bluetoothctl show", function(stdout)
+    awful.spawn.easy_async("bluetoothctl show", guarded(function(stdout)
         local powered = stdout:match("Powered:%s*yes")
         local icon_name = powered and "devices/bluetooth-symbolic.svg"
             or "status/bluetooth-disabled-symbolic.svg"
         local surf = load_svg_icon(icon_name)
         if surf and bt_widget then bt_widget.set_icon(surf) end
         if bt_widget then bt_widget.set_dim(not powered) end
-    end)
+    end))
 end
 
 local function toggle_bluetooth()
-    awful.spawn.easy_async("bluetoothctl show", function(stdout)
+    awful.spawn.easy_async("bluetoothctl show", guarded(function(stdout)
         local powered = stdout:match("Powered:%s*yes")
         if powered then
             awful.spawn("bluetoothctl power off")
@@ -125,7 +125,7 @@ local function toggle_bluetooth()
             update_bluetooth()
             return false
         end))
-    end)
+    end))
 end
 
 
@@ -138,8 +138,8 @@ local function show_clipboard_history()
     -- list + rofi + decode + copy. wl-paste --watch is a long-running daemon
     -- that belongs in autostart, not here: it blocks forever and the `;`
     -- after it meant the rofi menu never ran (B4).
-    awful.spawn.easy_async("bash -c 'wl-paste 2>/dev/null | cliphist store 2>/dev/null; cliphist list 2>/dev/null | rofi -dmenu -p clipboard | cliphist decode 2>/dev/null | wl-copy 2>/dev/null || wl-paste'", function()
-    end)
+    awful.spawn.easy_async("bash -c 'wl-paste 2>/dev/null | cliphist store 2>/dev/null; cliphist list 2>/dev/null | rofi -dmenu -p clipboard | cliphist decode 2>/dev/null | wl-copy 2>/dev/null || wl-paste'", guarded(function()
+    end))
 end
 
 
@@ -150,15 +150,15 @@ end
 local media_widget
 local function update_media()
     -- check if any MPRIS player is running via dbus
-    awful.spawn.easy_async("dbus-send --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null", function(stdout)
+    awful.spawn.easy_async("dbus-send --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null", guarded(function(stdout)
         local has_mpris = stdout:match("org%.mpris%.MediaPlayer2")
         if media_widget then media_widget.set_dim(not has_mpris) end
-    end)
+    end))
 end
 
 local function show_media_controls()
     -- use dbus-send to toggle play/pause on the first available player
-    awful.spawn.easy_async("dbus-send --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames", function(stdout)
+    awful.spawn.easy_async("dbus-send --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames", guarded(function(stdout)
         -- find first mpris player
         local player = stdout:match("org%.mpris%.MediaPlayer2%.(%S+)")
         if player then
@@ -166,7 +166,7 @@ local function show_media_controls()
         else
             naughty.notify({ text = "No MPRIS player running", timeout = 2 })
         end
-    end)
+    end))
 end
 
 
@@ -176,13 +176,13 @@ end
 
 local battery_widget
 local function update_battery()
-    awful.spawn.easy_async("upower -e 2>/dev/null | grep -i battery | head -1", function(line)
+    awful.spawn.easy_async("upower -e 2>/dev/null | grep -i battery | head -1", guarded(function(line)
         local bat_path = line:gsub("\n", "")
         if bat_path == "" then
             if battery_widget then battery_widget.set_dim(true) end
             return
         end
-        awful.spawn.easy_async("upower -i " .. bat_path, function(info)
+        awful.spawn.easy_async("upower -i " .. bat_path, guarded(function(info)
             local pct = info:match("percentage:%s*(%d+%%)")
             local charging = info:match("state:%s*charging")
             local icon_name
@@ -199,18 +199,18 @@ local function update_battery()
             local surf = load_svg_icon(icon_name)
             if surf and battery_widget then battery_widget.set_icon(surf) end
             if battery_widget then battery_widget.set_dim(false) end
-        end)
-    end)
+        end))
+    end))
 end
 
 local function show_battery_info()
-    awful.spawn.easy_async("upower -e 2>/dev/null | grep -i battery | head -1", function(line)
+    awful.spawn.easy_async("upower -e 2>/dev/null | grep -i battery | head -1", guarded(function(line)
         local bat_path = line:gsub("\n", "")
         if bat_path == "" then
             naughty.notify({ text = "No battery found", timeout = 3 })
             return
         end
-        awful.spawn.easy_async("upower -i " .. bat_path, function(info)
+        awful.spawn.easy_async("upower -i " .. bat_path, guarded(function(info)
             local pct = info:match("percentage:%s*%S+")
             local state = info:match("state:%s*%S+")
             local time = info:match("time to (empty|full):%s*%S+%s*%S+")
@@ -218,8 +218,8 @@ local function show_battery_info()
                 text = string.format("Battery: %s\nState: %s\n%s", pct or "?", state or "?", time or ""),
                 timeout = 5,
             })
-        end)
-    end)
+        end))
+    end))
 end
 
 
@@ -229,14 +229,14 @@ end
 
 local wifi_widget
 local function update_wifi()
-    awful.spawn.easy_async("nmcli -t -f DEVICE,STATE,TYPE con show --active 2>/dev/null | grep wireless", function(stdout)
+    awful.spawn.easy_async("nmcli -t -f DEVICE,STATE,TYPE con show --active 2>/dev/null | grep wireless", guarded(function(stdout)
         local connected = stdout ~= ""
         local icon_name = connected and "devices/network-wireless-symbolic.svg"
             or "status/network-wireless-disabled-symbolic.svg"
         local surf = load_svg_icon(icon_name)
         if surf and wifi_widget then wifi_widget.set_icon(surf) end
         if wifi_widget then wifi_widget.set_dim(not connected) end
-    end)
+    end))
 end
 
 local function show_wifi_menu()
