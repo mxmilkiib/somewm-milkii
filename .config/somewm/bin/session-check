@@ -1,0 +1,107 @@
+#!/bin/sh
+# session-check: validate somewm session save state without restarting.
+#
+# Usage:
+#   session-check              # validate the saved state file
+#   session-check --save       # trigger a fresh save via somewm-client eval,
+#                              # then validate (requires reloaded config)
+#   session-check --live       # also compare saved state against live clients
+#
+# Reads ~/.local/state/somewm/client-placements (or $XDG_STATE_HOME).
+# Reports PIDs with multiple windows (the multi-window case the session
+# module was fixed to handle) and flags any malformed lines.
+
+set -eu
+
+state_base="${XDG_STATE_HOME:-$HOME/.local/state}"
+state_dir="$state_base/somewm"
+state_file="$state_dir/client-placements"
+tags_file="$state_dir/selected-tags"
+
+do_save=0
+do_live=0
+for arg in "$@"; do
+    case "$arg" in
+        --save) do_save=1 ;;
+        --live) do_live=1 ;;
+        *) echo "unknown option: $arg"; exit 1 ;;
+    esac
+done
+
+if [ "$do_save" -eq 1 ]; then
+    echo "Triggering manual save via somewm-client eval..."
+    somewm-client eval 'require("plugins.session").save_state()' 2>&1
+    echo ""
+fi
+
+if [ ! -f "$state_file" ]; then
+    echo "No session state file found at: $state_file"
+    echo "Run with --save after reloading the config, or restart the WM first."
+    exit 1
+fi
+
+echo "=== Session state: $state_file ==="
+echo ""
+
+# selected tags
+if [ -f "$tags_file" ]; then
+    echo "Selected tags per screen:"
+    screen=1
+    while IFS= read -r line; do
+        echo "  screen $screen -> tag $line"
+        screen=$((screen + 1))
+    done < "$tags_file"
+    echo ""
+fi
+
+# parse client-placements: tab-delimited
+# pid \t screen \t tags \t class \t instance \t role \t name
+total=0
+malformed=0
+multi_pid=0
+
+# awk does the heavy lifting: count entries, group by PID, flag multi-window
+awk -F'\t' '
+{
+    if (NF < 3) {
+        malformed++
+        printf "  MALFORMED (line %d, %d fields): %s\n", NR, NF, $0
+        next
+    }
+    total++
+    pids[$1]++
+    classes[$1] = $4
+    tags[$1] = (tags[$1] ? tags[$1] "; " : "") $3
+}
+END {
+    printf "Total saved entries: %d\n", total
+    printf "Unique PIDs: %d\n", length(pids)
+    if (malformed > 0) printf "Malformed lines: %d\n", malformed
+    print ""
+    multi = 0
+    for (p in pids) {
+        if (pids[p] > 1) {
+            multi++
+            printf "  PID %s (%s): %d windows -> tags [%s]\n", p, classes[p], pids[p], tags[p]
+        }
+    }
+    if (multi > 0) {
+        printf "\n%d PID(s) with multiple windows (the case the fix addresses)\n", multi
+    } else {
+        print "No PIDs with multiple windows in this state."
+    }
+}' "$state_file"
+
+echo ""
+
+# live comparison
+if [ "$do_live" -eq 1 ]; then
+    echo "=== Live clients (somewm-client) ==="
+    if command -v somewm-client >/dev/null 2>&1; then
+        somewm-client client list 2>&1 | while IFS= read -r line; do
+            echo "  $line"
+        done
+    else
+        echo "  somewm-client not found"
+    fi
+fi
