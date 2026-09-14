@@ -1,0 +1,260 @@
+-- plugins/session.lua
+--
+-- Session management: preserve window manager state across restarts.
+--
+-- Saves and restores:
+--   - selected tag per screen
+--   - per-client tag+screen assignments
+--
+-- Multiple windows sharing a PID (multi-window apps like Firefox, GIMP) are
+-- saved as separate entries and matched on restore by name, role, then
+-- fallback order so they don't collapse onto a single tag.
+--
+-- On restart, Wayland clients keep running with their original PIDs, so
+-- we can match them and restore their tag/screen placement after the
+-- ruled.client rules have been applied.
+--
+-- Session state lives in XDG_STATE_HOME (defaults to ~/.local/state) so it
+-- survives reboots; /tmp is tmpfs and would be lost on power cycle.
+
+
+local gears = require("gears")
+local guarded = require("error_guard")
+
+local M = {}
+
+
+-- // MARK: -- init
+
+function M.init()
+    local session_dir = os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state/somewm")
+    gears.filesystem.make_directories(session_dir)
+    local session_tags_file = session_dir .. "/selected-tags"
+    local session_state_file = session_dir .. "/client-placements"
+
+    -- // MARK -- save
+
+    awesome.connect_signal('exit', guarded(function(reason_restart)
+        if not reason_restart then return end
+
+        -- save selected tag per screen
+        local file = io.open(session_tags_file, 'w+')
+        if file then
+            for s in screen do
+                file:write(s.selected_tag.index, '\n')
+            end
+            file:close()
+        end
+
+        -- save per-client tag+screen assignments.
+        -- one line per client so multiple windows sharing a PID are all
+        -- preserved (previously keyed by PID alone, which collapsed them).
+        -- format (tab-separated):
+        --   pid \t screen \t tags \t class \t instance \t role \t name
+        -- tags is a comma-separated list of screen_index:tag_index.
+        local sf = io.open(session_state_file, 'w+')
+        if not sf then return end
+        for _, c in ipairs(client.get()) do
+            if c.valid and c.pid then
+                local ctags = c:tags() or {}
+                local tag_indices = {}
+                for _, t in ipairs(ctags) do
+                    if t and t.valid and t.screen and t.screen.valid then
+                        -- encode as screen_index:tag_index so multi-screen is preserved
+                        table.insert(tag_indices, t.screen.index .. ":" .. t.index)
+                    end
+                end
+                if #tag_indices > 0 then
+                    local sidx = c.screen and c.screen.valid and c.screen.index or 1
+                    local class = c.class or ""
+                    local instance = c.instance or ""
+                    local role = c.role or ""
+                    -- strip tabs/newlines from name so it stays on one line
+                    local name = (c.name or ""):gsub("[\t\n]", " ")
+                    sf:write(c.pid, '\t', sidx, '\t', table.concat(tag_indices, ','),
+                              '\t', class, '\t', instance, '\t', role, '\t', name, '\n')
+                end
+            end
+        end
+        sf:close()
+    end))
+
+    -- // MARK -- restore
+
+    awesome.connect_signal('startup', guarded(function()
+        -- restore selected tags per screen
+        local file = io.open(session_tags_file, 'r')
+        if file then
+            local selected_tags = {}
+            for line in file:lines() do
+                table.insert(selected_tags, tonumber(line))
+            end
+            for s in screen do
+                local i = selected_tags[s.index]
+                if i and s.tags[i] then
+                    local t = s.tags[i]
+                    t:view_only()
+                end
+            end
+            file:close()
+        end
+
+        -- parse saved client placements into lists grouped by PID.
+        -- each PID maps to a list of saved entries so multi-window apps
+        -- don't collapse onto one tag.
+        local saved_by_pid = {}
+        local sf = io.open(session_state_file, 'r')
+        if sf then
+            for line in sf:lines() do
+                local parts = {}
+                for field in line:gmatch('[^\t]+') do
+                    table.insert(parts, field)
+                end
+                -- fall back to legacy pipe-delimited format (no tabs in line)
+                if #parts < 3 and line:find('|') then
+                    parts = {}
+                    for field in line:gmatch('[^|]+') do
+                        table.insert(parts, field)
+                    end
+                end
+                if #parts >= 3 then
+                    local pid = tonumber(parts[1])
+                    local sidx = tonumber(parts[2])
+                    local tag_specs = {}
+                    for spec in parts[3]:gmatch('[^,]+') do
+                        local si, ti = spec:match('^(%d+):(%d+)$')
+                        if si and ti then
+                            table.insert(tag_specs, { screen = tonumber(si), tag = tonumber(ti) })
+                        end
+                    end
+                    saved_by_pid[pid] = saved_by_pid[pid] or {}
+                    table.insert(saved_by_pid[pid], {
+                        screen = sidx,
+                        tags = tag_specs,
+                        class = parts[4] or "",
+                        instance = parts[5] or "",
+                        role = parts[6] or "",
+                        name = parts[7] or "",
+                    })
+                end
+            end
+            sf:close()
+        end
+
+        if not next(saved_by_pid) then return end
+
+        -- deferred so ruled.client rules apply first; we override them with
+        -- the saved placement afterwards.
+        gears.timer.start_new(0.5, guarded(function()
+            -- group current clients by PID, filtering out any whose class
+            -- doesn't match any saved entry for that PID (guards against
+            -- PID reuse by a different application).
+            local current_by_pid = {}
+            for _, c in ipairs(client.get()) do
+                if c.valid and c.pid and saved_by_pid[c.pid] then
+                    local entries = saved_by_pid[c.pid]
+                    local class_ok = false
+                    local cclass = c.class or ""
+                    for _, e in ipairs(entries) do
+                        if e.class == "" or e.class == cclass then
+                            class_ok = true
+                            break
+                        end
+                    end
+                    if class_ok then
+                        current_by_pid[c.pid] = current_by_pid[c.pid] or {}
+                        table.insert(current_by_pid[c.pid], c)
+                    end
+                end
+            end
+
+            for pid, saved_entries in pairs(saved_by_pid) do
+                local current = current_by_pid[pid]
+                if current then
+                    -- match saved entries to current clients.
+                    -- pass 1: exact name match.
+                    -- pass 2: unique role match.
+                    -- pass 3: assign remaining in order.
+                    local used_saved = {}
+                    local used_current = {}
+
+                    -- pass 1: exact name match
+                    for si, entry in ipairs(saved_entries) do
+                        if entry.name ~= "" then
+                            for ci, c in ipairs(current) do
+                                if not used_current[ci] and (c.name or "") == entry.name then
+                                    used_saved[si] = ci
+                                    used_current[ci] = si
+                                    break
+                                end
+                            end
+                        end
+                    end
+
+                    -- pass 2: unique role match
+                    for si, entry in ipairs(saved_entries) do
+                        if not used_saved[si] and entry.role ~= "" then
+                            local match_ci = nil
+                            local count = 0
+                            for ci, c in ipairs(current) do
+                                if not used_current[ci] and (c.role or "") == entry.role then
+                                    count = count + 1
+                                    match_ci = ci
+                                end
+                            end
+                            if count == 1 then
+                                used_saved[si] = match_ci
+                                used_current[match_ci] = si
+                            end
+                        end
+                    end
+
+                    -- pass 3: assign remaining in order
+                    local remaining_saved = {}
+                    for si = 1, #saved_entries do
+                        if not used_saved[si] then
+                            table.insert(remaining_saved, si)
+                        end
+                    end
+                    local remaining_current = {}
+                    for ci = 1, #current do
+                        if not used_current[ci] then
+                            table.insert(remaining_current, ci)
+                        end
+                    end
+                    for i = 1, math.min(#remaining_saved, #remaining_current) do
+                        used_saved[remaining_saved[i]] = remaining_current[i]
+                    end
+
+                    -- apply placements
+                    for si, ci in pairs(used_saved) do
+                        local entry = saved_entries[si]
+                        local c = current[ci]
+                        if c and c.valid then
+                            -- restore screen
+                            local target_screen = screen[entry.screen]
+                            if target_screen and target_screen.valid and c.screen ~= target_screen then
+                                c:move_to_screen(target_screen)
+                            end
+                            -- restore tags
+                            local target_tags = {}
+                            for _, spec in ipairs(entry.tags) do
+                                local sc = screen[spec.screen]
+                                if sc and sc.valid and sc.tags[spec.tag] then
+                                    table.insert(target_tags, sc.tags[spec.tag])
+                                end
+                            end
+                            if #target_tags > 0 then
+                                c:tags(target_tags)
+                            end
+                        end
+                    end
+                end
+            end
+            return false  -- one-shot
+        end))
+    end))
+end
+
+
+return M
