@@ -38,10 +38,20 @@ local M = {}
 local base_gold = "#FFD700"
 
 -- // MARK: CHARACTER ANIMATION LIMITING SYSTEM
--- tracks which characters are currently animating when max_animated_chars is set
-local animated_chars_tracker = {}
 local char_animation_rotation_step = 0
 local CHAR_ROTATION_SPEED = 1  -- how fast to rotate animated character selection
+
+-- cached math functions for performance
+local math_sin, math_cos, math_floor, math_abs, math_max, math_min = 
+      math.sin, math.cos, math.floor, math.abs, math.max, math.min
+local math_exp, math_sqrt, math_deg, math_ceil = math.exp, math.sqrt, math.deg, math.ceil
+
+-- separate color/shine progression timing
+local color_step = 0.1    -- separate color progression timing
+local shine_step = 0.1    -- separate shine progression timing
+
+-- global override for max animated characters (nil = use preset defaults)
+local global_max_animated_chars = nil
 
 -- character selection strategies for max_animated_chars feature
 local function select_animated_chars(text_length, max_chars, strategy, text_seed)
@@ -87,7 +97,6 @@ local function select_animated_chars(text_length, max_chars, strategy, text_seed
     elseif strategy == "center_out" then
         -- animate from center outward
         local center = math_ceil(text_length / 2)
-        local radius = math_floor(max_chars / 2)
         local offset = rotation_offset % text_length
         
         for i = 1, max_chars do
@@ -151,15 +160,7 @@ local target_fps = 20
 -- // MARK: CONSTANT FOLDING & MATH OPTIMIZATION
 -- pre-calculated mathematical constants
 local TWO_PI = 2 * math.pi
-local HALF_PI = math.pi * 0.5
-local PI_OVER_180 = math.pi / 180
-local ONE_EIGHTY_OVER_PI = 180 / math.pi
 local HALF = 0.5
-
--- cached math functions for performance
-local math_sin, math_cos, math_floor, math_abs, math_max, math_min = 
-      math.sin, math.cos, math.floor, math.abs, math.max, math.min
-local math_exp, math_sqrt, math_deg, math_ceil = math.exp, math.sqrt, math.deg, math.ceil
 
 -- cached string functions for performance
 local string_format, string_byte, string_sub, string_len = 
@@ -171,95 +172,7 @@ local table_concat, table_insert, table_unpack =
 
 -- additional mathematical constants
 local THREE_QUARTERS = 0.75
-local QUARTER = 0.25
 local RGB_MAX = 255
-local ONE_THIRD = 1/3
-local TWO_THIRDS = 2/3
-local ONE_EIGHTH = 1/8
-
--- // MARK: MATH FUNCTION CACHING
--- pre-computed trigonometric tables to avoid expensive math operations
--- small trig lut; avoids repeated sin/cos while keeping memory tiny
-local MATH_CACHE_SIZE = 360  -- degrees for full circle
-local math_cache = {
-    sin = {},
-    cos = {},
-    initialized = false
-}
-
--- initialize math cache with pre-computed values
-local function init_math_cache()
-    if math_cache.initialized then return end
-    
-    for i = 0, MATH_CACHE_SIZE - 1 do
-        local radians = (i / MATH_CACHE_SIZE) * TWO_PI
-        math_cache.sin[i] = math_sin(radians)
-        math_cache.cos[i] = math_cos(radians)
-    end
-    
-    math_cache.initialized = true
-end
-
--- fast cached sine function
-local function fast_sin(angle)
-    if not math_cache.initialized then init_math_cache() end
-    local index = math_floor((angle % TWO_PI) / TWO_PI * MATH_CACHE_SIZE) % MATH_CACHE_SIZE
-    return math_cache.sin[index]
-end
-
--- fast cached cosine function
-local function fast_cos(angle)
-    if not math_cache.initialized then init_math_cache() end
-    local index = math_floor((angle % TWO_PI) / TWO_PI * MATH_CACHE_SIZE) % MATH_CACHE_SIZE
-    return math_cache.cos[index]
-end
-
--- // MARK: STRING INTERNING SYSTEM
--- pre-built markup templates to reduce string allocation overhead
--- prebuilt span fragments; future: intern common color spans here
-local markup_templates = {
-    span_open = '<span foreground="',
-    span_middle = '">',
-    span_close = '</span>',
-    common_colors = {}  -- cache for frequently used color spans
-}
-
--- string interning cache for markup patterns
-local string_intern_cache = {}
-local STRING_INTERN_MAX_ENTRIES = 200
-local intern_stats = { hits = 0, misses = 0, size = 0 }
-
--- intern a string to reduce allocation overhead
-local function intern_string(str)
-    if string_intern_cache[str] then
-        intern_stats.hits = intern_stats.hits + 1
-        return string_intern_cache[str]
-    end
-    
-    intern_stats.misses = intern_stats.misses + 1
-    string_intern_cache[str] = str
-    intern_stats.size = intern_stats.size + 1
-    
-    -- cleanup if cache gets too large
-    if intern_stats.size > STRING_INTERN_MAX_ENTRIES then
-        -- clear 25% of entries
-        local new_cache = {}
-        local count = 0
-        local keep_count = math_floor(STRING_INTERN_MAX_ENTRIES * THREE_QUARTERS)
-        
-        for key, value in pairs(string_intern_cache) do
-            if count < keep_count then
-                new_cache[key] = value
-                count = count + 1
-            end
-        end
-        
-        string_intern_cache = new_cache
-        intern_stats.size = count
-    end
-    
-    return str
-end
 
 -- // MARK: HSV COLOR CONVERSION FUNCTIONS
 -- move these functions up to be available for caching system
@@ -439,8 +352,6 @@ local palette_length = 1024  -- increased for longer animation cycles
 
 -- animation state
 local shimmer_step = 0.1  -- legacy unified step (kept for compatibility)
-local color_step = 0.1    -- separate color progression timing
-local shine_step = 0.1    -- separate shine progression timing
 local shimmer_timer = nil
 local animation_direction = 1  -- 1 for forward, -1 for reverse
 
@@ -619,7 +530,6 @@ function M.get_speed_breakdown()
     local effective_multiplier = global_multiplier * preset_multiplier
     local effective_interval_ms = base_interval_ms / (effective_multiplier > 0 and effective_multiplier or 1)
     local desired_fps = 1000 / effective_interval_ms
-    local actual_fps = 1000 / actual_timer_ms
     
     return {
         base_interval_ms = base_interval_ms,
@@ -686,37 +596,6 @@ function M.get_char_selection_strategy()
     return preset_config and preset_config.char_selection_strategy or "wave"
 end
 
-
--- // MARK: PALETTE PRE-COMPUTATION SYSTEM
--- pre-compute all palettes to avoid runtime generation overhead
-local precomputed_palettes = {}
-local PALETTE_PRECOMPUTE_LENGTH = 256  -- standard palette size
-
--- pre-compute palette for a given preset configuration
-local function precompute_palette(preset_name, config)
-    if precomputed_palettes[preset_name] then return end
-    
-    local palette
-    if config.color_gen.type == "gradient" then
-        palette = makeSineGradient(PALETTE_PRECOMPUTE_LENGTH, config.color_gen.params)
-    elseif config.color_gen.type == "hsv" then
-        palette = makeGoldShinePalette(PALETTE_PRECOMPUTE_LENGTH, config.color_gen.params)
-    elseif config.color_gen.type == "static" then
-        palette = {}
-        for i = 1, PALETTE_PRECOMPUTE_LENGTH do
-            palette[i] = config.color_gen.color
-        end
-    end
-    
-    precomputed_palettes[preset_name] = palette
-end
-
--- initialize all palettes at startup
-local function init_all_palettes()
-    for preset_name, config in pairs(shimmer_config) do
-        precompute_palette(preset_name, config)
-    end
-end
 
 -- // MARK: COLOR PALETTE GEN
 
@@ -1598,12 +1477,6 @@ local function return_temp_table(tbl)
         pool_stats.size = #table_pool
     end
 end
-local markup_patterns = {
-    single_char = '<span foreground="%s">%s</span>',
-    multi_char = '<span foreground="%s">%s</span>',
-    whitespace_preserve = '%s',  -- no markup for whitespace
-}
-
 -- cache for helper function results to reduce expensive calculations
 local helper_cache = {}
 local helper_cache_stats = { hits = 0, misses = 0, size = 0 }
@@ -1628,59 +1501,15 @@ local DIFF_CACHE_MAX_ENTRIES = 1024
 local diff_cache_stats = { hits = 0, misses = 0, updates = 0, full_rebuilds = 0 }
 
 -- precomputed lookup tables for common calculations
-local trig_cache = {}
-local fibonacci_cache = {}
-local center_distance_cache = {}
 local heartbeat_pattern_cache = {}
 local alternating_cache = {}
 local color_progression_lut = {}  -- lookup tables for color progression patterns
 local helper_optimization_initialized = false
 
--- fast trigonometric lookup with interpolation (defined early for use in init)
-local function fast_sin_early(angle)
-    local deg = math_deg(angle) % 360
-    local floor_deg = math_floor(deg)
-    local ceil_deg = math_ceil(deg)
-    
-    if floor_deg == ceil_deg then
-        return trig_cache[floor_deg] and trig_cache[floor_deg].sin or math.sin(angle)
-    else
-        local t = deg - floor_deg
-        local sin1 = trig_cache[floor_deg] and trig_cache[floor_deg].sin or math.sin(math.rad(floor_deg))
-        local sin2 = trig_cache[ceil_deg] and trig_cache[ceil_deg].sin or math.sin(math.rad(ceil_deg))
-        return sin1 * (1 - t) + sin2 * t
-    end
-end
-
 -- initialize precomputed tables
 local function init_helper_optimization()
     if helper_optimization_initialized then return end
-    
-    -- precompute trigonometric values for common angles
-    for i = 0, 360 do
-        local rad = math.rad(i)
-        trig_cache[i] = {
-            sin = math.sin(rad),
-            cos = math.cos(rad)
-        }
-    end
-    
-    -- precompute fibonacci sequence up to reasonable limit
-    fibonacci_cache[0] = 0
-    fibonacci_cache[1] = 1
-    for i = 2, 50 do
-        fibonacci_cache[i] = fibonacci_cache[i-1] + fibonacci_cache[i-2]
-    end
-    
-    -- precompute center distances for common text lengths
-    for total_chars = 1, 200 do
-        local center = (total_chars + 1) / 2
-        center_distance_cache[total_chars] = {}
-        for char_index = 1, total_chars do
-            center_distance_cache[total_chars][char_index] = math.abs(char_index - center)
-        end
-    end
-    
+
     -- precompute heartbeat patterns for common character positions
     local heartbeat_pattern = {0, 3, 0.5, 0, 0, 2, 0.3, 0}
     for char_index = 1, 200 do
@@ -1779,48 +1608,6 @@ local function init_helper_optimization()
     end
     
     helper_optimization_initialized = true
-end
-
--- fast trigonometric lookup with interpolation
-local function fast_sin(angle)
-    local deg = math_deg(angle) % 360
-    local floor_deg = math_floor(deg)
-    local ceil_deg = math_ceil(deg)
-    
-    if floor_deg == ceil_deg then
-        return trig_cache[floor_deg].sin
-    else
-        local t = deg - floor_deg
-        return trig_cache[floor_deg].sin * (1 - t) + trig_cache[ceil_deg].sin * t
-    end
-end
-
-local function fast_cos(angle)
-    local deg = math_deg(angle) % 360
-    local floor_deg = math_floor(deg)
-    local ceil_deg = math_ceil(deg)
-    
-    if floor_deg == ceil_deg then
-        return trig_cache[floor_deg].cos
-    else
-        local t = deg - floor_deg
-        return trig_cache[floor_deg].cos * (1 - t) + trig_cache[ceil_deg].cos * t
-    end
-end
-
--- fast fibonacci lookup
-local function fast_fibonacci(n)
-    n = n % 50  -- limit to precomputed range
-    return fibonacci_cache[n] or 0
-end
-
--- fast center distance lookup
-local function fast_center_distance(char_index, total_chars)
-    if total_chars <= 200 and center_distance_cache[total_chars] then
-        return center_distance_cache[total_chars][char_index] or math.abs(char_index - (total_chars + 1) / 2)
-    else
-        return math.abs(char_index - (total_chars + 1) / 2)
-    end
 end
 
 -- generate cache key for helper function results
@@ -2064,10 +1851,6 @@ local progression_strategies = strategies.get_registry()
 local SHIMMER_SHINE_ONLY = false
 local SHIMMER_DISABLE_SHINE = false  -- disable shine aspect entirely
 local SHIMMER_DISABLE_COLOR = false  -- disable color mode entirely
-
--- global override for max animated characters (nil = use preset defaults)
-local global_max_animated_chars = nil
-
 
 
 -- // MARK: TEST SWITCH API
@@ -2745,8 +2528,7 @@ end
 function M.start()
     if shimmer_timer then return end
     
-    -- initialize math cache, precomputed palettes, and helper optimization for performance
-    init_math_cache()
+    -- initialize precomputed palettes and helper optimization for performance
     init_all_palettes()
     init_helper_optimization()
     
@@ -2951,40 +2733,6 @@ function M.get_hsv_cache_stats()
         size = hsv_cache_stats.size,
         hit_rate = string.format("%.1f%%", hit_rate),
         max_entries = MAX_HSV_CACHE_ENTRIES
-    }
-end
-
--- string interning cache management
-function M.clear_string_intern_cache()
-    string_intern_cache = {}
-    markup_templates.common_colors = {}
-    intern_stats = { hits = 0, misses = 0, size = 0 }
-end
-
-function M.get_string_intern_stats()
-    local hit_rate = intern_stats.hits + intern_stats.misses > 0 
-        and (intern_stats.hits / (intern_stats.hits + intern_stats.misses) * 100) or 0
-    return {
-        hits = intern_stats.hits,
-        misses = intern_stats.misses,
-        size = intern_stats.size,
-        hit_rate = string.format("%.1f%%", hit_rate),
-        max_entries = STRING_INTERN_MAX_ENTRIES,
-        color_spans_cached = 0  -- count common_colors cache
-    }
-end
-
--- math cache management
-function M.clear_math_cache()
-    math_cache = { sin = {}, cos = {}, initialized = false }
-end
-
-function M.get_math_cache_stats()
-    return {
-        initialized = math_cache.initialized,
-        cache_size = MATH_CACHE_SIZE,
-        sin_entries = math_cache.initialized and MATH_CACHE_SIZE or 0,
-        cos_entries = math_cache.initialized and MATH_CACHE_SIZE or 0
     }
 end
 
@@ -3475,10 +3223,7 @@ M.get_helper_cache_stats = function()
         misses = helper_cache_stats.misses,
         size = helper_cache_stats.size,
         hit_rate = hit_rate,
-        max_size = HELPER_CACHE_MAX_SIZE,
-        trig_cache_size = 361,  -- 0-360 degrees
-        fibonacci_cache_size = 51,  -- 0-50
-        center_distance_cache_size = 200  -- up to 200 chars
+        max_size = HELPER_CACHE_MAX_SIZE
     }
 end
 

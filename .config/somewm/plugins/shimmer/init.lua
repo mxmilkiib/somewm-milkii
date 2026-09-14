@@ -679,15 +679,6 @@ M.get_target_fps = animation.get_target_fps
 M.clear_static_cache = integrations.clear_static_cache
 M.get_static_cache_stats = integrations.get_static_cache_stats
 
--- // MARK: STRING INTERNING MANAGEMENT
--- string interning for markup optimization
-M.clear_string_intern_cache = animation.clear_string_intern_cache
-M.get_string_intern_stats = animation.get_string_intern_stats
-
--- // MARK: MATH CACHE MANAGEMENT
--- trigonometric function caching
-M.clear_math_cache = animation.clear_math_cache
-M.get_math_cache_stats = animation.get_math_cache_stats
 
 -- // MARK: PALETTE PRE-COMPUTATION MANAGEMENT
 -- palette pre-computation for performance
