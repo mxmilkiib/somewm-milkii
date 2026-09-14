@@ -1275,7 +1275,7 @@ end
 local function toggle_pavucontrol()
     toggle_app_tag(
         function(c) return c.class == "Pavucontrol" end,
-        8,
+        9,
         "GDK_SCALE=0.9 pavucontrol"
     )
 end

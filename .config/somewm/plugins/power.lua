@@ -63,6 +63,32 @@ local state = {
     is_boot = false,  -- true only on a real boot (awesome.startup), not a reload
 }
 
+-- tracked resources for hot-reload cleanup (B20)
+local tracked = { timers = {}, pids = {}, signals = {} }
+
+local function cleanup()
+    for _, t in ipairs(tracked.timers) do t:stop() end
+    tracked.timers = {}
+    for _, pid in ipairs(tracked.pids) do
+        awful.spawn.with_shell("kill " .. pid .. " 2>/dev/null")
+    end
+    tracked.pids = {}
+    for _, sig in ipairs(tracked.signals) do
+        awesome.disconnect_signal(sig.name, sig.handler)
+    end
+    tracked.signals = {}
+end
+
+local function track_signal(name, handler)
+    awesome.connect_signal(name, handler)
+    tracked.signals[#tracked.signals + 1] = { name = name, handler = handler }
+end
+
+local function track_timer(t)
+    tracked.timers[#tracked.timers + 1] = t
+    return t
+end
+
 -- swayidle runs each command through a shell, so these pipe into awesome-client
 -- to emit signals that the dim/undim handlers below catch with full Lua state.
 local DIM_CMD   = [[echo "awesome.emit_signal('power_idle_dim')" | awesome-client]]
@@ -258,14 +284,17 @@ end
 -- MARK: STARTUP
 
 function M.start()
+    -- clean up any resources from a previous hot-reload (B20)
+    cleanup()
+
     -- true only during the initial startup phase, false on a config reload;
     -- captured synchronously here because the upower priming callback fires
     -- later, after awesome.startup has already gone false
     state.is_boot = awesome.startup and true or false
 
     -- idle dim/undim signals (fired by swayidle via awesome-client)
-    awesome.connect_signal("power_idle_dim", guarded(dim))
-    awesome.connect_signal("power_idle_resume", guarded(undim))
+    track_signal("power_idle_dim", guarded(dim))
+    track_signal("power_idle_resume", guarded(undim))
 
     -- locate the ACPI lid state file once, then prime lid state
     awful.spawn.easy_async("ls /proc/acpi/button/lid/*/state 2>/dev/null | head -1",
@@ -279,7 +308,7 @@ function M.start()
     awful.spawn.with_line_callback("udevadm monitor --kernel --subsystem-match=acpi", {
         stdout = guarded(function() on_lid_check() end),
     })
-    gears.timer.start_new(30, guarded(function() on_lid_check(); return true end))
+    track_timer(gears.timer.start_new(30, guarded(function() on_lid_check(); return true end)))
 
     -- battery/AC monitor (event-driven, no polling)
     awful.spawn.with_line_callback("upower --monitor-detail", {
@@ -294,6 +323,7 @@ function M.start()
     awful.spawn.easy_async_with_shell(
         "upower -i $(upower -e | grep -m1 BAT) 2>/dev/null | grep -E 'state|percentage'",
         guarded(function(out)
+            if not out or out == "" then return end
             local st = out:match("state:%s*([%w%-]+)")
             local pct = out:match("percentage:%s*(%d+)%%")
             if st then on_state(st) end
