@@ -172,6 +172,11 @@ end
 -- unbounded memory growth.
 -- collectgarbage("stop")
 
+-- startup profiler: install before the library requires so every module load
+-- is traced. Reports land in the journal and /tmp/somewm-startup-profile.log
+local profiler = require("rc.startup_profiler")
+profiler.install()
+
 -- Standard awesome libraries
 local gears = require("gears")
 local awful = require("awful")
@@ -202,6 +207,27 @@ end
 local menubar = require("menubar")      -- Menu bar library
 local hotkeys_popup = require("awful.hotkeys_popup")  -- Hotkey help system
 
+-- modifier display order in the hotkeys popup: Super, Shift, Ctrl, Alt
+hotkeys_popup.widget.modifier_sort_order = {
+    Super = 1,
+    Shift = 2,
+    Ctrl  = 3,
+    Alt   = 4,
+}
+
+-- somewm's _get_key_name misparses single-digit number keys as raw keysym
+-- values (e.g. "1" -> keysym 0x1 instead of XK_1=0x31), causing the hotkeys
+-- popup to display "0x00000001" instead of "1" (and "NoSymbol" for "0").
+-- Wrap it to return the character itself for 0-9 so the popup shows the
+-- correct digit.
+local _orig_get_key_name = awful.keyboard.get_key_name
+awful.keyboard.get_key_name = function(key)
+    if type(key) == "string" and #key == 1 and key:match("[0-9]") then
+        return key, key
+    end
+    return _orig_get_key_name(key)
+end
+
 -- somewm's C keygrabber consumes every key event while active. awful.menu
 -- normally owns one for keyboard navigation, but a missed hide leaves client
 -- text input blocked. All menus in this config remain fully mouse-operable
@@ -212,6 +238,32 @@ menu_module.show = function(self, args)
     if keygrabber.isrunning() then keygrabber.stop() end
     menu_show_with_grabber(self, args)
     if keygrabber.isrunning() then keygrabber.stop(self._keygrabber) end
+    -- close on a click anywhere outside the menu (any client, any wibar).
+    -- root menus only: children hide through their parent. installed once per
+    -- menu object so update()-driven re-shows don't stack duplicate handlers.
+    -- the wibar-level button::press fires before the widget's own handler in
+    -- somewm's dispatch order, so the opening click never reaches this
+    if self.wibox and self.wibox.visible and not self.parent and not self._outside_close then
+        local function close_menu()
+            if self.wibox and self.wibox.visible then
+                self:hide()
+                -- the same press may still reach a widget handler that would
+                -- reopen this menu (task item, launcher); mark it so those
+                -- handlers can skip
+                menu_module._press_closed = true
+                gears.timer.delayed_call(function() menu_module._press_closed = false end)
+            end
+        end
+        self._outside_close = close_menu
+        self._outside_bars = {}
+        client.connect_signal("button::press", close_menu)
+        for sc in screen do
+            if sc.mywibox then
+                sc.mywibox:connect_signal("button::press", close_menu)
+                self._outside_bars[#self._outside_bars + 1] = sc.mywibox
+            end
+        end
+    end
 end
 menu_module.hide = function(self)
     for i = 1, #self.items do self:item_leave(i) end
@@ -220,39 +272,359 @@ menu_module.hide = function(self)
         self.active_child = nil
     end
     self.sel = nil
+    if self._outside_close then
+        client.disconnect_signal("button::press", self._outside_close)
+        for _, w in ipairs(self._outside_bars) do
+            w:disconnect_signal("button::press", self._outside_close)
+        end
+        self._outside_close = nil
+        self._outside_bars = nil
+    end
     self.wibox.visible = false
+end
+
+-- awful.menu never sets a shape on its wibox; give every menu the popups'
+-- rounded corners. wrapping menu.new covers the main menu, tasklist menus
+-- and systray context menus (built per right-click) alike
+local menu_new_orig = menu_module.new
+menu_module.new = function(args, parent)
+    local m = menu_new_orig(args, parent)
+    if m.wibox then
+        m.wibox.shape = function(cr, w, h)
+            gears.shape.rounded_rect(cr, w, h,
+                beautiful.border_radius or beautiful.xresources.apply_dpi(3))
+        end
+    end
+    return m
 end
 
 -- The hotkey overlay uses the same grabber solely for paging/dismissal.
 -- Keep click-to-dismiss, but never let the overlay intercept application text.
--- Scale the popup 1.25x: widget.show_help routes through get_default_widget(),
+-- Scale the popup: widget.show_help routes through get_default_widget(),
 -- which lazily builds widget.new() with no args, so _load_widget_settings
 -- sets width/height to dpi(1200)/dpi(800). Pre-build the default widget with
--- 1.25x dimensions before awful.hotkeys_popup.keys (required below) calls
+-- scaled dimensions before awful.hotkeys_popup.keys (required below) calls
 -- add_hotkeys, which would otherwise create the default at standard size.
 -- _load_widget_settings reads args.width/args.height from the constructor
 -- closure, so the constructor is the only injection point.
+-- Width factor 1.6 fits ~1-2 extra columns; height 1.45 adds rows per column.
+-- Font stays at 1.25 so columns stay narrow and rows stay short.
+-- _create_wibox caps both to the workarea, so this is safe on small screens.
 local _hk_dpi = beautiful.xresources.apply_dpi
--- scale the Pango font size in a string like "Hack Nerd Font Mono 9" by 1.25
+local _hk_w_scale = 2.6
+local _hk_h_scale = 1.45
+local _hk_font_scale = 1.25
+-- scale the Pango font size in a string like "Hack Nerd Font Mono 9"
 local function _hk_scale_font(fs)
     local name, size = fs:match("^(.-)%s+(%d+)$")
     if name and size then
-        return string.format("%s %d", name, math.floor(tonumber(size) * 1.25))
+        return string.format("%s %d", name, math.floor(tonumber(size) * _hk_font_scale))
     end
     return fs
 end
 hotkeys_popup.widget.default_widget = hotkeys_popup.widget.new({
-    width = _hk_dpi(1200) * 1.25,
-    height = _hk_dpi(800) * 1.25,
+    width = _hk_dpi(1200) * _hk_w_scale,
+    height = _hk_dpi(800) * _hk_h_scale,
     font = _hk_scale_font(beautiful.hotkeys_font or "Monospace Bold 9"),
     description_font = _hk_scale_font(beautiful.hotkeys_description_font or "Monospace 8"),
 })
-local show_hotkeys_with_grabber = hotkeys_popup.show_help
-hotkeys_popup.show_help = function(...)
-    -- keep the keygrabber running so the popup can handle Esc (hide),
-    -- PageUp/PageDown (page navigation), and Mod4+s (hide on any key).
-    -- the widget's hide() stops the keygrabber itself.
-    return show_hotkeys_with_grabber(...)
+
+-- override the listing sort within each group: fewer modifiers first, then by
+-- modifier priority (Super, Shift, Ctrl, Alt), then by key name.
+-- e.g. Super, Super+Shift, Super+Ctrl, Super+Shift+Ctrl, Shift, Shift+Ctrl, ...
+do
+    local _mod_order = hotkeys_popup.widget.modifier_sort_order
+    local function mod_sort_score(mod_str)
+        if not mod_str or mod_str == "none" or mod_str == "" then
+            return 0
+        end
+        local vals = {}
+        for m in mod_str:gmatch("[^+]+") do
+            table.insert(vals, _mod_order[m] or 9)
+        end
+        table.sort(vals)
+        local count, key = #vals, 0
+        for _, v in ipairs(vals) do
+            key = key * 10 + v
+        end
+        return count * 10000 + key
+    end
+    local _dw = hotkeys_popup.widget.default_widget
+    function _dw:_sort_hotkeys(target)
+        for group, _ in pairs(self._group_list) do
+            if target[group] then
+                local sorted_table = {}
+                for _, key in pairs(target[group]) do
+                    table.insert(sorted_table, key)
+                end
+                table.sort(sorted_table, function(a, b)
+                    local sa, sb = mod_sort_score(a.mod), mod_sort_score(b.mod)
+                    if sa ~= sb then return sa < sb end
+                    local k1 = a.key or (a.keys and a.keys[1][1]) or ""
+                    local k2 = b.key or (b.keys and b.keys[1][1]) or ""
+                    return k1 < k2
+                end)
+                target[group] = sorted_table
+            end
+        end
+    end
+end
+
+-- old (plain passthrough): the stock popup dismissed on any keypress and
+-- offered no way to find a binding among the paginated columns.
+-- local show_hotkeys_with_grabber = hotkeys_popup.show_help
+-- hotkeys_popup.show_help = function(...)
+--     return show_hotkeys_with_grabber(...)
+-- end
+
+-- type-to-filter search box for the hotkeys popup.
+-- Replaces show_help on the module so Super+s and the menu entry route here.
+-- Builds a fresh wibox per invocation and per keystroke, bypassing the
+-- widget's wibox cache (keyed only on groups, so it would return stale
+-- results once keys are filtered). Printable keys feed the query; Backspace
+-- deletes; Escape/Enter dismisses; PgUp/PgDn pages; modifier-only presses and
+-- other non-printable keys are ignored so typing is not interrupted. The
+-- search box is wrapped onto each page so paging keeps it visible.
+do
+    local _gtable = require("gears.table")
+    local _hk = hotkeys_popup.widget.default_widget
+    local _dpi = beautiful.xresources.apply_dpi
+    -- somewm's widget.lua matches group_rules via gears.matcher, not awful.rules
+    local _matcher = require("gears.matcher")()
+
+    -- B8: track the active hotkeys-popup keygrabber across show_help calls.
+    -- my_grabber was a per-call local, so a second show_help overwrote it
+    -- without stopping the first, leaking a grabber that swallowed all
+    -- key events until a reload
+    local active_grabber
+
+    -- case-insensitive substring match against key, mod, description, group
+    local function hk_matches(key_rec, group, q)
+        if q == "" then return true end
+        local hay = string.lower(
+            (key_rec.key or "") .. " " .. (key_rec.mod or "") .. " " ..
+            (key_rec.description or "") .. " " .. (group or "")
+        )
+        return string.find(hay, q, 1, true) ~= nil
+    end
+
+    -- escape Pango markup special characters so the query can't inject markup
+    local function hk_escape(t)
+        t = tostring(t):gsub("&", "&"):gsub("<", "<"):gsub(">", ">")
+        return t
+    end
+
+    hotkeys_popup.show_help = function(c, s, show_args)
+        show_args = show_args or {}
+        local show_awesome_keys = show_args.show_awesome_keys ~= false
+        local self = _hk
+        self:_import_awful_keys()
+        self:_load_widget_settings()
+        c = c or client.focus
+        s = s or (c and c.screen) or awful.screen.focused()
+
+        -- mirror the stock available_groups computation (incl. group_rules
+        -- client matching) so third-party app keys behave as before
+        local available_groups = {}
+        for group, _ in pairs(self._group_list) do
+            local need_match
+            for group_name, data in pairs(self.group_rules) do
+                if group_name == group and (
+                    data.rule or data.rule_any or data.except or data.except_any
+                ) then
+                    if not c or not _matcher:matches_rule(c, {
+                        rule = data.rule,
+                        rule_any = data.rule_any,
+                        except = data.except,
+                        except_any = data.except_any,
+                    }) then
+                        need_match = true
+                        break
+                    end
+                end
+            end
+            if not need_match then table.insert(available_groups, group) end
+        end
+
+        local line_height = beautiful.get_font_height(self.font)
+        local search_h = line_height + (self.group_margin or _dpi(6))
+
+        -- build the search textbox for the current query
+        -- search font is ~1.8x the popup's main font so the filter text reads
+        -- clearly against the key listing below it
+        local function _hk_search_font(base_font)
+            local name, size = base_font:match("^(.-)%s+(%d+)$")
+            if name and size then
+                return string.format("%s %d", name, math.floor(tonumber(size) * 1.8))
+            end
+            return base_font
+        end
+        local _search_font = _hk_search_font(self.font)
+        local function search_widget_for(q)
+            local display
+            if q == "" then
+                display = string.format(
+                    '<span font="%s" foreground="%s">Search: </span>' ..
+                    '<span font="%s" foreground="%s">type to filter…</span>',
+                    _search_font, self.label_fg,
+                    _search_font, self.modifiers_fg)
+            else
+                display = string.format(
+                    '<span font="%s" foreground="%s">Search: </span>' ..
+                    '<span font="%s" foreground="%s">%s</span>' ..
+                    '<span font="%s" foreground="%s">▏</span>',
+                    _search_font, self.label_fg,
+                    _search_font, self.fg, hk_escape(q),
+                    _search_font, self.modifiers_fg)
+            end
+            local tb = wibox.widget.textbox()
+            tb:set_markup(display)
+            local m = wibox.container.margin()
+            m:set_widget(tb)
+            m:set_bottom(self.group_margin)
+            -- centre horizontally so the left/right margins match the popup
+            return wibox.widget {
+                m,
+                halign = "center",
+                widget = wibox.container.place,
+            }
+        end
+
+        local current_obj
+
+        local function hide_all()
+            if current_obj then
+                current_obj.popup.visible = false
+                current_obj.popup:set_widget(nil)
+                current_obj = nil
+            end
+            if active_grabber then
+                awful.keygrabber.stop(active_grabber)
+                active_grabber = nil
+            end
+        end
+
+        -- rebuild the popup for the given query: filter keys, render via the
+        -- stock _create_wibox (which paginates), then wrap each page with the
+        -- search box on top
+        local function rebuild(q)
+            local filtered, filtered_groups = {}, {}
+            for _, group in ipairs(available_groups) do
+                local keys = _gtable.join(
+                    show_awesome_keys and self._cached_awful_keys[group] or nil,
+                    self._additional_hotkeys[group]
+                )
+                local kept = {}
+                for _, k in ipairs(keys) do
+                    if hk_matches(k, group, q) then table.insert(kept, k) end
+                end
+                if #kept > 0 then
+                    filtered[group] = kept
+                    table.insert(filtered_groups, group)
+                end
+            end
+            -- temporarily swap key tables and shrink height so _create_wibox
+            -- renders the filtered set and leaves room for the search box
+            local orig_awesome = self._cached_awful_keys
+            local orig_additional = self._additional_hotkeys
+            local orig_height = self.height
+            self._cached_awful_keys = show_awesome_keys and filtered or {}
+            self._additional_hotkeys = show_awesome_keys and {} or filtered
+            self.height = orig_height - search_h
+            local widget_obj, ok, err
+            ok, err = pcall(function()
+                widget_obj = self:_create_wibox(s, filtered_groups, show_awesome_keys)
+            end)
+            self._cached_awful_keys = orig_awesome
+            self._additional_hotkeys = orig_additional
+            self.height = orig_height
+            if not ok then
+                hide_all()
+                naughty.notify({ text = "hotkeys filter rebuild failed: " .. tostring(err) })
+                return
+            end
+            -- pages were laid out for (orig_height - search_h); the search box
+            -- fills the remaining search_h, so the popup needs no resize
+            -- wrap the active page with the search box; re-wrap on paging.
+            -- track the raw page widget separately: page_next/page_prev return
+            -- early at the first/last page without touching the popup widget,
+            -- so reading the popup back after a boundary press would re-wrap
+            -- the already-wrapped outer and stack another search box on top.
+            local search_w = search_widget_for(q)
+            local raw_page_w = widget_obj.popup:get_widget()
+            local function rewrap()
+                local outer = wibox.layout.fixed.vertical()
+                outer:add(search_w)
+                outer:add(raw_page_w)
+                widget_obj.popup:set_widget(outer)
+            end
+            rewrap()
+            local _orig_next, _orig_prev = widget_obj.page_next, widget_obj.page_prev
+            widget_obj.page_next = function(_self)
+                -- un-wrap first so _orig_next sees the raw page; on a boundary
+                -- it returns early and popup stays as raw_page_w (no nesting)
+                widget_obj.popup:set_widget(raw_page_w)
+                _orig_next(_self)
+                raw_page_w = widget_obj.popup:get_widget()
+                rewrap()
+            end
+            widget_obj.page_prev = function(_self)
+                widget_obj.popup:set_widget(raw_page_w)
+                _orig_prev(_self)
+                raw_page_w = widget_obj.popup:get_widget()
+                rewrap()
+            end
+            widget_obj.hide = function(_self) hide_all() end
+
+            if current_obj and current_obj ~= widget_obj then
+                current_obj.popup.visible = false
+                current_obj.popup:set_widget(nil)
+            end
+            current_obj = widget_obj
+            widget_obj.popup.visible = true
+        end
+
+        local query = ""
+        rebuild(query)
+
+        local modifier_keys = {
+            Shift_L = true, Shift_R = true, Control_L = true, Control_R = true,
+            Alt_L = true, Alt_R = true, Super_L = true, Super_R = true,
+            Super = true, Alt = true, Control = true, Shift = true,
+            ISO_Level3_Shift = true, Caps_Lock = true, Num_Lock = true,
+            Mode_switch = true, Meta_L = true, Meta_R = true,
+        }
+        -- B8: stop any grabber left running by a previous show_help call
+        -- before starting a new one, else the old one leaks
+        if active_grabber then
+            awful.keygrabber.stop(active_grabber)
+            active_grabber = nil
+        end
+        active_grabber = awful.keygrabber.run(function(mods, key, event)
+            if event == "release" then return end
+            if modifier_keys[key] then return end
+            if key == "Escape" or key == "Return" then
+                hide_all()
+            elseif key == "BackSpace" then
+                query = query:sub(1, -2)
+                rebuild(query)
+            elseif key == "Prior" then
+                if current_obj then current_obj:page_prev() end
+            elseif key == "Next" then
+                if current_obj then current_obj:page_next() end
+            elseif key == "space" or (#key == 1 and key:match("[%w%p]")) then
+                local ch = (key == "space") and " " or key
+                if #ch == 1 and ch:match("[a-z]") then
+                    for _, m in ipairs(mods) do
+                        if m == "Shift" then ch = ch:upper() break end
+                    end
+                end
+                query = query .. ch
+                rebuild(query)
+            end
+            -- ignore other keys (arrows, function keys, etc.)
+        end)
+    end
 end
 
 local lgi = require("lgi")
@@ -260,12 +632,11 @@ local cairo = lgi.cairo
 
 local keybindings = require("rc.keybindings")        -- Hotkey definitions
 local ui_scale = require("rc.ui_scale")              -- UI zoom scale factor
+local font_utils = require("rc.font_utils")          -- scaled font strings
 
--- startup profiler
--- local profiler = require("rc.startup_profiler")
--- usage:
---   1) enable: uncomment the line above to load the profiler
---   2) wrap expensive sections:
+-- startup profiler: installed near the top of this file so all requires are
+-- traced; reports print to the journal and /tmp/somewm-startup-profile.log on
+-- the "startup" signal and at +3s/+30s marks. manual sections still available:
 --        profiler.start("theme.init")
 --        beautiful.init(...)
 --        profiler.stop()
@@ -273,9 +644,6 @@ local ui_scale = require("rc.ui_scale")              -- UI zoom scale factor
 --        profiler.measure("layouts_load", function()
 --          -- code to measure
 --        end)
---   3) reporting:
---      a summary report is printed automatically ~2s after startup
---      you can also call profiler.report() manually if needed
 
 
 -- source external libraries (Lua modules)
@@ -288,6 +656,20 @@ local quake_lain = require("lain.util.quake")                         -- optiona
 local bling = require("bling")                                        -- Modern layouts and utilities
 local treetile = require("treetile")                                  -- Hierarchical window arrangement
 local vstack = require("vstack")                                      -- Single-column vertical layout
+local thrizen = require("thrizen")                                    -- Grid-style 3-column layout
+local layout_bsp = require("layouts.bsp")                             -- Binary space partition
+local layout_tabbed = require("layouts.tabbed")                       -- i3-style tabbed
+local layout_grid = require("layouts.grid")                           -- Equal-area grid
+local layout_threecol = require("layouts.threecol")                   -- Three-column (master center)
+local layout_scroller = require("layouts.scroller")                   -- Horizontal scrolling (niri-style)
+local layout_quarter = require("layouts.quarter")                     -- Four-quadrant
+local layout_tatami = require("layouts.tatami")                       -- Tatami-mat inspired
+local layout_slice = require("layouts.slice")                         -- Horizontal slices
+local layout_msv = require("layouts.msv")                             -- Master-stack-vertical
+local layout_fibh = require("layouts.fibh")                           -- Fibonacci-horizontal
+local layout_panes = require("layouts.panes")                         -- Fixed-pane grid
+local layout_widetile = require("layouts.widetile")                   -- Wide-master tile
+local layout_expose = require("layouts.expose")                       -- Exposé-style overview
 
 -- local shimmer = require("plugins.shimmer")                         -- Unified shimmer & border animation system
 local noop = function() end;                                          -- no-op stub for temp disable
@@ -295,20 +677,26 @@ local shimmer = setmetatable({}, { __index = function() return noop end })
 
 local mode_glyphs = require("plugins.mode_glyphs")                    -- stable tasklist mode glyphs
 local hotkey_dupe_detector = require("plugins.hotkey_dupe_detector")  -- duplicate hotkey detection
-local notification_center = require("plugins.notification_center")     -- notification history popup
-local notifications = require("plugins.notifications")                  -- animated notification display
-local tag_pager = require("plugins.tag_pager")                          -- tag-aware expose pager
-tag_pager.init()
+-- popup/theme modules deferred until after beautiful.init so their top-level
+-- beautiful.* captures and popup construction see the loaded theme
+local notification_center                                              -- notification history popup
+local notifications                                                    -- animated notification display
+local tag_pager                                                        -- tag-aware expose pager
 local brightness = require("plugins.brightness")                        -- screen brightness with OSD
 local solo_super = require("plugins.solo_super")                        -- tap Super alone to toggle the launcher
 require("plugins.shake_cursor").start()                                 -- KDE Shake Cursor: shake the pointer to enlarge it briefly
 require("somewm.layout_animation")                                      -- animated tiled-layout transitions (native frame clock)
 require("plugins.window_fx")                                            -- open fade, close shrink, focus dim, floating shadows
 require("plugins.power").start()                                        -- power mgmt: battery, profiles, idle dim/lock/suspend, lid
+local battery_popup                                                    -- battery widget popup: info + power-profile switcher
 require("plugins.systray_dedup").start()                                 -- unregister SNI icons orphaned by hot-reloads (duplicate Steam tray icons)
+require("plugins.systray_icon_cache")                                    -- cache systray icon surface loads + theme lookups (fixes Quassel hover stutter)
 local volume_osd = require("plugins.volume_osd")                        -- volume keys OSD (KDE-style bar)
-local media_popup = require("plugins.media_popup")                      -- KDE-style media popup with controls
+local volume_popup                                                     -- volume widget popup: per-sink/source sliders
+local brightness_popup                                                 -- brightness widget popup: display list + gamma reapply
+local resource_popup                                                   -- cpu/gpu/ram widget popup: history graphs + sensor info
 local system_widgets = require("plugins.system_widgets")                -- volume, keyboard layout, show desktop
+local floating_rules = require("plugins.floating_rules")                -- dynamic floating rules (Super+Alt+F)
 
 
 -- // MARK: -- shimmer configuration
@@ -769,214 +1157,23 @@ local window_manager = {
 
 
 -- // MARK: SCREEN MANAGEMENT
-
--- screen rotation and management helpers
--- 
--- implements screen content rotation across multiple displays:
---   - rotates all tag contents (clients, layouts, properties) between screens
---   - preserves tag selection states and window assignments
---   - works bidirectionally (left/right rotation)
---   - provides visual feedback via notifications
--- 
--- keybindings:
---   - mod4 + ctrl + left/right arrows: keyboard rotation
---   - mod4 + scroll wheel (over layout widget): mouse rotation
--- 
--- rotation direction semantics:
---   - "left": content moves left (screen 1 gets screen 2's content)
---   - "right": content moves right (screen 1 gets last screen's content)
-
-local function rotate_screens(direction)
-    local all_screens = {}
-    for s in screen do
-        table.insert(all_screens, s)
-    end
-    
-    -- need at least 2 screens to rotate content
-    if #all_screens <= 1 then 
-        naughty.notify({
-            title = "Screen Rotation",
-            text = "Only one screen, nothing to rotate",
-            timeout = 2
-        })
-        return 
-    end
-    
-    -- collect all tag configurations from all screens
-    local screen_tags = {}
-    for i, s in ipairs(all_screens) do
-        screen_tags[i] = {}
-        for j, tag in ipairs(s.tags) do
-            -- store tag properties
-            screen_tags[i][j] = {
-                name = tag.name,
-                selected = tag.selected,
-                layout = tag.layout,
-                clients = tag:clients(),
-                -- store additional tag properties
-                master_width_factor = tag.master_width_factor,
-                master_count = tag.master_count,
-                column_count = tag.column_count,
-                gap = tag.gap,
-                gap_single_client = tag.gap_single_client
-            }
-        end
-    end
-    
-    -- calculate rotation: left = content moves left (screen indices go right)
-    -- right = content moves right (screen indices go left)
-    local target_mapping = {}
-    for i = 1, #all_screens do
-        if direction == "left" or direction == 1 then
-            -- content moves left: screen 1 gets screen 2's content, etc.
-            target_mapping[i] = (i % #all_screens) + 1
-        else -- right or -1
-            -- content moves right: screen 1 gets screen #'s content, etc.
-            target_mapping[i] = ((i - 2 + #all_screens) % #all_screens) + 1
-        end
-    end
-    
-    -- apply the rotation
-    for screen_idx, source_idx in pairs(target_mapping) do
-        local target_screen = all_screens[screen_idx]
-        local source_tags = screen_tags[source_idx]
-        
-        -- update each tag with properties from source
-        for tag_idx, tag in ipairs(target_screen.tags) do
-            local source_tag_data = source_tags[tag_idx]
-            if source_tag_data then
-                -- move all clients from source to target tag
-                for _, client in ipairs(source_tag_data.clients) do
-                    if client.valid then
-                        client:move_to_tag(tag)
-                    end
-                end
-                
-                -- apply tag properties
-                tag.layout = source_tag_data.layout
-                tag.master_width_factor = source_tag_data.master_width_factor
-                tag.master_count = source_tag_data.master_count
-                tag.column_count = source_tag_data.column_count
-                tag.gap = source_tag_data.gap
-                tag.gap_single_client = source_tag_data.gap_single_client
-                
-                -- apply selection state last (after clients are moved)
-                if source_tag_data.selected then
-                    tag:view_only()
-                end
-            end
-        end
-    end
-    
-    -- show notification
-    local direction_text = (direction == "left" or direction == 1) and "left" or "right"
-    naughty.notify({
-        title = "Screen Content Rotated",
-        text = "All tags rotated " .. direction_text .. " across " .. #all_screens .. " screens",
-        timeout = 2
-    })
-end
+-- screen rotation: rotates all tag contents (clients, layouts, properties)
+-- between screens. see plugins/screen_rotation.lua for implementation.
+-- keybindings: mod4 + ctrl + left/right arrows, mod4 + scroll wheel over layout widget
+local screen_rotation = require("plugins.screen_rotation")
+local rotate_screens = screen_rotation.rotate_screens
 
 
 -- // MARK: -- tag navigation
--- tag navigation functions for moving clients between tags
-local function move_to_previous_tag()
-    local c = client.focus
-    if not c then return end
-    local current_tag = c:tags()[1]
-    if current_tag then
-        local prev_tag = current_tag.screen.tags[current_tag.index - 1]
-        if prev_tag then c:move_to_tag(prev_tag) end
-    end
-end
-
-local function move_to_next_tag()
-    local c = client.focus
-    if not c then return end
-    local current_tag = c:tags()[1]
-    if current_tag then
-        local next_tag = current_tag.screen.tags[current_tag.index + 1]
-        if next_tag then c:move_to_tag(next_tag) end
-    end
-end
-
-local function move_to_previous_tag_and_follow()
-    local c = client.focus
-    if not c then return end
-    local current_tag = c:tags()[1]
-    if current_tag then
-        local prev_tag = current_tag.screen.tags[current_tag.index - 1]
-        if prev_tag then 
-            c:move_to_tag(prev_tag)
-            prev_tag:view_only()
-        end
-    end
-end
-
-local function move_to_next_tag_and_follow()
-    local c = client.focus
-    if not c then return end
-    local current_tag = c:tags()[1]
-    if current_tag then
-        local next_tag = current_tag.screen.tags[current_tag.index + 1]
-        if next_tag then 
-            c:move_to_tag(next_tag)
-            next_tag:view_only()
-        end
-    end
-end
-
-local function cycle_tags_with_clients(direction)
-    local current_screen = awful.screen.focused()
-    local all_tags = current_screen.tags
-    local current_tag = current_screen.selected_tag
-    local current_index = gears.table.hasitem(all_tags, current_tag)
-    
-    local count = #all_tags
-    
-    for i = 1, count - 1 do
-        local idx
-        if direction == "next" then
-            idx = ((current_index + i - 1) % count) + 1
-        else
-            idx = ((current_index - i - 1 + count) % count) + 1
-        end
-        local tag = all_tags[idx]
-        
-        if #tag:clients() > 0 then
-            tag:view_only()
-            return
-        end
-    end
-end
-
-local function cycle_tags_with_visible_clients(direction)
-    local current_screen = awful.screen.focused()
-    local all_tags = current_screen.tags
-    local current_tag = current_screen.selected_tag
-    local current_index = gears.table.hasitem(all_tags, current_tag)
-
-    for i = 1, #all_tags - 1 do
-        local idx
-        if direction == "next" then
-            idx = ((current_index - 1 + i) % #all_tags) + 1
-        else
-            idx = ((current_index - 1 - i + #all_tags) % #all_tags) + 1
-        end
-        local tag = all_tags[idx]
-        local has_visible_clients = false
-        for _, c in ipairs(tag:clients()) do
-            if not c.minimized then
-                has_visible_clients = true
-                break
-            end
-        end
-        if has_visible_clients then
-            tag:view_only()
-            return
-        end
-    end
-end
+-- tag navigation helpers: moving clients between tags and cycling through
+-- tags with clients. see rc/tag_navigation.lua for implementation.
+local tag_navigation = require("rc.tag_navigation")
+local move_to_previous_tag            = tag_navigation.move_to_previous_tag
+local move_to_next_tag                = tag_navigation.move_to_next_tag
+local move_to_previous_tag_and_follow = tag_navigation.move_to_previous_tag_and_follow
+local move_to_next_tag_and_follow     = tag_navigation.move_to_next_tag_and_follow
+local cycle_tags_with_clients         = tag_navigation.cycle_tags_with_clients
+local cycle_tags_with_visible_clients = tag_navigation.cycle_tags_with_visible_clients
 
 
 -- // MARK: -- tasklist mode toggle
@@ -1140,175 +1337,13 @@ end
 
 
 -- // MARK: -- resize-no-warp
--- anti-warp resize function that prevents cursor from jumping to another monitor
-local function resize_no_warp(c)
-    c:emit_signal("request::activate", "mouse_click", {raise = true})
-
-    -- check if client is floating or if current layout has mouse_resize_handler
-    local layout = awful.layout.get(c.screen)
-    
-    -- if client is not floating and layout has mouse_resize_handler, use it
-    if not c.floating and layout.mouse_resize_handler then
-        
-        local initial_coords = mouse.coords()
-        local geo = c:geometry()
-        
-        -- determine corner based on mouse position relative to client center  
-        local corner
-        if initial_coords.y < geo.y + geo.height/2 then
-            if initial_coords.x < geo.x + geo.width/2 then
-                corner = "top_left"
-            else
-                corner = "top_right"
-            end
-        else
-            if initial_coords.x < geo.x + geo.width/2 then
-                corner = "bottom_left"
-            else
-                corner = "bottom_right"
-            end
-        end
-        
-        -- call the layout's mouse resize handler
-        layout.mouse_resize_handler(c, corner, initial_coords.x, initial_coords.y)
-        return
-    end
-
-    -- fallback to floating window resize for floating clients or layouts without mouse handler
-    -- store initial cursor position
-    local initial_coords = mouse.coords()
-
-    -- store initial client geometry
-    local geo = c:geometry()
-    local initial_geo = {x = geo.x, y = geo.y, width = geo.width, height = geo.height}
-
-    -- detect which corner/edge was grabbed based on mouse position
-    -- this determines which corner stays fixed (anchor) during resize
-    local corner = ""
-    local edge_threshold = 20  -- pixels from edge to consider it an edge grab
-    
-    local rel_x = initial_coords.x - geo.x
-    local rel_y = initial_coords.y - geo.y
-    
-    -- determine vertical anchor (top or bottom)
-    if rel_y < edge_threshold then
-        corner = "top"
-    elseif rel_y > geo.height - edge_threshold then
-        corner = "bottom"
-    else
-        -- middle vertical, will resize both top and bottom equally
-        corner = "middle"
-    end
-    
-    -- determine horizontal anchor (left or right)
-    if rel_x < edge_threshold then
-        corner = corner .. "_left"
-    elseif rel_x > geo.width - edge_threshold then
-        corner = corner .. "_right"
-    else
-        -- middle horizontal, will resize both left and right equally
-        corner = corner .. "_center"
-    end
-
-    -- define anchor point based on grabbed corner (opposite corner stays fixed)
-    local anchor_x, anchor_y
-    if corner:match("left") then
-        anchor_x = geo.x + geo.width  -- right edge is anchor
-    elseif corner:match("right") then
-        anchor_x = geo.x  -- left edge is anchor
-    else
-        anchor_x = geo.x + geo.width / 2  -- center is anchor
-    end
-    
-    if corner:match("top") then
-        anchor_y = geo.y + geo.height  -- bottom edge is anchor
-    elseif corner:match("bottom") then
-        anchor_y = geo.y  -- top edge is anchor
-    else
-        anchor_y = geo.y + geo.height / 2  -- center is anchor
-    end
-
-    -- get the current screen's geometry for boundary checking
-    local screen_geo = screen[c.screen].geometry
-
-    -- start the mouse grabber without warping the cursor
-    mousegrabber.run(function(m)
-        if not c.valid then return false end
-
-        -- calculate new dimensions based on mouse movement from anchor point
-        local new_x, new_y, new_width, new_height
-        
-        if corner:match("left") then
-            -- dragging left edge: anchor is right edge
-            new_x = math.min(m.x, anchor_x - MIN_WINDOW_SIZE)
-            new_width = anchor_x - new_x
-        elseif corner:match("right") then
-            -- dragging right edge: anchor is left edge
-            new_x = anchor_x
-            new_width = math.max(m.x - anchor_x, MIN_WINDOW_SIZE)
-        else
-            -- dragging center horizontally: expand/contract symmetrically
-            local dx = m.x - initial_coords.x
-            new_width = math.max(initial_geo.width + dx * 2, MIN_WINDOW_SIZE)
-            new_x = anchor_x - new_width / 2
-        end
-        
-        if corner:match("top") then
-            -- dragging top edge: anchor is bottom edge
-            new_y = math.min(m.y, anchor_y - MIN_WINDOW_SIZE)
-            new_height = anchor_y - new_y
-        elseif corner:match("bottom") then
-            -- dragging bottom edge: anchor is top edge
-            new_y = anchor_y
-            new_height = math.max(m.y - anchor_y, MIN_WINDOW_SIZE)
-        else
-            -- dragging center vertically: expand/contract symmetrically
-            local dy = m.y - initial_coords.y
-            new_height = math.max(initial_geo.height + dy * 2, MIN_WINDOW_SIZE)
-            new_y = anchor_y - new_height / 2
-        end
-
-        -- constrain to screen boundaries
-        if new_x < screen_geo.x then
-            new_width = new_width - (screen_geo.x - new_x)
-            new_x = screen_geo.x
-        end
-        if new_y < screen_geo.y then
-            new_height = new_height - (screen_geo.y - new_y)
-            new_y = screen_geo.y
-        end
-        if new_x + new_width > screen_geo.x + screen_geo.width then
-            new_width = screen_geo.x + screen_geo.width - new_x
-        end
-        if new_y + new_height > screen_geo.y + screen_geo.height then
-            new_height = screen_geo.y + screen_geo.height - new_y
-        end
-
-        -- ensure minimum size after boundary constraints
-        new_width = math.max(new_width, MIN_WINDOW_SIZE)
-        new_height = math.max(new_height, MIN_WINDOW_SIZE)
-
-        -- apply the new geometry
-        c:geometry({
-            x = math.floor(new_x),
-            y = math.floor(new_y),
-            width = math.floor(new_width),
-            height = math.floor(new_height)
-        })
-
-        return m.buttons[3] or m.buttons[2]  -- continue as long as right or middle button is pressed
-    end, "fleur")
-
-    -- update center position for our center-locked resizing
-    -- once resize is complete
-    if c.floating and window_centers then
-        local new_geo = c:geometry()
-        window_centers[c] = {
-            x = new_geo.x + new_geo.width / 2,
-            y = new_geo.y + new_geo.height / 2
-        }
-    end
-end
+-- anti-warp resize: prevents cursor from jumping to another monitor during
+-- resize. see rc/resize_no_warp.lua for implementation.
+local resize_no_warp_module = require("rc.resize_no_warp")
+local resize_no_warp = resize_no_warp_module.create({
+    min_window_size = MIN_WINDOW_SIZE,
+    window_centers = window_centers,
+})
 
 
 
@@ -1327,6 +1362,31 @@ end
 
 -- theme init
 beautiful.init(gears.filesystem.get_configuration_dir() .. "milktheme/theme.lua")
+
+-- popup/theme modules required after beautiful.init so their top-level
+-- beautiful.* captures and popup construction see the loaded theme instead
+-- of nil fallbacks
+notification_center = require("plugins.notification_center")
+notifications = require("plugins.notifications")
+tag_pager = require("plugins.tag_pager")
+tag_pager.init()
+battery_popup = require("plugins.battery_popup")
+brightness_popup = require("plugins.brightness_popup")
+volume_popup = require("plugins.volume_popup")
+resource_popup = require("plugins.resource_popup")
+local media_popup = require("plugins.media_popup")
+local popup_common = require("plugins.popup_common")
+
+-- systray (SNI) context menus: same black/purple/gold style as the popups
+local _sni_gold = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
+local _sni_purple = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
+beautiful.systray_menu_fg_normal    = "#FFFFFF"
+beautiful.systray_menu_bg_normal    = "#000000"
+beautiful.systray_menu_fg_focus     = _sni_gold
+beautiful.systray_menu_bg_focus     = _sni_purple
+beautiful.systray_menu_border_color = _sni_gold
+beautiful.systray_menu_border_width = beautiful.bar_edge_width or beautiful.border_width or 1
+beautiful.systray_menu_font         = font_utils.FONT
 
 -- shimmer safety: ensure any plain tasklist focused text is not stark white
 -- this prevents visible white flashes if a plain frame sneaks in during redraw
@@ -2037,49 +2097,60 @@ tag.connect_signal("request::default_layouts", guarded(function()
     -- awful/layout/init.lua __newindex metamethod; default_layouts is
     -- empty at this point so appending yields exactly this curated subset
     awful.layout.append_default_layouts({
-        -- active layouts in preferred order
+        -- primary custom layouts
         vstack,                              -- single-column vertical (master on top, slaves below)
-        lain.layout.threefifths,                       -- primary: adaptive 3/5 for focused window
-        -- centerwork_twothirds.horizontal,            -- custom: two-thirds for new window
-        -- centerwork_adaptive.horizontal,             -- custom: adaptive centerwork horizontal
+        lain.layout.threefifths,             -- adaptive 3/5 for focused window
         awful.layout.suit.magnifier,
         lain.layout.centerwork.horizontal,
+        lain.layout.centerwork,              -- vertical centerwork
         lain.layout.termfair.center,
+        lain.layout.termfair,
         awful.layout.suit.fair.horizontal,
+        awful.layout.suit.fair,              -- vertical fair
         awful.layout.suit.max,
+        awful.layout.suit.max.fullscreen,
         awful.layout.suit.carousel,
-        awful.layout.suit.spiral,                -- recommended: fibonacci spiral layout
+        awful.layout.suit.spiral,
+        awful.layout.suit.spiral.dwindle,
+        -- tile variants
         awful.layout.suit.tile.top,
         awful.layout.suit.tile.bottom,
         awful.layout.suit.tile,
-        -- awful.layout.suit.tile.left,
-        -- tile_bottom_mouse,                          -- custom: enhanced tile.bottom with mouse resize
-        -- bling.layout.horizontal,          -- optional: horizontal master layout  
-        -- awful.layout.suit.corner.ne,
-        -- awful.layout.suit.corner.nw,
+        awful.layout.suit.tile.left,
+        -- corner variants
+        awful.layout.suit.corner.nw,
+        awful.layout.suit.corner.ne,
+        awful.layout.suit.corner.sw,
+        awful.layout.suit.corner.se,
+        -- bling layouts
+        bling.layout.equalarea,
+        bling.layout.mstab,
+        bling.layout.deck,
+        bling.layout.centered,
+        bling.layout.horizontal,
+        bling.layout.vertical,
+        -- tree and grid layouts
         treetile,
-        bling.layout.equalarea,              -- recommended: equal area distribution
-        bling.layout.mstab,                  -- highly recommended: master-slave tabbing
-        -- bling.layout.vertical,            -- optional: vertical master layout
-        -- lain.layout.centerwork,
-        -- lain.layout.termfair,
-        bling.layout.deck,                   -- optional: deck-style stacking layout
-        lain.layout.cascade                 -- recommended: beautiful cascading windows
-        -- awful.layout.suit.floating,
-        -- bling.layout.centered,
-        -- awful.layout.suit.corner.nw,
-        -- awful.layout.suit.corner.ne,
-        -- awful.layout.suit.spiral.dwindle,
-        -- awful.layout.suit.max.fullscreen,
-        -- leaved.layout.suit.tile.right,
-        -- leaved.layout.suit.tile.left,
-        -- leaved.layout.suit.tile.top,
-        -- trizen,
-        -- dovetail.layout.right,
-        -- dynamite.layout.conditional,
-        -- dynamite.layout.ratio,
-        -- dynamite.layout.stack,
-        -- dynamite.layout.tabbed
+        thrizen,
+        layout_bsp,
+        layout_grid,
+        layout_threecol,
+        layout_quarter,
+        layout_tatami,
+        layout_slice,
+        layout_msv,
+        layout_fibh,
+        layout_panes,
+        layout_widetile,
+        layout_expose,
+        -- scrolling and tabbed
+        layout_scroller,
+        layout_tabbed,
+        -- cascade
+        lain.layout.cascade,
+        lain.layout.cascade.tile,
+        -- floating
+        awful.layout.suit.floating,
     })
 end))
 
@@ -2108,26 +2179,97 @@ local mytextclock = wibox.widget.textclock()
 local month_calendar = awful.widget.calendar_popup.month({
     start_sunday = false,
     week_numbers = true,
-    font = "Hack Nerd Font 11",
+    font = font_utils.FONT_CLEAR,
     spacing = 2,
     margin = 8,
 })
-mytextclock:buttons(gears.table.join(
-    awful.button({}, 1, function()
-        local clicked_screen = mouse.screen or awful.screen.focused()
-        month_calendar:call_calendar(0, "tr", clicked_screen)
-        month_calendar.visible = not month_calendar.visible
-    end),
-    awful.button({}, 4, function() month_calendar:call_calendar(-1, "tr", mouse.screen or awful.screen.focused()) end),
-    awful.button({}, 5, function() month_calendar:call_calendar(1, "tr", mouse.screen or awful.screen.focused()) end)
-))
+
+-- Add a header bar above the calendar matching the brightness/volume/media/
+-- notification popups: bold white title on the themed purple background.
+-- awful.widget.calendar_popup sizes its wibox to the calendar widget alone,
+-- so the calendar widget is wrapped in a vertical layout with the header and
+-- call_calendar is overridden to extend the wibox height by the header's
+-- fitted height (the widget is swapped back to the bare calendar for the
+-- original call so its date/geometry logic still sees the calendar widget).
+do
+    local cal_widget = month_calendar:get_widget()
+    local cal_header = wibox.widget {
+        {
+            {
+                text  = "Calendar",
+                fg    = "#FFFFFF",
+                font  = font_utils.FONT_HEAD,
+                align = "left",
+                valign = "center",
+                widget = wibox.widget.textbox,
+            },
+            left = _hk_dpi(10), right = _hk_dpi(10),
+            top = _hk_dpi(6), bottom = _hk_dpi(6),
+            widget = wibox.container.margin,
+        },
+        bg = (beautiful.main_purple and beautiful.main_purple.base) or "#623997",
+        widget = wibox.container.background,
+    }
+    local cal_wrapped = wibox.widget {
+        cal_header,
+        cal_widget,
+        layout = wibox.layout.fixed.vertical,
+    }
+    month_calendar:set_widget(cal_wrapped)
+
+    -- Apply the same themed border color, width, and rounded corners as the
+    -- other popups. awful.widget.calendar_popup creates a plain wibox with no
+    -- border or shape.
+    month_calendar.border_color = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
+    month_calendar.border_width = beautiful.bar_edge_width or beautiful.border_width or _hk_dpi(1)
+    month_calendar.shape = function(cr, w, h)
+        gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or _hk_dpi(3))
+    end
+
+    local orig_call_calendar = month_calendar.call_calendar
+    month_calendar.call_calendar = function(self, offset, position, screen)
+        self:set_widget(cal_widget)
+        orig_call_calendar(self, offset, position, screen)
+        self:set_widget(cal_wrapped)
+        -- extend the wibox height to fit the header now sitting above the calendar
+        local s = screen or self.screen or awful.screen.focused()
+        local wa = s.workarea
+        local _, header_h = cal_header:fit({ screen = s, dpi = s.dpi }, wa.width, wa.height)
+        local geo = self:geometry()
+        self:geometry({ x = geo.x, y = geo.y, width = geo.width, height = geo.height + header_h })
+    end
+end
 mytextclock.format = "<span foreground='#ffffff' background='#623997'>%a %b %d %H:%M</span>"
-mytextclock.font = "Hack Nerd Font 11"
+mytextclock.font = font_utils.FONT_CLEAR
 
 local textclock_clr = wibox.container.background()
 -- add at least 4px of purple padding on both sides
 textclock_clr:set_widget(wibox.container.margin(mytextclock, CLOCK_MARGIN, CLOCK_MARGIN, 0, 0))
 textclock_clr:set_fg("#ffffff")
+
+local function cal_hide()
+    month_calendar.visible = false
+    popup_common.outside_click_teardown(month_calendar)
+end
+
+-- buttons live on the background container so the whole clock block (text
+-- plus padding) is clickable; button::press propagates up the widget tree
+textclock_clr:buttons(gears.table.join(
+    awful.button({}, 1, function()
+        -- widget_press returns true if the wibar outside-click handler
+        -- already closed the calendar on this press; skip the toggle
+        if popup_common.widget_press(month_calendar) then return end
+        month_calendar:call_calendar(0, "tr", mouse.screen or awful.screen.focused())
+        month_calendar.visible = not month_calendar.visible
+        if month_calendar.visible then
+            popup_common.outside_click_setup(month_calendar, cal_hide)
+        else
+            popup_common.outside_click_teardown(month_calendar)
+        end
+    end),
+    awful.button({}, 4, function() month_calendar:call_calendar(-1, "tr", mouse.screen or awful.screen.focused()) end),
+    awful.button({}, 5, function() month_calendar:call_calendar(1, "tr", mouse.screen or awful.screen.focused()) end)
+))
 textclock_clr:set_bg((beautiful.main_purple and beautiful.main_purple.base) or "#623997")
 -- solid purple from the bar's top edge to its bottom edge: no border,
 -- the background fills the whole widget height
@@ -2209,6 +2351,19 @@ mymainmenu = freedesktop.menu.build({
     }
 })
 
+-- Apply the same themed border color, width, and rounded corners to the
+-- main menu popup wibox as the other popups. awful.menu sets border values
+-- from menu_border_* (purple) and no shape; override to match the gold
+-- border + bar_edge_width + border_radius pattern used by the popups.
+if mymainmenu and mymainmenu.wibox then
+    local _menu_gold = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
+    mymainmenu.wibox.border_color = _menu_gold
+    mymainmenu.wibox.border_width = beautiful.bar_edge_width or beautiful.border_width or _hk_dpi(1)
+    mymainmenu.wibox.shape = function(cr, w, h)
+        gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or _hk_dpi(3))
+    end
+end
+
 -- -- Pre-populate the menu once at startup to avoid a pause on first open
 -- gears.timer.delayed_call(function()
 --     if mymainmenu then
@@ -2242,38 +2397,13 @@ mylauncher:connect_signal("mouse::enter", guarded(function() menu_icon.image = m
 mylauncher:connect_signal("mouse::leave", guarded(function() menu_icon.image = menu_icon_normal end))
 mylauncher:connect_signal("button::press", guarded(function(_, _, _, button)
     if button ~= 1 and button ~= 3 then return end
+    -- the screen's wibar button::press fires before this handler; if it just
+    -- closed the menu, don't reopen it for the same press
+    if menu_module._press_closed then return end
     local s = mouse.screen
     local bar_h = (s.mywibox and s.mywibox.valid and s.mywibox:geometry().height) or 32
+    -- outside-click close is installed by the menu_module.show wrapper
     mymainmenu:toggle({ coords = { x = s.geometry.x + (beautiful.menu_border_width or 0), y = s.geometry.y + bar_h } })
-    -- awful.menu only dismisses on clicks within its own screen; close on a
-    -- click anywhere (any screen, any wibar, any client, the root) while it
-    -- is visible
-    if mymainmenu.wibox and mymainmenu.wibox.visible then
-        local function close_menu()
-            if mymainmenu.wibox and mymainmenu.wibox.visible then mymainmenu:hide() end
-        end
-        client.connect_signal("button::press", close_menu)
-        local bar_handlers = {}
-        for sc in screen do
-            -- skip the current screen's wibox: its button::press fires
-            -- before the launcher's, so close_menu would hide the menu
-            -- before toggle re-opens it. the launcher handles its own bar.
-            if sc.mywibox and sc ~= s then
-                local handler = close_menu
-                sc.mywibox:connect_signal("button::press", handler)
-                bar_handlers[#bar_handlers + 1] = { wibox = sc.mywibox, handler = handler }
-            end
-        end
-        local orig_hide = mymainmenu.hide
-        mymainmenu.hide = function(self)
-            client.disconnect_signal("button::press", close_menu)
-            for _, entry in ipairs(bar_handlers) do
-                entry.wibox:disconnect_signal("button::press", entry.handler)
-            end
-            mymainmenu.hide = orig_hide
-            orig_hide(self)
-        end
-    end
 end))
 awful.tooltip({ objects = { mylauncher }, text = "Applications" })
 
@@ -2335,6 +2465,10 @@ local taglist_buttons = gears.table.join(
 
 -- // MARK: --tasklist
 -- tasklist button mouse bindings
+
+-- tracks the currently open task list context menu so the global root
+-- button handlers can close it on a desktop click
+local active_tasklist_menu
 
 
 -- // MARK: --mousewheel-client-cycling-functions
@@ -2467,6 +2601,9 @@ local tasklist_buttons = gears.table.join(
         c.minimized = true
     end),
     awful.button({ }, 3, function(c)
+        -- the wibar outside-click handler may have run first for this same
+        -- press and closed the open menu; don't reopen it
+        if menu_module._press_closed then return end
         -- KDE-style per-client context menu
         local name = c.name or c.class or "client"
         if #name > 40 then name = name:sub(1, 37) .. "..." end
@@ -2507,14 +2644,30 @@ local tasklist_buttons = gears.table.join(
 
         local ctx_menu = awful.menu({
             items = menu_items,
-            theme = { width = 200 },
+            theme = {
+                width = 200,
+                font = font_utils.FONT,
+                bg_normal = "#000000",
+                fg_normal = "#FFFFFF",
+                bg_focus = (beautiful.main_purple and beautiful.main_purple.base) or "#623997",
+                fg_focus = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700",
+                border_color = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700",
+                border_width = beautiful.bar_edge_width or beautiful.border_width or _hk_dpi(1),
+            },
         })
         ctx_menu:show({ coords = { x = mouse.coords().x, y = mouse.coords().y } })
 
-        -- dismiss on outside click: awful.menu handles this itself; a
-        -- mousegrabber here would intercept the very click that selects a
-        -- menu item (hiding the menu before the item callback runs), so
-        -- none of the items would ever activate.
+        -- outside-click close is installed by the menu_module.show wrapper;
+        -- just track the menu so Esc/tag switches can hide it too
+        if ctx_menu.wibox and ctx_menu.wibox.visible then
+            active_tasklist_menu = ctx_menu
+            local orig_ctx_hide = ctx_menu.hide
+            ctx_menu.hide = function(self)
+                active_tasklist_menu = nil
+                ctx_menu.hide = orig_ctx_hide
+                orig_ctx_hide(self)
+            end
+        end
     end),
     -- mousewheel up: cycle forward through clients on current tag
     awful.button({ }, 4, function ()
@@ -2542,6 +2695,30 @@ local tasklist_buttons = gears.table.join(
 
 -- apply wallpaper and create widgets for each screen
 awful.screen.connect_for_each_screen(function(s)
+    -- tear down any prior per-screen signal handlers + timers before
+    -- re-creating them. on screen hotplug (remove then re-add) the old
+    -- connections to global tag/awesome signals and the old poll timers
+    -- would otherwise accumulate, each referencing dead widgets (B6/B7).
+    if s._somewm_cleanup then
+        for _, sig in ipairs(s._somewm_cleanup.signals or {}) do
+            sig.source.disconnect_signal(sig.name, sig.handler)
+        end
+        for _, t in ipairs(s._somewm_cleanup.timers or {}) do
+            if t and t.stop then t:stop() end
+        end
+    end
+    s._somewm_cleanup = { signals = {}, timers = {} }
+    -- track a global-signal connection (tag/awesome) for cleanup on removal
+    local function track_signal(source, name, handler)
+        source.connect_signal(name, handler)
+        table.insert(s._somewm_cleanup.signals, { source = source, name = name, handler = handler })
+    end
+    -- track a repeating timer so it is stopped on screen removal
+    local function track_timer(t)
+        table.insert(s._somewm_cleanup.timers, t)
+        return t
+    end
+
     -- wallpaper
     set_wallpaper(s)
 
@@ -2604,20 +2781,55 @@ awful.screen.connect_for_each_screen(function(s)
         threefifths = "Three-fifths",
         magnifier = "Magnifier",
         centerwork = "Centered work area",
+        centerworkh = "Centered work area (horizontal)",
         termfair = "Terminal fair",
+        centerfair = "Centered terminal fair",
         fair = "Fair",
+        fairh = "Fair (horizontal)",
         max = "Maximized",
+        maxFullscreen = "Maximized (fullscreen)",
+        fullscreen = "Maximized (fullscreen)",
         carousel = "Carousel",
         spiral = "Spiral",
+        dwindle = "Dwindle",
         tile = "Tile",
+        tiletop = "Tile (top)",
+        tilebottom = "Tile (bottom)",
+        tileleft = "Tile (left)",
+        cornernw = "Corner (NW)",
+        cornerne = "Corner (NE)",
+        cornersw = "Corner (SW)",
+        cornerse = "Corner (SE)",
         treetile = "Tree tile",
         equalarea = "Equal area",
         mstab = "Master/slave tabbed",
         deck = "Deck",
         cascade = "Cascade",
+        cascadetile = "Cascade tile",
+        centered = "Centered",
+        horizontal = "Horizontal master",
+        vertical = "Vertical master",
+        floating = "Floating",
+        thrizen = "Thrizen",
+        bsp = "Binary space partition",
+        tabbed = "Tabbed",
+        grid = "Grid",
+        threecol = "Three-column",
+        scroller = "Scroller",
+        quarter = "Quarter",
+        tatami = "Tatami",
+        slice = "Slice",
+        msv = "Master-stack vertical",
+        fibh = "Fibonacci horizontal",
+        panes = "Fixed panes",
+        widetile = "Wide-master tile",
+        expose = "Expose overview",
     }
-    local layout_strip = wibox.layout.fixed.horizontal()
+    local layout_strip = wibox.layout.grid()
+    layout_strip.orientation = "horizontal"
+    layout_strip.forced_num_cols = 8
     layout_strip.spacing = 2
+    layout_strip.homogeneous = true
     local layout_popup = awful.popup {
         widget = wibox.widget {
             layout_strip,
@@ -2625,15 +2837,15 @@ awful.screen.connect_for_each_screen(function(s)
             widget = wibox.container.margin,
         },
         bg = "#000000",
-        border_width = 1,
-        border_color = "#000000",
+        border_width = beautiful.bar_edge_width or beautiful.border_width or 1,
+        border_color = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700",
         ontop = true,
         visible = false,
-        shape = function(cr, w, h) gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3)) end,
+        shape = function(cr, w, h) gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or _hk_dpi(3)) end,
     }
-    local layout_hide_timer = gears.timer { timeout = 0.20, single_shot = true, callback = guarded(function()
+    local layout_hide_timer = track_timer(gears.timer { timeout = 0.20, single_shot = true, callback = guarded(function()
         layout_popup.visible = false
-    end) }
+    end) })
     local function show_layout_strip()
         local current = awful.layout.get(s)
         layout_strip:reset()
@@ -2657,7 +2869,7 @@ awful.screen.connect_for_each_screen(function(s)
                 awful.layout.set(selected_layout, s.selected_tag)
                 layout_popup.visible = false
             end)))
-            awful.tooltip { objects = { item }, text = layout_labels[selected_layout.name] or selected_layout.name or "layout" }
+            awful.tooltip { objects = { item }, text = layout_labels[selected_layout.name] or selected_layout.name or "layout", font = beautiful.menu_font }
             layout_strip:add(item)
         end
         layout_hide_timer:stop()
@@ -2687,15 +2899,22 @@ awful.screen.connect_for_each_screen(function(s)
     local layout_changed = function(t)
         if t and t.screen == s then refresh_layout_selection() end
     end
-    tag.connect_signal("property::layout", guarded(layout_changed))
+    track_signal(tag, "property::layout", guarded(layout_changed))
     s.mylayoutbox:connect_signal("mouse::enter", guarded(show_layout_strip))
     s.mylayoutbox:connect_signal("mouse::leave", guarded(function() layout_hide_timer:again() end))
     layout_popup:connect_signal("mouse::enter", guarded(function() layout_hide_timer:stop() end))
     layout_popup:connect_signal("mouse::leave", guarded(function() layout_hide_timer:again() end))
+    -- track the middle-click layout menu so it can be toggled
+    local layout_menu_ref = nil
     s.mylayoutbox:buttons(gears.table.join(
                            awful.button({ }, 1, function () awful.layout.inc(-1) end),
                            awful.button({ }, 3, function () awful.layout.inc( 1) end),
                            awful.button({ }, 2, function ()
+                               -- toggle: if menu is open, close it
+                               if layout_menu_ref and layout_menu_ref.wibox and layout_menu_ref.wibox.visible then
+                                   layout_menu_ref:hide()
+                                   return
+                               end
                                local t = s.selected_tag
                                if not t then return end
                                local cur = awful.layout.get(s)
@@ -2711,10 +2930,14 @@ awful.screen.connect_for_each_screen(function(s)
                                    theme = {
                                        height = 28,
                                        width = 200,
-                                       font = "Hack Nerd Font 11",
+                                       font = font_utils.FONT_CLEAR,
+                                       border_color = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700",
+                                       border_width = beautiful.bar_edge_width or 2,
                                    },
                                })
+                               layout_popup.visible = false
                                m:show({ coords = mouse.coords() })
+                               layout_menu_ref = m
                                -- outside-click detection (same pattern as tag_pager popup)
                                local m_ref = m
                                local client_handler = function()
@@ -2738,6 +2961,7 @@ awful.screen.connect_for_each_screen(function(s)
                                    for _, entry in ipairs(wibar_handlers) do
                                        entry.wibox:disconnect_signal("button::press", entry.handler)
                                    end
+                                   layout_menu_ref = nil
                                    orig_hide(self)
                                end
                            end),
@@ -2856,7 +3080,7 @@ awful.screen.connect_for_each_screen(function(s)
         buttons = tasklist_buttons,
         style = {
             disable_icon = false,
-            font = "Hack Nerd Font 11",
+            font = font_utils.FONT_CLEAR,
             bg_normal   = TASKLIST_BG_OFFSCREEN,  -- default black; callback overrides for visible
             bg_focus    = TASKLIST_BG_VISIBLE,    -- focused
             bg_minimize = TASKLIST_BG_OFFSCREEN,  -- minimized
@@ -2886,6 +3110,7 @@ awful.screen.connect_for_each_screen(function(s)
                                 left = 2, right = 1, top = 0, bottom = 0,
                                 {
                                     id = 'status_prefix',
+                                    font = font_utils.FONT_STAR,
                                     widget = wibox.widget.textbox,
                                 }
                             },
@@ -3017,6 +3242,7 @@ awful.screen.connect_for_each_screen(function(s)
     }
     local brightness_text = wibox.widget {
         text = "100%",
+        font = font_utils.FONT_MONO,
         align = "center",
         valign = "center",
         widget = wibox.widget.textbox,
@@ -3046,7 +3272,7 @@ awful.screen.connect_for_each_screen(function(s)
         brightness_text.text = pct .. "%"
         brightness_icon.image = gears.color.recolor_image(brightness_icon_path, color)
     end
-    awesome.connect_signal("brightness::updated", guarded(apply_brightness))
+    track_signal(awesome, "brightness::updated", guarded(apply_brightness))
     -- poll brightness every 2 seconds for external changes
     local function update_brightness_widget()
         awful.spawn.easy_async("brightnessctl -m info", guarded(function(out)
@@ -3054,11 +3280,13 @@ awful.screen.connect_for_each_screen(function(s)
             if pct then apply_brightness(tonumber(pct)) end
         end))
     end
-    gears.timer.start_new(2, guarded(function()
+    track_timer(gears.timer.start_new(2, guarded(function()
         update_brightness_widget()
         return true
-    end))
+    end)))
     update_brightness_widget()
+    -- left-click the brightness widget for display list + gamma reapply
+    -- popup; attached to its centered_bar wrapper below so the padding counts
 
     -- battery widget: icon + percentage, reads /sys/class/power_supply/BAT0
     -- (cbatticon and xfce4-power-manager both use GtkStatusIcon/XEmbed which
@@ -3073,6 +3301,7 @@ awful.screen.connect_for_each_screen(function(s)
     }
     local bat_text = wibox.widget {
         text = "100%",
+        font = font_utils.FONT_MONO,
         align = "center",
         valign = "center",
         widget = wibox.widget.textbox,
@@ -3116,60 +3345,116 @@ awful.screen.connect_for_each_screen(function(s)
         else
             suffix = level
         end
-        bat_icon:set_image(bat_icon_dir .. "battery-level-" .. suffix .. "-symbolic.svg")
+        -- tint the symbolic icon by charge level (same ramp as temp colours)
+        local bat_colour
+        if status == "Charging" or status == "Full" then
+            bat_colour = "#9FD64A"
+        elseif pct >= 60 then bat_colour = "#9FD64A"
+        elseif pct >= 30 then bat_colour = "#FFD700"
+        elseif pct >= 15 then bat_colour = "#E8934A"
+        else bat_colour = "#FF6B6B"
+        end
+        bat_icon:set_image(gears.color.recolor_image(
+            bat_icon_dir .. "battery-level-" .. suffix .. "-symbolic.svg", bat_colour))
         bat_text.text = pct .. "%"
         battery_tooltip:set_text(string.format("Battery: %d%% (%s)", pct, status))
     end
-    gears.timer.start_new(5, guarded(function()
+    track_timer(gears.timer.start_new(5, guarded(function()
         update_battery_widget()
         return true
-    end))
+    end)))
     update_battery_widget()
+    -- left-click the battery widget for info + power-profile switcher popup;
+    -- attached to its centered_bar wrapper below so the padding counts
 
     -- media launcher button (bluetooth/wifi/battery/clipboard handled by SNI tray applets)
+    local media_icon_path = "/usr/share/icons/Adwaita/symbolic/devices/audio-card-symbolic.svg"
+    local MEDIA_COLOR_IDLE = "#CCCCCC"
+    local MEDIA_COLOR_ACTIVE = "#E8A0D0"  -- pastel magenta when players are active
     local media_btn = wibox.widget {
-        image = "/usr/share/icons/Adwaita/symbolic/devices/audio-card-symbolic.svg",
+        image = gears.color.recolor_image(media_icon_path, MEDIA_COLOR_IDLE),
         forced_width = 16,
         forced_height = 16,
         resize = true,
         widget = wibox.widget.imagebox,
     }
+    -- small playing/paused status indicator next to the media icon
+    -- (no forced_width: collapses to nothing when empty so it doesn't leave
+    -- a gap between the media icon and the notification toggle)
+    local media_status_icon = wibox.widget {
+        text = "",
+        font = font_utils.FONT,
+        valign = "center",
+        halign = "center",
+        widget = wibox.widget.textbox,
+    }
+    local media_widget = wibox.widget {
+        media_btn,
+        media_status_icon,
+        spacing = 2,
+        layout = wibox.layout.fixed.horizontal,
+    }
+    -- recolor the media button when player visibility changes
+    track_signal(awesome, "media::players_active", guarded(function(active)
+        media_btn:set_image(gears.color.recolor_image(media_icon_path,
+            active and MEDIA_COLOR_ACTIVE or MEDIA_COLOR_IDLE))
+    end))
     -- old: left click ran playerctl play-pause directly
     -- new: left click toggles the media popup (art, title, prev/play/next);
-    --      middle click keeps the quick play-pause
-    media_popup.attach(media_btn)
-    media_btn:connect_signal("button::press", guarded(function(_, _, _, button)
+    --      middle click keeps the quick play-pause. attach happens on
+    --      media_bar below so the widget's padding is clickable too
+    media_widget:connect_signal("button::press", guarded(function(_, _, _, button)
         if button == 2 then
             awful.spawn.with_shell("playerctl play-pause 2>/dev/null || true")
         end
     end))
     -- media tooltip: shows current track + status via playerctl
-    local media_tooltip = awful.tooltip({ objects = { media_btn }, text = "No player" })
+    local media_tooltip = awful.tooltip({ objects = { media_widget }, text = "No player" })
     local function update_media_tooltip()
         awful.spawn.easy_async(
             "bash -c 's=$(playerctl status 2>/dev/null); t=$(playerctl metadata --format \"{{title}} - {{artist}}\" 2>/dev/null); if [ -n \"$s\" ]; then echo \"$s | $t\"; fi'",
             function(out)
                 local text = out and out:gsub("^%s+", ""):gsub("%s+$", "")
                 media_tooltip:set_text(text ~= "" and text or "No player")
+                -- update the playing/paused status indicator
+                local status = text and text:match("^([^|]+)") or ""
+                status = status and status:gsub("^%s+", ""):gsub("%s+$", "") or ""
+                if status == "Playing" then
+                    media_status_icon.markup = "<span foreground='" .. ((beautiful.main_gold and beautiful.main_gold.base) or "#FFD700") .. "'>▶</span>"
+                elseif status == "Paused" then
+                    media_status_icon.markup = "<span foreground='#AAAAAA'>⏸</span>"
+                else
+                    media_status_icon.text = ""
+                end
             end
         )
     end
-    media_btn:connect_signal("mouse::enter", guarded(update_media_tooltip))
-    gears.timer.start_new(5, guarded(function()
+    media_widget:connect_signal("mouse::enter", guarded(update_media_tooltip))
+    track_timer(gears.timer.start_new(5, guarded(function()
         update_media_tooltip()
         return true
-    end))
+    end)))
     update_media_tooltip()
 
     local volume_widget = system_widgets.volume {
-        open = toggle_pavucontrol,
-        up = volume_osd.increase,
-        down = volume_osd.decrease,
+        open = function() end,  -- left-click handled by volume_popup.attach
+        up = function()
+            if volume_popup.is_visible() then volume_popup.scroll_default(1)
+            else volume_osd.increase() end
+        end,
+        down = function()
+            if volume_popup.is_visible() then volume_popup.scroll_default(-1)
+            else volume_osd.decrease() end
+        end,
         mute = volume_osd.toggle_mute,
     }
+    -- volume_popup attach happens on volume_bar below so the padding counts
     local keyboard_widget = system_widgets.keyboard()
     local show_desktop_widget = system_widgets.show_desktop(s)
     local resource_widgets = system_widgets.resources()
+    -- left-click a cpu/gpu/ram/temp widget for the history-graphs popup;
+    -- clicking any of them again (or Escape/right-click) closes it.
+    -- attaches happen on the centered_bar wrappers below so the padding counts
 
     -- tooltips for remaining systray-area widgets
     awful.tooltip({ objects = { notification_toggle_widget }, text = "Notifications" })
@@ -3184,6 +3469,26 @@ awful.screen.connect_for_each_screen(function(s)
             widget = wibox.container.place,
         }, left or 0, right or 0, top or 0, 0)
     end
+
+    -- popup widgets are attached to their padded centered_bar wrappers so a
+    -- click anywhere in a widget's area (padding included) toggles it
+    local cpu_bar        = centered_bar(resource_widgets.cpu, 11, 4, 2)
+    local gpu_bar        = centered_bar(resource_widgets.gpu, 4, 4, 2)
+    local ram_bar        = centered_bar(resource_widgets.ram, 4, 2, 2)
+    local temp_bar       = centered_bar(resource_widgets.temp, 4, 2, 2)
+    local battery_bar    = centered_bar(battery_widget, 2, 0, 1)
+    local brightness_bar = centered_bar(brightness_widget, 2, 4, 2)
+    local volume_bar     = centered_bar(volume_widget, 2, 3, 2)
+    local media_bar      = centered_bar(media_widget, 2, 0, 2)
+
+    resource_popup.attach(cpu_bar)
+    resource_popup.attach(gpu_bar)
+    resource_popup.attach(ram_bar)
+    resource_popup.attach(temp_bar)
+    battery_popup.attach(battery_bar)
+    brightness_popup.attach(brightness_bar)
+    volume_popup.attach(volume_bar)
+    media_popup.attach(media_bar)
 
     s.mywibox:setup {
         layout = wibox.layout.align.horizontal,
@@ -3206,15 +3511,17 @@ awful.screen.connect_for_each_screen(function(s)
         s.mytasklist, -- middle: expands to fill available space
         { -- right widgets
             layout = wibox.layout.fixed.horizontal,
-            centered_bar(resource_widgets.cpu, 11, 4, 2),
-            centered_bar(resource_widgets.gpu, 4, 4, 2),
-            centered_bar(resource_widgets.ram, 4, 2, 2),
-            centered_bar(battery_widget, 2, 2, 1),
-            centered_bar(brightness_widget, 2, 2, 2),
-            centered_bar(volume_widget, 2, 2, 2),
-            centered_bar(media_btn, 3, 0, 2),
-            centered_bar(keyboard_widget, 1, 0, 1),
-            -- notifications sit immediately to the left of the SNI tray
+            cpu_bar,
+            gpu_bar,
+            ram_bar,
+            temp_bar,
+            battery_bar,
+            brightness_bar,
+            volume_bar,
+            media_bar,
+            -- centered_bar(keyboard_widget, 0, 0, 0),
+            -- notifications sit immediately to the left of the SNI tray; its
+            -- side spacing lives inside the widget so the padding is clickable
             centered_bar(notification_toggle_widget, 0, 0, 2),
             centered_bar(mysystray, s == screen.primary and 2 or 1, 1, 1),
             -- full-height clock: a plain margin lets fixed.horizontal stretch
@@ -3255,6 +3562,19 @@ awful.screen.connect_for_each_screen(function(s)
     -- desktop icons (freedesktop) per screen
     -- local desktop = require("freedesktop.desktop")
     -- desktop.add_icons({ screen = s, dir = os.getenv("HOME") .. "/Desktop", showlabel = true, open_with = "xdg-open" })
+end)
+
+-- run the per-screen cleanup registered above when a screen is removed, so
+-- its global-signal handlers and poll timers do not outlive the screen (B6/B7)
+screen.connect_signal("removed", function(s)
+    if not s._somewm_cleanup then return end
+    for _, sig in ipairs(s._somewm_cleanup.signals or {}) do
+        sig.source.disconnect_signal(sig.name, sig.handler)
+    end
+    for _, t in ipairs(s._somewm_cleanup.timers or {}) do
+        if t and t.stop then t:stop() end
+    end
+    s._somewm_cleanup = nil
 end)
 
 
@@ -3394,7 +3714,7 @@ client.connect_signal("request::titlebars", function(c)
 
     -- MARK: --titlebar-text
     local titlebar_text_widget = wibox.widget.textbox()
-    titlebar_text_widget.font = "Hack Nerd Font 6"
+    titlebar_text_widget.font = font_utils.FONT_TINY
     
     -- create a right-side gradient that fades from transparent to purple (reverse of middle)
     local titlebar_right_gradient = {
@@ -3565,60 +3885,10 @@ end))
 
 -- // MARK: --smart-borders
 -- dynamic border width: no border when a tag has only one visible tiled
--- client, borders for all when two or more share a tag. this replaces the
--- old static terminal_borderless rule which left terminals borderless even
--- when sharing a tag with other windows.
-local function count_visible_tiled_clients(tag)
-    local n = 0
-    for _, c in ipairs(tag:clients() or {}) do
-        if c.valid and not c.minimized and not c.hidden and not c.floating then
-            n = n + 1
-        end
-    end
-    return n
-end
-
-local function update_borders_for_tag(tag)
-    if not tag or not tag.valid then return end
-    local n = count_visible_tiled_clients(tag)
-    local bw = (n > 1) and (beautiful.border_width or 1) or 0
-    for _, c in ipairs(tag:clients() or {}) do
-        if c.valid and not c.floating then
-            c.border_width = bw
-        end
-    end
-end
-
-local function update_all_borders()
-    for s in screen do
-        for _, t in ipairs(s.tags) do
-            update_borders_for_tag(t)
-        end
-    end
-end
-
-client.connect_signal("request::manage", guarded(function(c)
-    gears.timer.delayed_call(guarded(function()
-        if not c or not c.valid then return end
-        for _, t in ipairs(c:tags() or {}) do
-            update_borders_for_tag(t)
-        end
-    end))
-end))
-
-client.connect_signal("request::unmanage", guarded(function(c)
-    gears.timer.delayed_call(guarded(update_all_borders))
-end))
-
-client.connect_signal("property::minimized", guarded(update_all_borders))
-client.connect_signal("property::floating", guarded(update_all_borders))
-client.connect_signal("tagged", guarded(function(c)
-    if not c or not c.valid then return end
-    for _, t in ipairs(c:tags() or {}) do
-        update_borders_for_tag(t)
-    end
-end))
-client.connect_signal("untagged", guarded(update_all_borders))
+-- client, borders for all when two or more share a tag. see
+-- plugins/smart_borders.lua for implementation.
+local smart_borders = require("plugins.smart_borders")
+smart_borders.init()
 
 
 -- when a client is minimized/restored or hidden/unhidden, refresh tasklists to update bg color
@@ -3808,12 +4078,20 @@ awful.mouse.append_global_mousebindings({
         if mymainmenu and mymainmenu.wibox and mymainmenu.wibox.visible then
             mymainmenu:hide()
         end
+        if active_tasklist_menu and active_tasklist_menu.wibox
+           and active_tasklist_menu.wibox.visible then
+            active_tasklist_menu:hide()
+        end
     end),
     awful.button({ }, 3, function()
         if mymainmenu and mymainmenu.wibox and mymainmenu.wibox.visible then
             mymainmenu:hide()
         elseif mymainmenu then
             mymainmenu:toggle()
+        end
+        if active_tasklist_menu and active_tasklist_menu.wibox
+           and active_tasklist_menu.wibox.visible then
+            active_tasklist_menu:hide()
         end
     end),
     awful.button({ modkey }, 4, function()
@@ -4292,48 +4570,12 @@ ruled.client.connect_signal("request::rules", guarded(function()
         properties = { floating = true }
     }
 
-    -- extended floating rules (consolidated from original)
-    -- Search marker: floatingggggggggg
-    ruled.client.append_rule {
-        id = "floating_extended",
-        rule_any = {
-            instance = {
-                "DTA", "copyq", "pinentry", "ncmpcpp"
-            },
-            class = {
-                -- system
-                "Arandr", "Blueman-manager", "Lxappearance", "Gsmartcontrol", "hp-toolbox",
-                "Protonvpn-gui", "Syncthing GTK", "netctl-gui", "Solaar", "Font-manager",
-                "Font Manager", "qt5ct", "Deskflow",
-                -- audio/video
-                "Cadence", "qjackctl", "Studio-controls", "QjackCtl", "kmix", "Pavucontrol",
-                "pwvucontrol", "Goodvibes", "Drumstick MIDI Monitor", "Audio/MIDI Setup", "Mixer",
-                "seq64", "qseq66", "patroneo", "Agordejo", "radium_compessor", "Vlc",
-                "vokoscreenNG", "SimpleScreenRecorder", "Indicator-sound-switcher5",
-                -- graphics
-                "Gpick", "Kruler", "emulsion", "Sxiv", "qimgv", "qView", "Image Lounge",
-                "Image Menu", "spectacle",
-                -- privacy
-                 "Tor Browser",
-                -- misc
-                "MessageWin", "copyq", "* Copying", "krunner", "xtightvncviewer", "scrcpy",
-                "Gnaural", "kdeconnect.sms", "Mattermost", "Onboard", "gammy", "Flirc",
-                "isoimagewriter", "Xdotoolgui.py", "mpd218 editor.exe", "Indicator-sound-switcher", "easyeffects"
-            },
-            name = {
-                "Event Tester", "Choose an application", "File operations", "Blender Preferences",
-                "Options", "Tree View Menu", "menu"
-            },
-            role = {
-                "AlarmWindow", "ConfigManager", "pop-up", "page-info", "TfrmFileOp",
-                "TfrmViewer"
-            },
-        },
-        properties = {
-            floating = true,
-            placement = awful.placement.centered + awful.placement.no_overlap + awful.placement.no_offscreen,
-        }
-    }
+    -- extended floating rules (managed by plugins/floating_rules.lua)
+    -- old: inline ruled.client.append_rule with hardcoded lists edited by
+    --      add-floating-rule.sh via awk (risk of corrupting rc.lua)
+    -- new: rules loaded from floating_rules_data.lua; Super+Alt+F adds the
+    --      focused window's identifier at runtime via the module
+    floating_rules.register_rules()
 
     -- tag assignments (grouped and appended via loop)
     local tag_rules = {
@@ -4407,126 +4649,10 @@ end))
 -- ███████║███████╗███████║███████║██║╚██████╔╝██║ ╚████║
 -- ╚══════╝╚══════╝╚══════╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝
 -- ################################################################################
--- session management - preserve state across restarts
-
--- reactivate tabs that were active before a restart of awesomewm
--- for Firefox, might have to disable widget.disable-workspace-management in about:config
--- https://www.reddit.com/r/awesomewm/comments/syjolb/preserve_previously_used_tag_between_restarts
-
--- session state lives in XDG_STATE_HOME (defaults to ~/.local/state) so it
--- survives reboots; /tmp is tmpfs and would be lost on power cycle.
-local session_dir = os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state/somewm")
-gears.filesystem.make_directories(session_dir)
-local session_tags_file = session_dir .. "/selected-tags"
-local session_state_file = session_dir .. "/client-placements"
-
-awesome.connect_signal('exit', guarded(function(reason_restart)
-	if not reason_restart then return end
-
-	-- save selected tag per screen
-	local file = io.open(session_tags_file, 'w+')
-	if file then
-		for s in screen do
-			file:write(s.selected_tag.index, '\n')
-		end
-		file:close()
-	end
-
-	-- save per-client tag+screen assignments keyed by PID.
-	-- on restart, Wayland clients keep running with their original PIDs,
-	-- so we can match them and restore their tag/screen placement after
-	-- the ruled.client rules have been applied.
-	local sf = io.open(session_state_file, 'w+')
-	if not sf then return end
-	for _, c in ipairs(client.get()) do
-		if c.valid and c.pid then
-			local ctags = c:tags() or {}
-			local tag_indices = {}
-			for _, t in ipairs(ctags) do
-				if t and t.valid and t.screen and t.screen.valid then
-					-- encode as screen_index:tag_index so multi-screen is preserved
-					table.insert(tag_indices, t.screen.index .. ":" .. t.index)
-				end
-			end
-			if #tag_indices > 0 then
-				-- format: pid|screen_index|tag1,tag2,...
-				local sidx = c.screen and c.screen.valid and c.screen.index or 1
-				sf:write(c.pid, '|', sidx, '|', table.concat(tag_indices, ','), '\n')
-			end
-		end
-	end
-	sf:close()
-end))
-
-awesome.connect_signal('startup', guarded(function()
-	-- restore selected tags per screen
-	local file = io.open(session_tags_file, 'r')
-	if file then
-		local selected_tags = {}
-		for line in file:lines() do
-			table.insert(selected_tags, tonumber(line))
-		end
-		for s in screen do
-			local i = selected_tags[s.index]
-			if i and s.tags[i] then
-				local t = s.tags[i]
-				t:view_only()
-			end
-		end
-		file:close()
-	end
-
-	-- restore per-client tag+screen assignments by PID.
-	-- deferred so ruled.client rules apply first; we override them with
-	-- the saved placement afterwards.
-	local restore_state = {}
-	local sf = io.open(session_state_file, 'r')
-	if sf then
-		for line in sf:lines() do
-			local pid_str, screen_str, tags_str = line:match('^(%d+)|(%d+)|(.+)$')
-			if pid_str and screen_str and tags_str then
-				local pid = tonumber(pid_str)
-				local sidx = tonumber(screen_str)
-				local tag_specs = {}
-				for spec in tags_str:gmatch('[^,]+') do
-					local si, ti = spec:match('^(%d+):(%d+)$')
-					if si and ti then
-						table.insert(tag_specs, { screen = tonumber(si), tag = tonumber(ti) })
-					end
-				end
-				restore_state[pid] = { screen = sidx, tags = tag_specs }
-			end
-		end
-		sf:close()
-	end
-
-	if next(restore_state) then
-		gears.timer.start_new(0.5, guarded(function()
-			for _, c in ipairs(client.get()) do
-				if c.valid and c.pid and restore_state[c.pid] then
-					local info = restore_state[c.pid]
-					-- restore screen
-					local target_screen = screen[info.screen]
-					if target_screen and target_screen.valid and c.screen ~= target_screen then
-						c:move_to_screen(target_screen)
-					end
-					-- restore tags
-					local target_tags = {}
-					for _, spec in ipairs(info.tags) do
-						local sc = screen[spec.screen]
-						if sc and sc.valid and sc.tags[spec.tag] then
-							table.insert(target_tags, sc.tags[spec.tag])
-						end
-					end
-					if #target_tags > 0 then
-						c:tags(target_tags)
-					end
-				end
-			end
-			return false  -- one-shot
-		end))
-	end
-end))
+-- session management - preserve tag selections and client placements across
+-- restarts. see plugins/session.lua for implementation.
+local session = require("plugins.session")
+session.init()
 
 -- // MARK: START
 -- ################################################################################
@@ -4552,8 +4678,11 @@ awful.spawn.with_shell("pgrep -u $USER -f polkit-kde-authentication-agent-1 > /d
 -- used `.[].name` but wlopm -j's field is `output`, so DPMS-off never fired).
 -- awful.spawn.with_shell("pgrep -u $USER -x swayidle > /dev/null || swayidle -w before-sleep 'swaylock -f' timeout 600 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --off {}' resume 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --on {}'")
 
--- Night light (wlsunset: 3500K at night)
-awful.spawn.with_shell("pgrep -u $USER -x wlsunset > /dev/null || wlsunset -T 6500 -t 3500")
+-- Night light + software brightness (wlr-brightnessd replaces wlsunset)
+-- Applies color temperature to all outputs and software brightness dimming
+-- to outputs without hardware backlight. eDP-1 has amdgpu_bl1 so it is
+-- excluded from software brightness (handled by brightnessctl instead).
+awful.spawn.with_shell("pgrep -u $USER -x wlr-brightnessd > /dev/null || ~/bin/wlr-brightnessd -T 6500 -t 3500 --no-brightness eDP-1")
 
 -- Screenshot tray icon (replaces flameshot; spectacle works natively on Wayland)
 -- spectacle-trayicon is a Python script so pgrep -x fails (comm=python3, name>15chars)
@@ -4570,6 +4699,10 @@ awful.spawn.with_shell("pgrep -u $USER -x nm-applet > /dev/null || nm-applet --i
 
 -- Bluetooth applet
 awful.spawn.with_shell("pgrep -u $USER -x blueman-applet > /dev/null || blueman-applet")
+
+-- KDE Connect tray icon (kdeconnectd itself is autostarted by /etc/xdg/autostart)
+-- pgrep -f needed: kdeconnect-indicator is longer than 15 chars
+awful.spawn.with_shell("pgrep -u $USER -f kdeconnect-indicator > /dev/null || kdeconnect-indicator")
 
 -- Battery icon (native wibar widget; cbatticon/xfce4-power-manager are XEmbed-only with no SNI host on somewm)
 
