@@ -783,12 +783,20 @@ end
 
 -- Check if awesome encountered an error during startup and fell back to another config
 -- (This code will only ever execute for the fallback config)
+-- deferred until a screen exists: hot-reload runs rc.lua while screens are
+-- torn down, and naughty.notify asserts on a nil screen mid-reload, which
+-- would itself count as a config failure and force a fallback
 if awesome.startup_errors then
-	naughty.notify({
-		preset = naughty.config.presets.critical,
-		title = "Oops, there were errors during startup!",
-		text = awesome.startup_errors
-	})
+	local errors_reported = false
+	awful.screen.connect_for_each_screen(guarded(function()
+		if errors_reported then return end
+		errors_reported = true
+		naughty.notify({
+			preset = naughty.config.presets.critical,
+			title = "Oops, there were errors during startup!",
+			text = awesome.startup_errors
+		})
+	end))
 end
 
 
@@ -800,11 +808,16 @@ do
 		if in_error then return end
 		in_error = true
 
-		naughty.notify({
-			preset = naughty.config.presets.critical,
-			title = "Oops, an error happened!",
-			text = tostring(err)
-		})
+		-- skip while no screen exists (mid hot-reload): naughty.notify
+		-- asserts on a nil screen and this handler is itself protected, so
+		-- the notification would just turn one error into two
+		if #screen > 0 then
+			naughty.notify({
+				preset = naughty.config.presets.critical,
+				title = "Oops, an error happened!",
+				text = tostring(err)
+			})
+		end
 		in_error = false
 	end))
 end
