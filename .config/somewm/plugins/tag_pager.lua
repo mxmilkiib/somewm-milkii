@@ -27,6 +27,8 @@
 --   Mod+Alt+O           open detail popup for the focused tag (rc/keybindings.lua)
 --   wibar pager widget  created via M.create_pager_widget(s), added in rc.lua
 --   left-click a cell    switch to that tag (view_only)
+--   drag a client rect   move the client to whichever cell the pointer is
+--                        over (mid-drag); release views the landing tag
 --   right-click a cell   toggle that tag's view
 --   middle-click a cell  open detail popup for that tag
 --   Escape / click outside  close the popup
@@ -163,9 +165,13 @@ end
 -- each cell is tracked as { imagebox, tag, width, height, screen }
 local cells = {}
 
--- forward declaration: refresh is defined later but used by start_drag
+-- forward declarations: refresh is defined later but used by start_drag;
+-- drag_client/drag_source_tag are assigned in start_drag but read by
+-- render_cell_surface for the mid-drag size preview
 local refresh
 local debounced_refresh
+local drag_client
+local drag_source_tag
 
 
 -- // MARK --landscape-rotation
@@ -337,6 +343,13 @@ local function render_cell_surface(width, height, t)
     for _, c in ipairs(tag_clients) do
         if c.valid then
             local cg = unrotate_client(c:geometry(), sg)
+            -- A client dragged onto an unviewed tag keeps its stale source-tag
+            -- geometry until that tag is viewed and arranged. Preview it at the
+            -- full mini-desktop height so the cell shows the landing size as
+            -- soon as the pointer crosses cells, not after release/view.
+            if c == drag_client and t ~= drag_source_tag and not t.selected then
+                cg = { x = cg.x, y = lg.y, width = cg.width, height = lg.height }
+            end
             local rx = (cg.x - lg.x) * scale
             local ry = (cg.y - lg.y) * scale
             local rw = math.max(1, cg.width * scale)
@@ -446,9 +459,8 @@ end
 -- a previous drag bails out when it sees gen ~= drag_gen, so it can never
 -- move the client captured by an earlier drag.
 local drag_gen = 0
-local drag_client = nil
-local drag_source_tag = nil
-local drag_start_x, drag_start_y = nil, nil
+drag_client = nil
+drag_source_tag = nil
 local DRAG_THRESHOLD = 5
 
 
@@ -488,8 +500,6 @@ local function start_drag(c, source_tag, start_x, start_y)
     local gen = drag_gen
     drag_client = c
     drag_source_tag = source_tag
-    drag_start_x = start_x
-    drag_start_y = start_y
 
     -- stop any grabber left over from a previous drag before starting a
     -- new one. somewm's mousegrabber does not reliably replace a running
@@ -510,8 +520,6 @@ local function start_drag(c, source_tag, start_x, start_y)
             if gen == drag_gen then
                 drag_client = nil
                 drag_source_tag = nil
-                drag_start_x = nil
-                drag_start_y = nil
             end
             if capi.mousegrabber.isrunning and capi.mousegrabber.isrunning() then
                 capi.mousegrabber.stop()
@@ -519,10 +527,45 @@ local function start_drag(c, source_tag, start_x, start_y)
         end),
     }
 
+    -- Live-move state: once the drag passes DRAG_THRESHOLD the client hops to
+    -- whichever cell the pointer is over, instead of waiting for release.
+    -- drag_target_tag tracks the client's current tag so re-entering the same
+    -- cell does not re-trigger move_to_tag, and dragging back over the source
+    -- cell moves the client back.
+    local drag_moved = false
+    local drag_target_tag = source_tag
+    local drag_view_timer = nil
+    local function move_to_hovered(x, y)
+        local hover = find_cell_under_mouse(x, y)
+        if hover and hover.valid and hover ~= drag_target_tag then
+            c:move_to_tag(hover)
+            drag_target_tag = hover
+            debounced_refresh()
+            -- Dwell-to-view: once the pointer has rested on the cell, view the
+            -- tag so its layout arranges and the cell renders real tiled
+            -- geometry (e.g. dropping onto a tag that already has a window).
+            -- An immediate view_only on every cell entered would flick the
+            -- screen view through each tag crossed while sweeping the bar.
+            if drag_view_timer then drag_view_timer:stop() end
+            drag_view_timer = gears.timer {
+                timeout = 0.15,
+                single_shot = true,
+                callback = guarded(function()
+                    if gen == drag_gen and drag_target_tag
+                        and drag_target_tag.valid and not drag_target_tag.selected then
+                        drag_target_tag:view_only()
+                    end
+                end),
+            }
+            drag_view_timer:start()
+        end
+    end
+
     capi.mousegrabber.run(function(m)
         -- a newer drag has started; ignore this stale closure
         if gen ~= drag_gen then
             drag_safety_timer:stop()
+            if drag_view_timer then drag_view_timer:stop() end
             return false
         end
 
@@ -532,6 +575,7 @@ local function start_drag(c, source_tag, start_x, start_y)
                 drag_source_tag = nil
             end
             drag_safety_timer:stop()
+            if drag_view_timer then drag_view_timer:stop() end
             return false
         end
 
@@ -540,17 +584,25 @@ local function start_drag(c, source_tag, start_x, start_y)
             -- wrap drop/click logic in pcall so a Lua error can never
             -- prevent return false from being reached, which would leave
             -- the grabber running and swallow all mouse input
+            local drop_settling = false
             local ok, err = pcall(function()
-                local moved = math.abs(m.x - start_x) > DRAG_THRESHOLD
+                local moved = drag_moved
+                    or math.abs(m.x - start_x) > DRAG_THRESHOLD
                     or math.abs(m.y - start_y) > DRAG_THRESHOLD
 
                 if moved then
-                    -- drag: move client to target tag
-                    local target_tag = find_cell_under_mouse(m.x, m.y)
-                    if target_tag and target_tag.valid and target_tag ~= source_tag then
-                        c:move_to_tag(target_tag)
+                    -- the client normally reached its drop tag during motion;
+                    -- this catches a release landing on a cell with no prior
+                    -- motion event (e.g. a fast flick across the bar)
+                    move_to_hovered(m.x, m.y)
+                    if drag_target_tag and drag_target_tag.valid and drag_target_tag ~= source_tag then
+                        -- Keep drag_client/drag_source_tag set until the tag is
+                        -- viewed below, so the cell keeps rendering the
+                        -- full-height preview instead of flashing the stale
+                        -- source-tag geometry between release and arrange.
+                        drop_settling = true
                         -- awful.layout.arrange is async (timer.delayed_call):
-                        -- calling target_tag:view_only() immediately would
+                        -- calling view_only() immediately would
                         -- switch the selected tag before the source tag's
                         -- layout reflows, leaving the remaining client at
                         -- its stale geometry. defer view_only until the
@@ -578,8 +630,12 @@ local function start_drag(c, source_tag, start_x, start_y)
                                 if arrange_done then return end
                                 arrange_done = true
                                 src_screen:disconnect_signal("arrange", arrange_handler)
-                                if target_tag and target_tag.valid then
-                                    target_tag:view_only()
+                                if drag_target_tag and drag_target_tag.valid then
+                                    drag_target_tag:view_only()
+                                end
+                                if gen == drag_gen then
+                                    drag_client = nil
+                                    drag_source_tag = nil
                                 end
                                 debounced_refresh()
                             end)
@@ -592,14 +648,22 @@ local function start_drag(c, source_tag, start_x, start_y)
                                     if arrange_done then return end
                                     arrange_done = true
                                     src_screen:disconnect_signal("arrange", arrange_handler)
-                                    if target_tag and target_tag.valid then
-                                        target_tag:view_only()
+                                    if drag_target_tag and drag_target_tag.valid then
+                                        drag_target_tag:view_only()
+                                    end
+                                    if gen == drag_gen then
+                                        drag_client = nil
+                                        drag_source_tag = nil
                                     end
                                     debounced_refresh()
                                 end),
                             }:start()
                         else
-                            target_tag:view_only()
+                            drag_target_tag:view_only()
+                            if gen == drag_gen then
+                                drag_client = nil
+                                drag_source_tag = nil
+                            end
                         end
                     end
                 else
@@ -614,14 +678,25 @@ local function start_drag(c, source_tag, start_x, start_y)
             end
 
             if gen == drag_gen then
-                drag_client = nil
-                drag_source_tag = nil
-                drag_start_x = nil
-                drag_start_y = nil
+                if not drop_settling then
+                    drag_client = nil
+                    drag_source_tag = nil
+                end
             end
             drag_safety_timer:stop()
+            if drag_view_timer then drag_view_timer:stop() end
             debounced_refresh()
             return false
+        end
+
+        -- Button held: once past the threshold, move the client to the cell
+        -- under the pointer so the hop happens mid-drag, not on release.
+        if not drag_moved then
+            drag_moved = math.abs(m.x - start_x) > DRAG_THRESHOLD
+                or math.abs(m.y - start_y) > DRAG_THRESHOLD
+        end
+        if drag_moved then
+            move_to_hovered(m.x, m.y)
         end
 
         return true
