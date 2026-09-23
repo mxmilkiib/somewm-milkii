@@ -2509,44 +2509,106 @@ local active_tasklist_menu
 
 
 -- // MARK: --mousewheel-client-cycling-functions
--- cycle through clients on the current tag only (normal mousewheel)
-local function cycle_clients_on_tag(direction)
-    local current_tag = awful.screen.focused().selected_tag
-    if not current_tag then return end
-    
-    local clients = current_tag:clients()
-    if #clients <= 1 then return end
-    
-    local current_client = client.focus
-    if not current_client then
-        clients[1]:emit_signal("request::activate", "tasklist", {raise = true})
-        return
+-- Shared Tasklist Source/Filter: the scroll cycler and the task widget must
+-- agree on which clients are shown and in which order, otherwise scrolling
+-- can only reach clients on the current tag
+local function tasklist_source(s)
+    local clients = {}
+    for _, c in ipairs(client.get()) do
+        table.insert(clients, c)
     end
-    
+    -- reverse the order so newest clients appear on the right
+    local reversed = {}
+    for i = #clients, 1, -1 do
+        table.insert(reversed, clients[i])
+    end
+    return reversed
+end
+
+local function tasklist_filter(c, screen)
+    if not c or not c.valid or c.screen ~= screen then
+        return false
+    end
+
+    -- if showing all tags, return true for all valid clients on this screen
+    if tasklist_show_all_tags then
+        return true
+    end
+
+    -- default behavior: show clients from all selected tags (not just the first one)
+    local selected_tags = screen.selected_tags
+    if not selected_tags or #selected_tags == 0 then
+        return false
+    end
+
+    -- check if client is on any of the selected tags
+    for _, client_tag in ipairs(c:tags()) do
+        for _, selected_tag in ipairs(selected_tags) do
+            if client_tag == selected_tag then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+-- Cycle Focus through the clients shown in the task widget (normal
+-- mousewheel). The list matches the widget's own source+filter so scrolling
+-- can reach tasks on other tags; switching to a task on an unviewed tag
+-- views that tag, and the previous client is left untouched
+local function cycle_task_items(direction, s)
+    s = s or awful.screen.focused()
+    if not s then return end
+
+    local clients = {}
+    for _, c in ipairs(tasklist_source(s)) do
+        if tasklist_filter(c, s) then
+            table.insert(clients, c)
+        end
+    end
+    if #clients <= 1 then return end
+
     -- find current client index
     local current_index = nil
     for i, c in ipairs(clients) do
-        if c == current_client then
+        if c == client.focus then
             current_index = i
             break
         end
     end
-    
-    if not current_index then
-        clients[1]:emit_signal("request::activate", "tasklist", {raise = true})
-        return
-    end
-    
+
     -- calculate next client index
     local next_index
-    if direction == 1 then -- forward
+    if not current_index then
+        next_index = 1
+    elseif direction == 1 then -- forward
         next_index = current_index % #clients + 1
     else -- backward
         next_index = (current_index - 2) % #clients + 1
     end
-    
-    -- activate next client
-    clients[next_index]:emit_signal("request::activate", "tasklist", {raise = true})
+
+    local target = clients[next_index]
+
+    -- if the target only lives on unviewed tags, switch to its first tag so
+    -- the focus change is actually visible
+    local on_selected = false
+    for _, ct in ipairs(target:tags()) do
+        for _, st in ipairs(s.selected_tags or {}) do
+            if ct == st then on_selected = true; break end
+        end
+        if on_selected then break end
+    end
+    if not on_selected then
+        local ctags = target:tags()
+        if ctags and #ctags > 0 then
+            ctags[1]:view_only()
+        end
+    end
+
+    -- unminimize in case the task was minimized, then focus it
+    target.minimized = false
+    target:emit_signal("request::activate", "tasklist", {raise = true})
 end
 
 -- cycle through clients with only one visible (mod4 + mousewheel)
@@ -2706,13 +2768,13 @@ local tasklist_buttons = gears.table.join(
             end
         end
     end),
-    -- mousewheel up: cycle forward through clients on current tag
-    awful.button({ }, 4, function ()
-        cycle_clients_on_tag(1)
+    -- mousewheel up: cycle focus forward through the task widget's items
+    awful.button({ }, 4, function (c)
+        cycle_task_items(1, c and c.screen)
     end),
-    -- mousewheel down: cycle backward through clients on current tag
-    awful.button({ }, 5, function ()
-        cycle_clients_on_tag(-1)
+    -- mousewheel down: cycle focus backward through the task widget's items
+    awful.button({ }, 5, function (c)
+        cycle_task_items(-1, c and c.screen)
     end),
     -- mod4 + mousewheel up: cycle forward with exclusive visibility
     awful.button({ modkey }, 4, function ()
@@ -3075,45 +3137,8 @@ awful.screen.connect_for_each_screen(function(s)
         screen  = s,
         disable_icon = false,
         -- removed: tasklist_disable_icon (unknown property)
-        source = function()
-            local clients = {}
-            for _, c in ipairs(client.get()) do
-                table.insert(clients, c)
-            end
-            -- reverse the order so newest clients appear on the right
-            local reversed = {}
-            for i = #clients, 1, -1 do
-                table.insert(reversed, clients[i])
-            end
-            return reversed
-        end,
-        filter  = function(c, screen)
-            if not c or not c.valid or c.screen ~= screen then
-                return false
-            end
-            
-            -- if showing all tags, return true for all valid clients on this screen
-            if tasklist_show_all_tags then
-                return true
-            end
-            
-            -- default behavior: show clients from all selected tags (not just the first one)
-            local selected_tags = screen.selected_tags
-            if not selected_tags or #selected_tags == 0 then 
-                return false 
-            end
-            
-            -- check if client is on any of the selected tags
-            for _, client_tag in ipairs(c:tags()) do
-                for _, selected_tag in ipairs(selected_tags) do
-                    if client_tag == selected_tag then
-                        return true
-                    end
-                end
-            end
-            
-            return false
-        end,
+        source = tasklist_source,
+        filter  = tasklist_filter,
         buttons = tasklist_buttons,
         style = {
             disable_icon = false,
