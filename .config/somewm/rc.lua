@@ -3414,14 +3414,15 @@ awful.screen.connect_for_each_screen(function(s)
         brightness_icon.image = gears.color.recolor_image(brightness_icon_path, color)
     end
     track_signal(awesome, "brightness::updated", guarded(apply_brightness))
-    -- poll brightness every 2 seconds for external changes
+    -- keybind changes arrive via brightness::updated; the poll only needs to
+    -- catch external changes (brightnessctl from elsewhere, power daemon)
     local function update_brightness_widget()
         awful.spawn.easy_async("brightnessctl -m info", guarded(function(out)
             local pct = out and out:match(",(%d+)%%")
             if pct then apply_brightness(tonumber(pct)) end
         end))
     end
-    track_timer(gears.timer.start_new(2, guarded(function()
+    track_timer(gears.timer.start_new(10, guarded(function()
         update_brightness_widget()
         return true
     end)))
@@ -3462,17 +3463,22 @@ awful.screen.connect_for_each_screen(function(s)
         widget = wibox.container.margin,
     }
     local battery_tooltip = awful.tooltip({ objects = { battery_widget }, text = "Battery" })
-    -- CPU thermal blink: flash the battery widget when Tctl exceeds 90°C
+    -- CPU thermal blink: flash the temp widget when Tctl exceeds 90°C
     -- (k10temp on Ryzen AI MAX+ PRO 395; Tjmax is 100°C). The blink draws
     -- attention to sustained thermal load without a separate notification.
     -- Reuses system_widgets' CPU temp discovery (probes k10temp/coretemp/zenpower
     -- by name rather than a hardcoded hwmon index, which can shift across boots).
+    -- temp_blink_widget is set to temp_bar after it is created below; until then
+    -- the blink is a no-op (the temp widget doesn't exist yet at this point)
     local TEMP_THRESHOLD = 90  -- degrees Celsius
     local temp_blink_on = false
+    local temp_blink_widget  -- forward-declared; assigned after temp_bar exists
     local temp_blink_timer = gears.timer({ timeout = 0.5 })
     temp_blink_timer:connect_signal("timeout", function()
         temp_blink_on = not temp_blink_on
-        battery_widget.opacity = temp_blink_on and 0.3 or 1.0
+        if temp_blink_widget then
+            temp_blink_widget.opacity = temp_blink_on and 0.3 or 1.0
+        end
     end)
     local function update_temp_blink()
         local t = system_widgets.read_cpu_temp and system_widgets.read_cpu_temp()
@@ -3484,10 +3490,11 @@ awful.screen.connect_for_each_screen(function(s)
         else
             if temp_blink_timer.started then
                 temp_blink_timer:stop()
-                battery_widget.opacity = 1.0
+                if temp_blink_widget then temp_blink_widget.opacity = 1.0 end
             end
         end
     end
+    local last_bat_suffix, last_bat_colour, last_bat_pct, last_bat_status
     local function update_battery_widget()
         local bat_path = battery_popup and battery_popup.find_battery_path
             and battery_popup.find_battery_path() or "/sys/class/power_supply/BAT0"
@@ -3523,10 +3530,17 @@ awful.screen.connect_for_each_screen(function(s)
         elseif pct >= 15 then bat_colour = "#E8934A"
         else bat_colour = "#FF6B6B"
         end
-        bat_icon:set_image(gears.color.recolor_image(
-            bat_icon_dir .. "battery-level-" .. suffix .. "-symbolic.svg", bat_colour))
-        bat_text.text = pct .. "%"
-        battery_tooltip:set_text(string.format("Battery: %d%% (%s)", pct, status))
+        -- skip the SVG reload+retint unless the rendered icon actually changed
+        if suffix ~= last_bat_suffix or bat_colour ~= last_bat_colour then
+            last_bat_suffix, last_bat_colour = suffix, bat_colour
+            bat_icon:set_image(gears.color.recolor_image(
+                bat_icon_dir .. "battery-level-" .. suffix .. "-symbolic.svg", bat_colour))
+        end
+        if pct ~= last_bat_pct or status ~= last_bat_status then
+            last_bat_pct, last_bat_status = pct, status
+            bat_text.text = pct .. "%"
+            battery_tooltip:set_text(string.format("Battery: %d%% (%s)", pct, status))
+        end
     end
     track_timer(gears.timer.start_new(5, guarded(function()
         update_battery_widget()
