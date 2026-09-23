@@ -24,9 +24,6 @@ local popup_common = require("plugins.popup_common")
 
 local dpi = beautiful.xresources.apply_dpi
 
--- capi globals captured once: mousegrabber drives the header drag
-local capi = { mousegrabber = mousegrabber }
-
 local COLOR_PURPLE = popup_common.theme.PURPLE
 local COLOR_BLACK  = popup_common.theme.BLACK
 local COLOR_WHITE  = popup_common.theme.WHITE
@@ -45,22 +42,17 @@ local GRAPH_CAP  = 120   -- samples kept per graph (4 min at the 2s interval)
 local M = {}
 
 local popup
-local anchor_widget
+-- holder table: draggable_header reads popup from here so build_content can
+-- run before the awful.popup is constructed (awful.popup requires a widget arg)
+local popup_holder = {}
 local sample_timer
 local views          -- { cpu = {value,info,graph}, gpu = ..., ram = ..., temp = ... }
 local core_count = 0
--- forward declarations: the pin/detach callbacks (built inside build_content)
--- need these bound as upvalues before the POPUP section assigns them
+-- forward declarations: the draggable_header controller (built in
+-- build_content once the popup exists) drives detach/drag/placement, and
+-- `hide` is referenced by it before assignment
 local hide
-local is_pinned  -- getter set in build_content (see popup_common.pin)
-local paint_detach
-local set_detached
-local start_drag
-local set_sticky  -- drives the pin icon from set_detached (set in build_content)
--- detach state: while true the popup floats at its current spot instead of
--- re-anchoring to the clicked widget, and the header is draggable
-local detached
-local detach_glyph  -- header textbox whose colour tracks `detached`
+local ctrl
 
 
 -- MARK: SYS READERS
@@ -143,7 +135,7 @@ local CPU_TEMP_LABELS = { Tctl = true, Tdie = true, ["Package id 0"] = true, CPU
 local GPU_TEMP_LABELS = { edge = true, junction = true, mem = true }
 
 local cpu_temp_path, gpu_temp_path, gpu_freq_path, gpu_power_path
-local nvme_temp_path, nvme_temp_caption
+local nvme_temp_paths = {}
 local fan_paths = {}
 local pwm_path
 local temp_sensors = {}
@@ -179,7 +171,7 @@ local function probe_hwmon()
         local dir = "/sys/class/hwmon/hwmon" .. i
         local name = read_file(dir .. "/name")
         if name then
-            -- every temp input, for the Temp section's sensor list
+            -- every temp input, for the NVMe section's sensor list
             for n = 1, 8 do
                 local inp = dir .. "/temp" .. n .. "_input"
                 if read_num(inp) then
@@ -202,13 +194,16 @@ local function probe_hwmon()
             if CPU_CHIPS[name] and not cpu_temp_path then
                 cpu_temp_path = pick_temp(dir, CPU_TEMP_LABELS)
             end
-            if name == "nvme" and not nvme_temp_path then
-                -- Sensor 2 responds visibly to drive activity while Composite
-                -- sits flat; a graph wants the livelier input. it is the sole
-                -- preferred label: the scan hits Composite first otherwise
-                local label
-                nvme_temp_path, label = pick_temp(dir, { ["Sensor 2"] = true })
-                nvme_temp_caption = label and (name .. " (" .. label:lower() .. ")")
+            if name == "nvme" then
+                -- graph the hottest point on the drive: numbered sensors move
+                -- visibly with activity while Composite sits flat, and a max
+                -- stays meaningful on drives whose sensor labels differ
+                for n = 1, 8 do
+                    local inp = dir .. "/temp" .. n .. "_input"
+                    if read_num(inp) then
+                        nvme_temp_paths[#nvme_temp_paths + 1] = inp
+                    end
+                end
             end
             if GPU_CHIPS[name] then
                 if not gpu_temp_path then
@@ -279,14 +274,22 @@ local function sample()
     local fan, fan_mode = read_fan()
     local cpu_t = cpu_temp_path and read_num(cpu_temp_path)
     local gpu_t = gpu_temp_path and read_num(gpu_temp_path)
-    local nvme_t = nvme_temp_path and read_num(nvme_temp_path)
+    -- hottest of the nvme temp inputs; bogus readings (some drives report 0
+    -- or saturated values on sensors that are not really present) are dropped
+    local nvme_t
+    for _, p in ipairs(nvme_temp_paths) do
+        local v = read_num(p)
+        if v and v > 0 and v < 115000 and (not nvme_t or v > nvme_t) then
+            nvme_t = v
+        end
+    end
     if not views then return end
 
     if cpu then views.cpu.graph:add_value(cpu) end
     if gpu then views.gpu.graph:add_value(gpu) end
     if ram then views.ram.graph:add_value(ram) end
     -- second graphs: CPU package temp under CPU busy, GPU edge temp under
-    -- GPU busy; the Temp section's own graph is the NVMe sensor
+    -- GPU busy; the NVMe section's own graph is the drive's hottest sensor
     if cpu_t and views.cpu.graph2 then
         views.cpu.graph2:add_value(cpu_t / 1000)
         views.cpu.graph2.color = temp_gradient(cpu_t / 1000)
@@ -318,8 +321,9 @@ local function sample()
         or "--"
     local gpu_bits = {}
     if gpu_freq_path then
-        local mhz = read_num(gpu_freq_path)
-        if mhz then gpu_bits[#gpu_bits + 1] = string.format("sclk %d MHz", mhz) end
+        -- amdgpu freq*_input reports Hz
+        local hz = read_num(gpu_freq_path)
+        if hz then gpu_bits[#gpu_bits + 1] = string.format("sclk %.0f MHz", hz / 1e6) end
     end
     if gpu_power_path then
         local uw = read_num(gpu_power_path)
@@ -336,7 +340,8 @@ local function sample()
     views.temp.value.markup = nvme_t and string.format(
         '<span foreground="%s">%.0f°C</span>', temp_colour(nvme_t / 1000), nvme_t / 1000)
         or "--"
-    views.temp.info.text = string.format("%d hwmon sensors", #temp_sensors)
+    -- sensor count lives in the list heading built in build_content;
+    -- views.temp.info is not part of this section's layout
     -- local lines = {}
     -- for _, s in ipairs(temp_sensors) do
     --     local v = read_num(s.path)
@@ -420,13 +425,18 @@ local function make_graph()
         background_color = "#00000000",
         widget = wibox.widget.graph,
     }
-    -- min-height constraint so the graph is at least GRAPH_H but can grow
-    -- to fill extra space when the popup's min-height floor leaves room
+    -- min-height constraint so the graph is at least GRAPH_H but can grow to
+    -- fill extra space when the popup's min-height floor leaves room. the
+    -- flex's max_widget_size caps that growth — wibox.widget.graph:fit is
+    -- greedy (returns the full offered height), so without a cap each graph
+    -- claims the whole fit allowance and the popup balloons to fit height
+    local graph_flex = wibox.widget {
+        graph,
+        max_widget_size = GRAPH_H * 1.5,
+        layout = wibox.layout.flex.vertical,
+    }
     local constrained = wibox.widget {
-        {
-            graph,
-            widget = wibox.layout.flex.vertical,
-        },
+        graph_flex,
         strategy = "min",
         height = GRAPH_H,
         widget = wibox.container.constraint,
@@ -499,8 +509,8 @@ local function build_content()
     local cpu_body, cpu_v = make_section("CPU", cpu_temp_path and 2 or 1, "cpu temp")
     local gpu_body, gpu_v = make_section("GPU", gpu_temp_path and 2 or 1, "edge temp")
     local ram_body, ram_v = make_section("RAM", 1)
-    local temp_body, temp_v = make_section("Temp", nvme_temp_path and 1 or 0,
-        nil, false, nvme_temp_caption)
+    local temp_body, temp_v = make_section("NVMe", #nvme_temp_paths > 0 and 1 or 0,
+        nil, false, "nvme (hottest)")
     -- every hwmon temp input as a "name .... figure" row; two columns of
     -- align.horizontal rows so each column's figures share its right edge.
     -- FONT_INFO is the proportional Hack Nerd Font, so space-padding alone
@@ -524,14 +534,20 @@ local function build_content()
         col:add(row)
         temp_v.cells[i] = temp_w
     end
-    temp_v.rows:add(wibox.widget {
+    -- the list heading carries the sensor count, so the generic info row is
+    -- dropped for this section; centred to sit over the two columns
+    local list_at = #temp_v.rows:get_children()
+    temp_v.rows:remove(list_at)
+    local list_title = make_text(
+        string.format("%d hwmon sensor temps", #temp_sensors), COLOR_GREY, FONT_INFO)
+    list_title.align = "center"
+    temp_v.rows:insert(list_at, list_title)
+    temp_v.rows:insert(list_at + 1, wibox.widget {
         col_left,
         col_right,
         spacing = dpi(14),
         layout = wibox.layout.fixed.horizontal,
     })
-    -- centre the "N hwmon sensors" Count Line
-    temp_v.info.align = "center"
     views = { cpu = cpu_v, gpu = gpu_v, ram = ram_v, temp = temp_v }
 
     -- fan section disabled: this hardware exposes no tach input or pwm duty.
@@ -545,72 +561,16 @@ local function build_content()
     --     fan_v.graph.scale = true
     -- end
 
-    -- pin toggle at the right of the header: gold = stays open on outside
-    -- clicks, grey = any outside click closes it
-    local pin_btn, pinned, set_pin = popup_common.pin("resource_popup", function(on)
-        if popup and popup.visible then
-            if on then popup_common.outside_click_teardown(popup)
-            else popup_common.outside_click_setup(popup, hide) end
-        end
-    end)
-    is_pinned = pinned
-    -- set_pin drives the pin icon from set_detached: a detached popup is
-    -- sticky, so the pin shows gold. transient (not persisted) so re-anchoring
-    -- restores the user's actual stay-open preference from disk
-    set_sticky = function(on)
-        set_pin(on, false, false)
-    end
-
-    -- detach button: gold while the popup floats free, grey while anchored.
-    -- built here so its textbox is wired into the module-level paint_detach
-    detach_glyph = wibox.widget {
-        align = "center", valign = "center",
-        font = FONT_HEAD, widget = wibox.widget.textbox,
-    }
-    local detach_btn = wibox.widget { detach_glyph, widget = wibox.container.background }
-    awful.tooltip { objects = { detach_btn },
-        text = "Detach: click or drag the title to float the popup" }
-    detach_btn:buttons(gears.table.join(awful.button({}, 1, guarded(function()
-        set_detached(not detached)
-    end))))
-    paint_detach()
-
-    -- the title and the stretch beside it are the drag handle; the buttons
-    -- on the right sit outside the handle so they keep their own clicks.
-    -- a space textbox gives the stretchy middle real geometry to receive
-    -- button::press, else an empty container can miss the press on somewm
-    local title_w = make_text("System", COLOR_WHITE, FONT_HEAD)
-    local drag_area = wibox.widget {
-        { text = " ", widget = wibox.widget.textbox },
-        bg = "#00000000",
-        widget = wibox.container.background,
-    }
-    local function on_drag_press(_, _, _, button)
-        if button == 1 then start_drag() end
-    end
-    title_w:connect_signal("button::press", on_drag_press)
-    drag_area:connect_signal("button::press", on_drag_press)
-
-    local header = wibox.widget {
-        {
-            {
-                title_w,
-                drag_area,
-                {
-                    detach_btn,
-                    pin_btn,
-                    spacing = dpi(6),
-                    layout = wibox.layout.fixed.horizontal,
-                },
-                layout = wibox.layout.align.horizontal,
-            },
-            left = dpi(10), right = dpi(10),
-            top = dpi(6), bottom = dpi(6),
-            widget = wibox.container.margin,
-        },
-        forced_width = CONTENT_W,
-        bg = COLOR_PURPLE,
-        widget = wibox.container.background,
+    -- header (title drag handle + detach + pin) and the detach/drag controller
+    -- come from popup_common so this popup shares the float-and-drag behaviour
+    -- of the rest of the wibar popups
+    local header
+    header, ctrl = popup_common.draggable_header {
+        holder = popup_holder,
+        name  = "resource_popup",
+        title = "System",
+        width = CONTENT_W,
+        hide  = function() hide() end,
     }
 
     return wibox.widget {
@@ -623,7 +583,7 @@ local function build_content()
             ram_body,
             separator(),
             temp_body,
-            layout = wibox.layout.flex.vertical,
+            layout = wibox.layout.fixed.vertical,
         },
         -- separator(),
         -- fan_body,
@@ -643,23 +603,22 @@ local function ensure_popup()
     if popup then return end
     probe_hwmon()
     local style = popup_common.popup_style()
-    popup = awful.popup {
-        -- the inner constraint forces the fit to measure children at the real
-        -- content width; unbounded, info lines fit on one line and the
-        -- reported height comes up short once they wrap at draw time. the
-        -- outer constraint sets a min-height floor so the popup keeps a set
-        -- tall size even when fewer sensors leave content short of it
-        widget   = wibox.widget {
-            {
-                build_content(),
-                strategy = "max",
-                width    = CONTENT_W,
-                widget   = wibox.container.constraint,
-            },
-            strategy = "min",
-            height   = CONTENT_H,
+    -- build content first so the awful.popup constructor gets its required
+    -- widget arg; draggable_header reads popup via popup_holder, which is
+    -- assigned right after construction
+    local content = wibox.widget {
+        {
+            build_content(),
+            strategy = "max",
+            width    = CONTENT_W,
             widget   = wibox.container.constraint,
         },
+        strategy = "min",
+        height   = CONTENT_H,
+        widget   = wibox.container.constraint,
+    }
+    popup = awful.popup {
+        widget   = content,
         visible  = false,
         ontop    = true,
         bg       = COLOR_BLACK,
@@ -667,119 +626,31 @@ local function ensure_popup()
         border_color = COLOR_GOLD,
         shape = style.shape,
     }
+    popup_holder.popup = popup
 end
 
 -- outside-click detection is installed only when the pin is off
 -- (auto-close); see plugins/popup_common.lua
 hide = function()
     if not popup or not popup.visible then return end
+    -- stop sampling while closed: the graphs are invisible, and every tick
+    -- reads ~15 sysfs files and writes widgets nothing can see
+    if sample_timer then sample_timer:stop() end
     popup_common.hide(popup)
-    anchor_widget = nil
-end
-
--- detach/sticky: while on, the popup floats at its current spot instead of
--- re-anchoring to the clicked widget, and the header can be dragged. turning
--- it off closes the popup so the next open returns to the anchored position
-paint_detach = function()
-    if detach_glyph then
-        detach_glyph.markup = string.format('<span foreground="%s">󰆼</span>',
-            detached and COLOR_GOLD or COLOR_GREY)
-    end
-end
-set_detached = function(on)
-    if detached == on then return end
-    detached = on
-    paint_detach()
-    -- detached implies sticky: while floating free the popup also ignores
-    -- outside clicks so it stays open until explicitly re-anchored. the pin
-    -- icon is driven to gold to reflect this; the pin's persisted state is
-    -- left untouched (set_sticky passes persist=false) so re-anchoring
-    -- restores the user's actual stay-open preference from disk
-    if set_sticky then set_sticky(on) end
-    if popup and popup.visible then
-        if on then popup_common.outside_click_teardown(popup)
-        elseif not is_pinned() then popup_common.outside_click_setup(popup, hide) end
-    end
-    if not on and popup and popup.visible then hide() end
-end
-
-local function place(anchor)
-    awful.placement.next_to(popup, {
-        widget = anchor,
-        preferred_positions = "top",
-        preferred_anchors = "back",
-        honor_workarea = true,
-    })
-end
-
--- drag the popup by its header: a mousegrabber tracks the pointer until the
--- left button releases. entering the grabber also engages detach so the
--- popup stays where it is dropped. the 10 s safety timer mirrors tag_pager's:
--- a missed release can never leave the grabber swallowing all pointer input.
--- the mouse-to-popup offset is captured on the first motion event and every
--- later position is derived from the grabber's own coords, so the popup
--- tracks the cursor exactly rather than accumulating drift from a start
--- snapshot taken in a different coordinate origin
-local drag_gen = 0
-start_drag = function()
-    if not popup or not popup.visible then return end
-    if not detached then set_detached(true) end
-    drag_gen = drag_gen + 1
-    local gen = drag_gen
-    local g = popup:geometry()
-    local pw, ph = g.width, g.height
-    local off_x, off_y
-    local safety = gears.timer {
-        timeout = 10, single_shot = true,
-        callback = guarded(function()
-            if capi.mousegrabber.isrunning and capi.mousegrabber.isrunning() then
-                capi.mousegrabber.stop()
-            end
-        end),
-    }
-    capi.mousegrabber.run(function(m)
-        if gen ~= drag_gen then safety:stop() return false end
-        if not (m.buttons and m.buttons[1]) then safety:stop() return false end
-        if not popup or not popup.visible then safety:stop() return false end
-        if not off_x then
-            off_x = m.x - g.x
-            off_y = m.y - g.y
-        end
-        -- width/height pinned to the snapshot so the wibox never re-fits
-        -- its widget tree during the drag (that re-fit is the judder)
-        popup:geometry {
-            x = m.x - off_x,
-            y = m.y - off_y,
-            width = pw, height = ph,
-        }
-        return true
-    end, "fleur")
 end
 
 local function show(anchor)
     ensure_popup()
-    anchor_widget = anchor
+    ctrl.set_anchor(anchor)
     awesome.emit_signal("popup::opening")
     sample()
-    popup_common.show_placement(popup, anchor, {
-        is_pinned = is_pinned,
-        detached = function() return detached end,
-        hide = hide,
-    })
+    if sample_timer and not sample_timer.started then sample_timer:start() end
+    popup_common.show_placement(popup, anchor, ctrl.show_opts())
 end
 
 local function toggle(anchor)
     ensure_popup()
-    if popup.visible then
-        if anchor == anchor_widget then
-            hide()
-        elseif not detached then
-            anchor_widget = anchor
-            place(anchor)
-        end
-    else
-        show(anchor)
-    end
+    ctrl.toggle(anchor, show)
 end
 
 
@@ -791,11 +662,24 @@ end
 function M.attach(widget)
     ensure_popup()
     if not sample_timer then
+        -- created stopped: show() samples once and starts the timer, so no
+        -- work happens while the popup has never been opened
         sample_timer = gears.timer {
-            timeout = 2, autostart = true, call_now = true,
+            timeout = 2, autostart = false,
             callback = guarded(sample),
         }
         awesome.connect_signal("exit", guarded(function() sample_timer:stop() end))
+
+        -- pause sampling while dragged: a graph rebuild mid-move hitches the
+        -- drag (attach runs once per resource bar, so connect here once)
+        popup:connect_signal("popup::drag_begin", guarded(function()
+            sample_timer:stop()
+        end))
+        popup:connect_signal("popup::drag_end", guarded(function()
+            if popup.visible and not sample_timer.started then
+                sample_timer:start()
+            end
+        end))
     end
     popup_common.attach(popup, widget, toggle, { right_hide = hide })
 end

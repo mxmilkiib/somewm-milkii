@@ -28,7 +28,6 @@ local COLOR_GOLD   = popup_common.theme.GOLD
 local COLOR_GREY   = popup_common.theme.GREY
 local COLOR_HOVER  = popup_common.theme.HOVER
 local FONT       = popup_common.fonts.FONT
-local FONT_HEAD  = popup_common.fonts.FONT_HEAD
 local CONTENT_W  = dpi(240)   -- fixed popup content width (full-width rows)
 
 local M = {}
@@ -40,15 +39,19 @@ local POWER_PROFILES = {
 }
 
 local popup
+-- holder table: draggable_header reads popup from here so build_content can
+-- run before the awful.popup is constructed (awful.popup requires a widget arg)
+local popup_holder = {}
 local profile_buttons = {}
 local active_profile  = nil
--- forward declaration: the pin toggle's click callback (built inside
--- build_content) needs this bound as an upvalue
+-- forward declarations: `hide` is referenced by the draggable_header
+-- controller before assignment; `ctrl` is built in build_content once the
+-- popup exists
 local hide
-local is_pinned  -- getter set in build_content (see popup_common.pin)
+local ctrl
 
 -- charge mode state: "maximize" (80% cap) or "auto" (HP managed / full)
-local charge_mode_text, charge_mode_btn
+local charge_mode_text, charge_mode_hint_text, charge_mode_btn
 local current_charge_mode = nil
 
 
@@ -100,9 +103,24 @@ local function battery_info()
         energy_full= num(bat .. "/energy_full") or 0,
         energy_design = num(bat .. "/energy_full_design") or 0,
         power_now  = num(bat .. "/power_now") or 0,         -- µW
+        voltage    = num(bat .. "/voltage_now") or 0,       -- µV
         cycles     = read_file(bat .. "/cycle_count") or "?",
         ac         = read_file("/sys/class/power_supply/AC/online"),
     }
+end
+
+-- HP adaptive battery state from firmware-attributes. "Activated" means the
+-- adaptive algorithm is actively intervening (holding/reducing charge); "Not
+-- Activated" means it is enabled but has not triggered. Read-only.
+local ADAPTIVE_STATUS_ATTR = "/sys/class/firmware-attributes/hp-bioscfg/attributes/Adaptive Battery Optimizer Status/current_value"
+local FAST_CHARGE_ATTR     = "/sys/class/firmware-attributes/hp-bioscfg/attributes/Fast Charge/current_value"
+
+local function read_adaptive_status()
+    return read_file(ADAPTIVE_STATUS_ATTR)
+end
+
+local function read_fast_charge()
+    return read_file(FAST_CHARGE_ATTR)
 end
 
 local function fmt_time(hours)
@@ -137,23 +155,14 @@ local function charge_mode_label(mode)
     else return "Unknown" end
 end
 
-local function toggle_charge_mode()
-    local cur = read_charge_mode()
-    local target = (cur == "maximize") and "auto" or "maximize"
-    awful.spawn.easy_async("hp-battery-mode " .. target, guarded(function(_, stderr, exit_code)
-        -- only update the UI label if the command actually succeeded; on
-        -- failure, keep the old label so the display reflects reality
-        if exit_code ~= 0 then
-            if charge_mode_text and stderr and stderr ~= "" then
-                charge_mode_text.text = "Error"
-            end
-            return
-        end
-        current_charge_mode = target
-        if charge_mode_text then
-            charge_mode_text.text = charge_mode_label(target)
-        end
-    end))
+-- HP firmware rejects runtime WMI writes to Battery Health Manager with
+-- error 0x4 ("Invalid command type"). The mode can only be changed in BIOS
+-- setup (F10 at boot > Power > Battery Health Manager). The popup shows
+-- the current mode as a read-only display with a BIOS hint.
+local function charge_mode_hint(mode)
+    if mode == "maximize" then return "80% cap - change in BIOS"
+    elseif mode == "auto" then return "HP managed - change in BIOS"
+    else return "Set in BIOS (F10 at boot)" end
 end
 
 
@@ -223,6 +232,8 @@ local function build_content()
     energy_text = make_text("")
     health_text = make_text("")
     rate_text   = make_text("")
+    voltage_text = make_text("")
+    adaptive_text = make_text("")
 
     local info_rows = wibox.widget {
         {
@@ -239,6 +250,8 @@ local function build_content()
         energy_text,
         health_text,
         rate_text,
+        voltage_text,
+        adaptive_text,
         layout = wibox.layout.fixed.vertical,
         spacing = dpi(4),
     }
@@ -253,32 +266,16 @@ local function build_content()
         profile_list:add(b)
     end
 
-    -- pin toggle at the right of the header: gold = stays open on outside
-    -- clicks, grey = any outside click closes it
-    local pin_btn, pinned = popup_common.pin("battery_popup", function(on)
-        if popup and popup.visible then
-            if on then popup_common.outside_click_teardown(popup)
-            else popup_common.outside_click_setup(popup, hide) end
-        end
-    end)
-    is_pinned = pinned
-
-    -- full-width purple header
-    local header = wibox.widget {
-        {
-            {
-                make_text("Battery", COLOR_WHITE, FONT_HEAD),
-                nil,
-                pin_btn,
-                layout = wibox.layout.align.horizontal,
-            },
-            left = dpi(10), right = dpi(10),
-            top = dpi(6), bottom = dpi(6),
-            widget = wibox.container.margin,
-        },
-        forced_width = CONTENT_W,
-        bg = COLOR_PURPLE,
-        widget = wibox.container.background,
+    -- header (title drag handle + detach + pin) and the detach/drag controller
+    -- come from popup_common so this popup can float and be dragged like the
+    -- rest of the wibar popups
+    local header
+    header, ctrl = popup_common.draggable_header {
+        holder = popup_holder,
+        name  = "battery_popup",
+        title = "Battery",
+        width = CONTENT_W,
+        hide  = function() hide() end,
     }
 
     -- padded info block (text left-aligned, full-width black bg)
@@ -300,29 +297,31 @@ local function build_content()
         widget = wibox.container.margin,
     }
 
-    -- charge mode toggle: shows current HP battery health policy;
-    -- click flips between 80% cap and HP managed (full charge)
-    charge_mode_text = make_text(charge_mode_label(read_charge_mode() or "auto"), COLOR_WHITE)
+    -- charge mode: read-only display (HP firmware rejects runtime writes;
+    -- change in BIOS setup). Shows current mode + hint below.
+    local mode = read_charge_mode() or "auto"
+    charge_mode_text = make_text(charge_mode_label(mode), COLOR_WHITE)
+    charge_mode_hint_text = make_text(charge_mode_hint(mode), COLOR_GREY)
+    -- old: the rows sat in a wibox.container.place (halign/valign center,
+    --      fill_horizontal) as the row's outermost widget with dead bg/fg
+    --      properties on it — it rendered as a 1px line under somewm, so
+    --      this now mirrors info_block's background > margin structure
     charge_mode_btn = wibox.widget {
         {
-            charge_mode_text,
-            halign = "center",
-            valign = "center",
-            fill_horizontal = true,
-            widget = wibox.container.place,
+            {
+                charge_mode_text,
+                charge_mode_hint_text,
+                layout = wibox.layout.fixed.vertical,
+                spacing = dpi(2),
+            },
+            left = dpi(10), right = dpi(10),
+            top = dpi(4), bottom = dpi(8),
+            widget = wibox.container.margin,
         },
         forced_width = CONTENT_W,
         bg = COLOR_BLACK,
-        fg = COLOR_WHITE,
         widget = wibox.container.background,
     }
-    charge_mode_btn:connect_signal("mouse::enter", guarded(function()
-        charge_mode_btn.bg = COLOR_HOVER
-    end))
-    charge_mode_btn:connect_signal("mouse::leave", guarded(function()
-        charge_mode_btn.bg = COLOR_BLACK
-    end))
-    charge_mode_btn:buttons(gears.table.join(awful.button({}, 1, guarded(toggle_charge_mode))))
 
     local charge_mode_label_widget = wibox.widget {
         make_text("Charge Mode", COLOR_GREY),
@@ -352,8 +351,17 @@ local function refresh_popup()
     status_text.text = i.status
     ac_text.text = (i.ac == "1") and "Plugged in (AC)" or "On battery"
 
-    energy_text.text = string.format("%.1f / %.1f Wh",
-        i.energy_now / 1e6, i.energy_full / 1e6)
+    -- energy now / full, with design in parens if trimmed (shows the
+    -- Intelligent Charging capacity reduction when energy_full < design)
+    if i.energy_design > 0 and i.energy_full < i.energy_design then
+        local trim_pct = math.floor((1 - i.energy_full / i.energy_design) * 100)
+        energy_text.text = string.format("%.1f / %.1f Wh  (trim %d%%, design %.1f)",
+            i.energy_now / 1e6, i.energy_full / 1e6, trim_pct,
+            i.energy_design / 1e6)
+    else
+        energy_text.text = string.format("%.1f / %.1f Wh",
+            i.energy_now / 1e6, i.energy_full / 1e6)
+    end
 
     local health = (i.energy_design > 0)
         and math.floor(i.energy_full / i.energy_design * 100) or nil
@@ -371,6 +379,26 @@ local function refresh_popup()
         rate_text.text = ""
     end
 
+    -- voltage (cell voltage in V; useful for health diagnosis)
+    if i.voltage > 0 then
+        voltage_text.text = string.format("%.2f V", i.voltage / 1e6)
+    else
+        voltage_text.text = ""
+    end
+
+    -- adaptive battery optimizer status + fast charge: tells you if the HP
+    -- adaptive algorithm is actively intervening (Activated) or idle
+    local adapt = read_adaptive_status()
+    local fast = read_fast_charge()
+    local parts = {}
+    if adapt and adapt ~= "" then
+        table.insert(parts, "Adaptive: " .. adapt)
+    end
+    if fast and fast ~= "" then
+        table.insert(parts, "Fast Charge: " .. fast)
+    end
+    adaptive_text.text = table.concat(parts, "  ·  ")
+
     awful.spawn.easy_async("powerprofilesctl get", guarded(function(out)
         local got = (out or ""):gmatch("[^\r\n]+")()
         if got then
@@ -384,6 +412,9 @@ local function refresh_popup()
     if mode and charge_mode_text then
         current_charge_mode = mode
         charge_mode_text.text = charge_mode_label(mode)
+        if charge_mode_hint_text then
+            charge_mode_hint_text.text = charge_mode_hint(mode)
+        end
     end
 end
 
@@ -393,8 +424,23 @@ end
 local function ensure_popup()
     if popup then return end
     local style = popup_common.popup_style()
+    -- build content first so the awful.popup constructor gets its required
+    -- widget arg; draggable_header reads popup via popup_holder, assigned
+    -- right after construction
+    local content = build_content()
     popup = awful.popup {
-        widget   = build_content(),
+        -- awful.popup sizes the drawin by fitting the widget tree at
+        -- unbounded width, but long info lines wrap once laid out at
+        -- CONTENT_W — the drawin ends up short by the wrapped-line growth
+        -- and the fixed.vertical clips the last row (Charge Mode) to a few
+        -- px. Capping the fit width makes the popup height account for
+        -- wrapped lines.
+        widget   = wibox.widget {
+            content,
+            strategy = "max",
+            width    = CONTENT_W,
+            widget   = wibox.container.constraint,
+        },
         visible  = false,
         ontop    = true,
         bg       = COLOR_BLACK,
@@ -402,6 +448,7 @@ local function ensure_popup()
         border_color = COLOR_GOLD,
         shape = style.shape,
     }
+    popup_holder.popup = popup
 end
 
 hide = function()
@@ -412,14 +459,15 @@ end
 local function show(anchor)
     ensure_popup()
     if popup.visible then return end
+    ctrl.set_anchor(anchor)
     awesome.emit_signal("popup::opening")
     refresh_popup()
-    popup_common.show_placement(popup, anchor, { is_pinned = is_pinned, hide = hide })
+    popup_common.show_placement(popup, anchor, ctrl.show_opts())
 end
 
 local function toggle(anchor)
     ensure_popup()
-    if popup.visible then hide() else show(anchor) end
+    ctrl.toggle(anchor, show)
 end
 
 
@@ -431,6 +479,10 @@ function M.attach(widget)
     ensure_popup()
     widget:buttons(gears.table.join(
         awful.button({}, 1, function()
+            -- capture geometry at press time (see popup_common.attach comment)
+            popup._anchor_geo    = mouse.current_widget_geometry
+            popup._anchor_screen = mouse.current_wibox and mouse.current_wibox.screen
+            popup._anchor_wibox  = mouse.current_wibox
             -- widget_press arms the wibar handler's ignore flag and returns
             -- true if that handler already closed the popup on this press
             if not popup_common.widget_press(popup) then toggle(widget) end

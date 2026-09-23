@@ -15,7 +15,6 @@ local popup_common = require("plugins.popup_common")
 local dpi = beautiful.xresources.apply_dpi
 local gold = popup_common.theme.GOLD
 local purple = popup_common.theme.PURPLE
-local FONT_HEAD = popup_common.fonts.FONT_HEAD
 local FONT = popup_common.fonts.FONT_CLEAR
 local art_cache = (os.getenv("XDG_CACHE_HOME") or (os.getenv("HOME") .. "/.cache")) .. "/somewm-media-art"
 local metadata_format = "{{status}}\t{{playerName}}\t{{title}}\t{{artist}}\t{{mpris:artUrl}}"
@@ -27,10 +26,15 @@ local player_dedup = {
 
 local M = {}
 local popup
--- forward declaration: the pin toggle's click callback needs this bound as
--- an upvalue (assigned near the bottom of this file)
+-- holder table: draggable_header reads popup from here so build_content can
+-- run before the awful.popup is constructed (awful.popup requires a widget arg)
+local popup_holder = {}
+-- forward declarations: `hide` is referenced by the draggable_header
+-- controller before its definition; refresh_timer is started/stopped by
+-- show/hide but constructed at the bottom of the file
 local hide
-local is_pinned  -- getter set by popup_common.pin in the header below
+local ctrl
+local refresh_timer
 local players = {}
 local rows = wibox.layout.fixed.vertical()
 rows.spacing = dpi(6)
@@ -44,63 +48,70 @@ local empty = wibox.widget {
     widget = wibox.widget.textbox,
 }
 
--- pin toggle at the right of the header: gold = stays open on outside
--- clicks, grey = any outside click closes it
-local pin_btn
-pin_btn, is_pinned = popup_common.pin("media_popup", function(on)
-    if popup and popup.visible then
-        if on then popup_common.outside_click_teardown(popup)
-        else popup_common.outside_click_setup(popup, hide) end
-    end
-end)
+-- header (title drag handle + detach + pin) and the detach/drag controller
+-- come from popup_common so this popup can float and be dragged like the
+-- rest of the wibar popups. no `width`: media uses min/max-width so the header
+-- stretches to whatever the rows settle on. built before the popup so the
+-- awful.popup constructor gets its required widget arg; popup_holder is
+-- assigned right after construction
+local header
 
-local header = wibox.widget {
-    {
-        {
-            {
-                text  = "Media",
-                fg    = "#FFFFFF",
-                font  = FONT_HEAD,
-                align = "left",
-                valign = "center",
-                widget = wibox.widget.textbox,
-            },
-            nil,
-            pin_btn,
-            layout = wibox.layout.align.horizontal,
-        },
-        left = dpi(10), right = dpi(10),
-        top = dpi(6), bottom = dpi(6),
-        widget = wibox.container.margin,
-    },
-    bg = purple,
-    widget = wibox.container.background,
-}
+-- deferred: awful.popup reads screen.dpi at construction and during a
+-- hot-reload rc.lua re-runs while screens are torn down, so the popup is
+-- built on first screen attachment instead of at require time
+local function ensure_popup()
+    if popup then return end
+    header, ctrl = popup_common.draggable_header {
+        holder = popup_holder,
+        name  = "media_popup",
+        title = "Media",
+        hide  = function() hide() end,
+    }
 
-popup = awful.popup {
-    widget = {
-        header,
-        {
+    popup = awful.popup {
+        widget = {
+            header,
             {
-                empty,
-                rows,
-                spacing = dpi(6),
-                layout = wibox.layout.fixed.vertical,
+                {
+                    empty,
+                    rows,
+                    spacing = dpi(6),
+                    layout = wibox.layout.fixed.vertical,
+                },
+                top = dpi(8), bottom = dpi(2),
+                left = dpi(10), right = dpi(10),
+                widget = wibox.container.margin,
             },
-            top = dpi(8), bottom = dpi(2),
-            left = dpi(10), right = dpi(10),
-            widget = wibox.container.margin,
+            layout = wibox.layout.fixed.vertical,
         },
-        layout = wibox.layout.fixed.vertical,
-    },
-    minimum_width = dpi(470),
-    maximum_width = dpi(620),
-    border_color = gold,
-    border_width = popup_common.popup_style().border_width,
-    ontop = true,
-    visible = false,
-    shape = popup_common.popup_style().shape,
-}
+        minimum_width = dpi(470),
+        maximum_width = dpi(620),
+        border_color = gold,
+        border_width = popup_common.popup_style().border_width,
+        ontop = true,
+        visible = false,
+        shape = popup_common.popup_style().shape,
+    }
+    popup_holder.popup = popup
+
+    -- pause refreshes while the popup is dragged: a rows rebuild mid-move
+    -- hitches the drag because fit() re-measures every row
+    popup:connect_signal("popup::drag_begin", guarded(function()
+        if refresh_timer.started then refresh_timer:stop() end
+    end))
+    popup:connect_signal("popup::drag_end", guarded(function()
+        if popup.visible and not refresh_timer.started then
+            refresh_timer:start()
+        end
+    end))
+
+    M.popup = popup
+end
+
+awful.screen.connect_for_each_screen(guarded(function()
+    if popup then return end
+    ensure_popup()
+end))
 
 local function player_label(instance, name)
     local suffix = instance:match("kdeconnect%.mpris_(.+)")
@@ -348,26 +359,34 @@ local function refresh()
 end
 
 local function show(anchor)
+    ensure_popup()
     if popup.visible then return end
+    ctrl.set_anchor(anchor)
     awesome.emit_signal("popup::opening")
     refresh()
-    popup_common.show_placement(popup, anchor, { is_pinned = is_pinned, hide = hide })
+    -- poll only while the popup is open; the player list can't be seen anyway
+    if not refresh_timer.started then refresh_timer:start() end
+    popup_common.show_placement(popup, anchor, ctrl.show_opts())
 end
 
 hide = function()
+    if not popup then return end
+    refresh_timer:stop()
     popup_common.hide(popup)
 end
 
 function M.attach(button_widget)
+    ensure_popup()
     popup_common.attach(popup, button_widget, function(w)
-        if popup.visible then hide() else show(w) end
+        ctrl.toggle(w, show)
     end)
 end
 
-local refresh_timer = gears.timer { timeout = 2, autostart = true, call_now = true, callback = guarded(refresh) }
+-- created stopped: refresh() is called explicitly by show() before the timer
+-- starts, so the player list is populated on open without a boot-time spawn
+refresh_timer = gears.timer { timeout = 2, autostart = false, callback = guarded(refresh) }
 awesome.connect_signal("exit", guarded(function() refresh_timer:stop() end))
 
-M.popup = popup
 M.players = players
 
 -- close this popup when any other popup opens

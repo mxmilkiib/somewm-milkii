@@ -30,12 +30,16 @@ local CONTENT_W  = dpi(440)
 local M = {}
 
 local popup
+-- holder table: draggable_header reads popup from here so build_content can
+-- run before the awful.popup is constructed (awful.popup requires a widget arg)
+local popup_holder = {}
 local rows_container_ref
 local refresh_popup  -- forward declaration (used by make_slider_row before definition)
--- forward declaration: the pin toggle's click callback (built inside
--- build_content) needs this bound as an upvalue
+-- forward declarations: `hide` is referenced by the draggable_header
+-- controller before assignment; `ctrl` is built in build_content once the
+-- popup exists
 local hide
-local is_pinned  -- getter set in build_content (see popup_common.pin)
+local ctrl
 -- active debounce timers from slider rows; stopped on hide/rebuild (B27)
 local active_send_timers = {}
 -- refs to the default-sink row's slider + pct, refreshed whenever the popup
@@ -321,31 +325,18 @@ end
 -- MARK: POPUP
 
 local function build_content()
-    -- pin toggle at the right of the header: gold = stays open on outside
-    -- clicks, grey = any outside click closes it
-    local pin_btn, pinned = popup_common.pin("volume_popup", function(on)
-        if popup and popup.visible then
-            if on then popup_common.outside_click_teardown(popup)
-            else popup_common.outside_click_setup(popup, hide, true) end
-        end
-    end)
-    is_pinned = pinned
-
-    local header = wibox.widget {
-        {
-            {
-                make_text("Volume", COLOR_WHITE, FONT_HEAD),
-                nil,
-                pin_btn,
-                layout = wibox.layout.align.horizontal,
-            },
-            left = dpi(10), right = dpi(10),
-            top = dpi(6), bottom = dpi(6),
-            widget = wibox.container.margin,
-        },
-        forced_width = CONTENT_W,
-        bg = COLOR_PURPLE,
-        widget = wibox.container.background,
+    -- header (title drag handle + detach + pin) and the detach/drag controller
+    -- come from popup_common so this popup can float and be dragged like the
+    -- rest of the wibar popups. also_release: the ontop popup can swallow the
+    -- first button::press on focus transfer, so listen for release too
+    local header
+    header, ctrl = popup_common.draggable_header {
+        holder = popup_holder,
+        name  = "volume_popup",
+        title = "Volume",
+        width = CONTENT_W,
+        hide  = function() hide() end,
+        also_release = true,
     }
 
     local rows_container = wibox.widget {
@@ -367,9 +358,12 @@ end
 
 local function ensure_popup()
     if popup then return end
+    local style = popup_common.popup_style()
+    -- build content first so the awful.popup constructor gets its required
+    -- widget arg; draggable_header reads popup via popup_holder, assigned
+    -- right after construction
     local content, rc = build_content()
     rows_container_ref = rc
-    local style = popup_common.popup_style()
     popup = awful.popup {
         widget   = content,
         visible  = false,
@@ -379,6 +373,7 @@ local function ensure_popup()
         border_color = COLOR_GOLD,
         shape = style.shape,
     }
+    popup_holder.popup = popup
 end
 
 hide = function()
@@ -390,23 +385,26 @@ end
 local function show(anchor)
     ensure_popup()
     if popup.visible or popup._showing then return end
-    popup._showing = true
+    ctrl.set_anchor(anchor)
+    -- emit before setting _showing: the signal fires every registered closer
+    -- synchronously, including this popup's own hide — popup_common.hide
+    -- clears _showing unconditionally, so emitting after the set would make
+    -- the async refresh callback bail before show_placement ever runs
     awesome.emit_signal("popup::opening")
+    popup._showing = true
     -- build rows first, then size + place + reveal. placing before the async
     -- rows arrive would anchor an empty popup that then grows downward off
     -- the bottom of the screen once the (now taller) rows are added
     refresh_popup(function()
         if not popup._showing then return end
-        popup_common.show_placement(popup, anchor, {
-            is_pinned = is_pinned, also_release = true, hide = hide,
-        })
+        popup_common.show_placement(popup, anchor, ctrl.show_opts())
         popup._showing = false
     end)
 end
 
 local function toggle(anchor)
     ensure_popup()
-    if popup.visible then hide() else show(anchor) end
+    ctrl.toggle(anchor, show)
 end
 
 
