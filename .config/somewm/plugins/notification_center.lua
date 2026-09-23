@@ -1447,9 +1447,17 @@ end
 
 M.history = history
 
--- pre-initialize popup to eliminate first-open delay
-ensure_popup()
-M._rebuild_history()
+-- pre-initialize popup to eliminate first-open delay. deferred until a
+-- screen exists: during a hot-reload rc.lua re-runs while screens are torn
+-- down, and awful.popup's constructor reads self.screen.dpi which is nil
+-- then, killing the require and every module chained off it
+local preinited = false
+awful.screen.connect_for_each_screen(guarded(function()
+    if preinited then return end
+    if not pcall(ensure_popup) then return end
+    preinited = true
+    M._rebuild_history()
+end))
 
 -- export keybindings for use in rc.lua (these should only work when popup is visible)
 M.keybindings = {

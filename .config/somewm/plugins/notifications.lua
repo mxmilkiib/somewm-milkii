@@ -36,10 +36,13 @@ local DEFAULT_TIMEOUT = 50
 -- Widget-Popup Fonts (same as the resource/battery/volume/displays popups)
 local FONT           = font_utils.FONT
 local FONT_HEAD      = font_utils.FONT_HEAD
-local FONT_VALUE     = font_utils.FONT_BOLD
+-- local FONT_VALUE  = font_utils.FONT_BOLD  -- too large for the header sender
 -- local FONT_COUNTDOWN = font_utils.FONT
 -- local FONT_COUNTDOWN = font_utils.FONT_INFO
 local FONT_COUNTDOWN = font_utils.FONT_SMALL
+
+-- circle-phase glyphs for the header countdown (quarter steps, empty→full)
+local TIMER_GLYPHS = { "○", "◔", "◑", "◕", "●" }
 
 
 -- Per-screen active notification boxes (for manual stacking)
@@ -199,7 +202,7 @@ end
 -- // MARK --widget-template
 
 -- Widget-Popup Form (same as resource/battery/volume/displays popups):
--- Purple Header Bar (Title left, Sender + Countdown Arc right in Gold),
+-- Purple Header Bar (Title left, Sender + Countdown Glyph right in Gold),
 -- Black Body (Icon left, Message filling the rest), Actions Section below.
 local function build_widget(n, s)
     local icon_widget = wibox.widget {
@@ -212,33 +215,16 @@ local function build_widget(n, s)
         widget = wibox.widget.imagebox,
     }
 
-    -- countdown text (kept as reference for timer updates)
+    -- countdown indicator: unicode circle-phase glyph + seconds at text
+    -- height, so the header stays one line tall like the widget popups
+    -- (the old 28px arcchart forced the header to ~40px)
     local countdown_text = wibox.widget {
-        markup = "<span foreground='" .. COLOR_GOLD .. "'>0s</span>",
+        markup = string.format("<span foreground='%s'>● %ds</span>",
+            COLOR_GOLD, n.timeout or DEFAULT_TIMEOUT),
         font = FONT_COUNTDOWN,
         align = "center",
         valign = "center",
         widget = wibox.widget.textbox,
-    }
-
-    -- countdown arc with countdown text inside it (header right edge)
-    local timeout_arc = wibox.widget {
-        {
-            countdown_text,
-            halign = "center",
-            valign = "center",
-            widget = wibox.container.place,
-        },
-        widget = wibox.container.arcchart,
-        forced_width = dpi(28),
-        forced_height = dpi(28),
-        max_value = 100,
-        min_value = 0,
-        value = 100,
-        thickness = dpi(2),
-        rounded_edge = true,
-        start_angle = 2 * math.pi - math.pi / 2,
-        colors = { COLOR_GOLD },
     }
 
     -- title: white bold text on the purple header bar
@@ -250,11 +236,12 @@ local function build_widget(n, s)
         widget = wibox.widget.textbox,
     }
 
-    -- sender: gold value text in the header's right slot (widget-popup form)
+    -- sender: gold text in the header's right slot (widget-popup form),
+    -- at info size so it doesn't outgrow the title like FONT_VALUE did
     local app_name_widget = wibox.widget {
         markup = "<span foreground='" .. COLOR_GOLD .. "'>"
             .. gstring.xml_escape(n.app_name or "") .. "</span>",
-        font = FONT_VALUE,
+        font = font_utils.FONT_INFO,
         align = "right",
         valign = "center",
         widget = wibox.widget.textbox,
@@ -267,7 +254,7 @@ local function build_widget(n, s)
                 nil,
                 {
                     app_name_widget,
-                    (n.timeout or DEFAULT_TIMEOUT) > 5 and timeout_arc or nil,
+                    (n.timeout or DEFAULT_TIMEOUT) > 5 and countdown_text or nil,
                     spacing = dpi(6),
                     layout = wibox.layout.fixed.horizontal,
                 },
@@ -405,7 +392,7 @@ local function build_widget(n, s)
         title_widget:set_markup("<b>" .. (n.title or "") .. "</b>")
     end))
 
-    return widget, timeout_arc, countdown_text
+    return widget, countdown_text
 end
 
 
@@ -424,7 +411,7 @@ function M.display(n)
     local s = pick_cursor_screen()
     if not s or not s.valid then return end
 
-    local widget, timeout_arc, countdown_text = build_widget(n, s)
+    local widget, countdown_text = build_widget(n, s)
 
     local popup = awful.popup {
         widget = widget,
@@ -472,26 +459,26 @@ function M.display(n)
     -- timeout handling
     local timeout = n.timeout or DEFAULT_TIMEOUT
     local timeout_timer
-    local arc_timer
+    local countdown_timer
     if timeout > 0 then
-        -- arc countdown timer (updates arc value + visible countdown text)
+        -- countdown timer (updates the unicode phase glyph + seconds text)
         -- uses a tick counter instead of os.clock() (which measures CPU time,
         -- not wall time, and barely advances while awesome is idle)
         local arc_duration = timeout
         local arc_ticks = 0
         local ARC_RATE = 15
-        arc_timer = gtimer {
+        countdown_timer = gtimer {
             timeout = 1 / ARC_RATE,
             autostart = false,
             callback = guarded(function()
                 arc_ticks = arc_ticks + 1
                 local elapsed = arc_ticks / ARC_RATE
                 local remaining = math.max(0, 1 - elapsed / arc_duration)
-                timeout_arc.value = remaining * 100
+                local glyph = TIMER_GLYPHS[math.floor(remaining * 4 + 0.5) + 1]
                 local secs_left = math.ceil(remaining * arc_duration)
                 countdown_text:set_markup(string.format(
-                    "<span foreground='%s'>%ds</span>", COLOR_GOLD, secs_left))
-                if remaining <= 0 then arc_timer:stop() end
+                    "<span foreground='%s'>%s %ds</span>", COLOR_GOLD, glyph, secs_left))
+                if remaining <= 0 then countdown_timer:stop() end
             end),
         }
 
@@ -521,17 +508,17 @@ function M.display(n)
     -- hover to pause timeout
     popup:connect_signal("mouse::enter", guarded(function()
         if timeout_timer then timeout_timer:stop() end
-        if arc_timer then arc_timer:stop() end
+        if countdown_timer then countdown_timer:stop() end
     end))
     popup:connect_signal("mouse::leave", guarded(function()
         if timeout_timer then timeout_timer:start() end
-        if arc_timer then arc_timer:start() end
+        if countdown_timer then countdown_timer:start() end
     end))
 
     -- cleanup on destroy
     n:connect_signal("destroyed", guarded(function()
         if timeout_timer then timeout_timer:stop() end
-        if arc_timer then arc_timer:stop() end
+        if countdown_timer then countdown_timer:stop() end
         if popup and popup.valid then
             popup.visible = false
         end
@@ -605,7 +592,7 @@ function M.display(n)
 
     -- start timers
     if timeout_timer then timeout_timer:start() end
-    if arc_timer then arc_timer:start() end
+    if countdown_timer then countdown_timer:start() end
 
     return popup
 end
