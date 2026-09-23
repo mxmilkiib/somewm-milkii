@@ -10,13 +10,13 @@
 --      AC/battery transition and once on boot. A config reload does NOT switch
 --      (detected via awesome.startup), so a manually-chosen profile survives
 --      reloads.
---   3. Idle management        — swayidle is launched here with a dim -> lock
---      -> suspend timeout chain. The dim/undim stages signal back into this
---      module via `awesome-client` so brightness is saved and restored in Lua.
---      Timeouts adapt to the power source; swayidle is restarted on every
---      AC/battery transition to pick up the new chain.
---   4. Lid handling            — context-aware: suspend when undocked, lock
---      only when an external display is attached. Detected via udevadm (with a
+--   3. Idle management        — swayidle is launched here only when at least
+--      one stage (dim/lock/suspend) is configured in M.idle; with all stages
+--      nil no swayidle is spawned. Idle handling has moved to the native
+--      screensaver module (plugins/screensaver.lua). The dim/undim signal
+--      plumbing below is kept for when a stage is re-enabled.
+--   4. Lid handling            — suspend when undocked, no action while an
+--      external display is attached. Detected via udevadm (with a
 --      slow poll safety net), reading the authoritative ACPI lid state file.
 --
 -- The wibar battery widget keeps its own /sys display; nothing visible is
@@ -41,10 +41,13 @@ local M = {
     -- power-profiles-daemon profile per power source
     profile_ac   = "performance",
     profile_batt = "power-saver",
-    -- idle timeouts in seconds; a nil stage disables it
+    -- idle timeouts in seconds; a nil stage disables it.
+    -- All stages currently nil: swayidle/swaylock replaced by the native
+    -- screensaver module (plugins/screensaver.lua + awesome idle timers).
+    -- Previous values: ac dim=300 lock=600, batt dim=120 lock=240 suspend=600
     idle = {
-        ac   = { dim = 300, lock = 600, suspend = nil },  -- no auto-suspend on AC
-        batt = { dim = 120, lock = 240, suspend = 600 },
+        ac   = { dim = nil, lock = nil, suspend = nil },
+        batt = { dim = nil, lock = nil, suspend = nil },
     },
     dim_pct = 5,                 -- screen brightness percent during idle dim
     internal_output_prefix = "eDP",  -- built-in panel name prefix
@@ -170,9 +173,11 @@ end
 -- through a shell, so pipes (dim/undim) work without outer-shell quoting.
 local function build_swayidle_argv()
     local c = idle_conf()
-    local argv = { "swayidle", "-w", "before-sleep", "swaylock -f" }
+    local argv = { "swayidle", "-w" }
+    local n = 0
     local function add_timeout(secs, cmd, resume_cmd)
         if not secs then return end
+        n = n + 1
         table.insert(argv, "timeout")
         table.insert(argv, tostring(secs))
         table.insert(argv, cmd)
@@ -184,6 +189,7 @@ local function build_swayidle_argv()
     add_timeout(c.dim, DIM_CMD, UNDIM_CMD)
     add_timeout(c.lock, "swaylock -f")
     add_timeout(c.suspend, "systemctl suspend")
+    if n == 0 then return nil end  -- no stages configured: don't launch
     return argv
 end
 
@@ -195,7 +201,8 @@ local function launch_swayidle()
     undim()
     awful.spawn.with_shell("pkill -u $USER -x swayidle 2>/dev/null")
     gears.timer.start_new(0.3, guarded(function()
-        awful.spawn(build_swayidle_argv(), false)
+        local argv = build_swayidle_argv()
+        if argv then awful.spawn(argv, false) end
         return false  -- one-shot
     end))
 end
@@ -220,11 +227,9 @@ end
 
 local function on_lid_close()
     has_external_display(function(ext)
-        if ext then
-            -- docked: lock only, keep the external display running
-            awful.spawn("swaylock -f")
-        else
-            -- undocked: suspend (swayidle before-sleep locks the screen)
+        -- docked: nothing to do; undocked: suspend.
+        -- Locking is disabled (swaylock removed session-wide).
+        if not ext then
             awful.spawn("systemctl suspend")
         end
     end)
@@ -286,6 +291,9 @@ end
 function M.start()
     -- clean up any resources from a previous hot-reload (B20)
     cleanup()
+    -- a reload creates a fresh Lua state with an empty `tracked` table, so the
+    -- old state's resources can only be released from its own "exit" handler
+    awesome.connect_signal("exit", guarded(cleanup))
 
     -- true only during the initial startup phase, false on a config reload;
     -- captured synchronously here because the upower priming callback fires
@@ -305,13 +313,14 @@ function M.start()
 
     -- lid events: instant via udevadm, plus a 30s poll safety net in case the
     -- uevent stream misses a transition (cheap: one file read per tick)
-    awful.spawn.with_line_callback("udevadm monitor --kernel --subsystem-match=acpi", {
+    local udev_pid = awful.spawn.with_line_callback("udevadm monitor --kernel --subsystem-match=acpi", {
         stdout = guarded(function() on_lid_check() end),
     })
+    if type(udev_pid) == "number" then tracked.pids[#tracked.pids + 1] = udev_pid end
     track_timer(gears.timer.start_new(30, guarded(function() on_lid_check(); return true end)))
 
     -- battery/AC monitor (event-driven, no polling)
-    awful.spawn.with_line_callback("upower --monitor-detail", {
+    local upower_pid = awful.spawn.with_line_callback("upower --monitor-detail", {
         stdout = guarded(function(line)
             local pct = line:match("^%s*percentage:%s*(%d+)%%")
             if pct then return on_percentage(tonumber(pct)) end
@@ -319,6 +328,7 @@ function M.start()
             if st then return on_state(st) end
         end),
     })
+    if type(upower_pid) == "number" then tracked.pids[#tracked.pids + 1] = upower_pid end
     -- prime state so the first monitor event isn't treated as a change
     awful.spawn.easy_async_with_shell(
         "upower -i $(upower -e | grep -m1 BAT) 2>/dev/null | grep -E 'state|percentage'",

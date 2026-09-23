@@ -456,7 +456,7 @@ function M.build(ctx)
   local menu_keys = {
     {{modkey, altkey}, "r", "monitor_rofi.sh", "monitor Rofi menu", nil, "menu"},
     {{modkey, altkey}, "p", "rofi_power", "power Rofi menu", nil, "menu"},
-    {{modkey, ctrlkey, shiftkey}, "l", "swaylock -f", "lock screen", nil, "session"}
+    {{modkey, ctrlkey, shiftkey}, "l", "echo 'require(\"plugins.screensaver\").preview()' | awesome-client", "screensaver now", nil, "session"}
   }
   
   -- // MARK: SCREEN ROTATION
