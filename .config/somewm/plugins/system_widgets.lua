@@ -482,6 +482,57 @@ function M.ai_status(args)
 end
 
 
+-- shimmer status widget: a single glyph whose colour tracks the animation
+-- run state (gold while running, grey while stopped). left-click opens the
+-- shimmer popup (interactive controls); the popup is attached in rc.lua via
+-- shimmer_popup.attach so this constructor stays popup-agnostic, mirroring
+-- how the other widgets here delegate their click target through `args.open`
+local shimmer_views = {}
+local shimmer_timer
+local shimmer_mod  -- cached on first use so the 2s poll doesn't re-require
+local SHIMMER_GLYPH = "\u{F0E02}"  -- Nerd Font "format-color" / palette swatch
+
+local function update_shimmer_status()
+    if not shimmer_mod then shimmer_mod = require("plugins.shimmer") end
+    local running = shimmer_mod.is_running and shimmer_mod.is_running()
+    local preset  = shimmer_mod.get_current_preset and shimmer_mod.get_current_preset() or ""
+    for _, view in ipairs(shimmer_views) do
+        view.glyph.markup = string.format('<span foreground="%s">%s</span>',
+            running and "#E6B84D" or "#777777", SHIMMER_GLYPH)
+    end
+    -- tooltip carries the live preset so the bar hints at the active effect
+    -- without opening the popup
+    for _, view in ipairs(shimmer_views) do
+        if view.tooltip then
+            view.tooltip.text = string.format("Shimmer: %s%s",
+                running and "running " or "stopped ", preset)
+        end
+    end
+end
+
+function M.shimmer(args)
+    args = args or {}
+    local glyph = wibox.widget {
+        markup = string.format('<span foreground="#777777">%s</span>', SHIMMER_GLYPH),
+        font = font_utils.mono_size(13),
+        valign = "center",
+        widget = wibox.widget.textbox,
+    }
+    local widget = centered(glyph)
+    local tip = awful.tooltip { objects = { widget }, text = "Shimmer" }
+    shimmer_views[#shimmer_views + 1] = { glyph = glyph, tooltip = tip }
+    widget:buttons(gears.table.join(
+        awful.button({}, 1, args.open or function() end)
+    ))
+    if not shimmer_timer then
+        update_shimmer_status()
+        -- start/stop/mode changes arrive via the facade's state_changed
+        -- signal; the 30 s tick is a fallback for anything that bypasses it
+        awesome.connect_signal("shimmer::state_changed", guarded(update_shimmer_status))
+        shimmer_timer = gears.timer { timeout = 30, autostart = true,
+            callback = guarded(update_shimmer_status) }
+        awesome.connect_signal("exit", guarded(function() shimmer_timer:stop() end))
+    end
     return widget
 end
 
