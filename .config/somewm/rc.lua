@@ -2434,15 +2434,15 @@ local menu_icon_normal = config_dir .. "milktheme/icons/somewm-logo.svg"
 local menu_icon_hover = config_dir .. "milktheme/icons/somewm-logo-hover.svg"
 local menu_icon = wibox.widget {
     image = menu_icon_normal,
-    forced_width = 32,
-    forced_height = 32,
+    forced_width = 30,
+    forced_height = 30,
     resize = true,
     widget = wibox.widget.imagebox,
 }
 mylauncher = wibox.widget {
     menu_icon,
-    forced_width = 32,
-    forced_height = 32,
+    forced_width = 30,
+    forced_height = 30,
     widget = wibox.container.background,
 }
 mylauncher:connect_signal("mouse::enter", guarded(function() menu_icon.image = menu_icon_hover end))
