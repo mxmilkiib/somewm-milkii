@@ -17,6 +17,7 @@ local WIDGET_FONT = font_utils.FONT_MONO
 local M = {}
 local volume_views = {}
 local volume_timer
+local last_volume_icon, last_volume_color, last_volume_muted, last_volume_pct
 local resource_views = {}
 local resource_timer
 local ai_views = {}
@@ -40,8 +41,17 @@ local function apply_volume(pct, muted)
         or pct < 34 and "#C5E89A"  -- pale lime green
         or pct < 67 and "#9FD64A"  -- medium lime green
         or "#6FA820"               -- strong lime green
+    -- skip the SVG reload+retint and the text write when nothing changed;
+    -- the poll ticks far more often than the volume actually moves
+    if icon == last_volume_icon and color == last_volume_color
+        and muted == last_volume_muted and pct == last_volume_pct then
+        return
+    end
+    last_volume_icon, last_volume_color = icon, color
+    last_volume_muted, last_volume_pct = muted, pct
+    local painted = gears.color.recolor_image(icon_dir .. "status/" .. icon, color)
     for _, view in ipairs(volume_views) do
-        view.icon.image = gears.color.recolor_image(icon_dir .. "status/" .. icon, color)
+        view.icon.image = painted
         view.text.text = muted and "--%" or (pct .. "%")
     end
 end
@@ -59,10 +69,49 @@ if not signals_connected then
     signals_connected = true
 end
 
+-- debounce: one sink change emits a burst of pactl events; collapse them into
+-- a single wpctl query
+local volume_debounce = gears.timer {
+    timeout = 0.15, single_shot = true, autostart = false,
+    callback = guarded(update_volume),
+}
+
+-- event-driven volume tracking: one persistent pactl subscriber prints a line
+-- per server event. replaces the 10s poll, which also lagged external changes
+-- (pavucontrol, other apps) by up to its interval
+local volume_sub_dead = true
+local volume_sub_pid
+local function start_volume_sub()
+    if not volume_sub_dead then return end
+    volume_sub_pid = awful.spawn.with_line_callback({ "pactl", "subscribe" }, {
+        stdout = guarded(function(line)
+            if line:find("on sink") or line:find("on source") or line:find("on server") then
+                volume_debounce:again()
+            end
+        end),
+        exit = guarded(function() volume_sub_dead = true; volume_sub_pid = nil end),
+    })
+    volume_sub_dead = type(volume_sub_pid) ~= "number"
+end
+
 local function ensure_volume_timer()
     if volume_timer then return end
-    volume_timer = gears.timer { timeout = 2, autostart = true, call_now = true, callback = guarded(update_volume) }
-    awesome.connect_signal("exit", guarded(function() volume_timer:stop() end))
+    -- keybind changes arrive instantly via volume::updated; external changes
+    -- via the pactl subscriber. the slow poll is only a safety net that also
+    -- restarts the subscriber if its process dies
+    volume_timer = gears.timer { timeout = 60, autostart = true, call_now = true, callback = guarded(function()
+        if volume_sub_dead then start_volume_sub() end
+        update_volume()
+        return true
+    end) }
+    awesome.connect_signal("exit", guarded(function()
+        volume_timer:stop()
+        if volume_sub_pid then
+            awful.spawn.with_shell("kill " .. volume_sub_pid .. " 2>/dev/null")
+            volume_sub_pid = nil
+        end
+    end))
+    start_volume_sub()
 end
 
 function M.volume(args)
