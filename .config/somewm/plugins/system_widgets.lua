@@ -222,9 +222,14 @@ end
 -- the value sits in its own textbox so the glyph–value gap is a real pixel
 -- spacing, not a space glyph of whatever width the font gives it
 local function set_stat(view, glyph, fmt, v)
+    -- the display only ever shows whole units; skip the markup+text write
+    -- (and the redraw it triggers) when the rounded value didn't move
+    local shown = math.floor(v + 0.5)
+    if view.last_shown == shown then return end
+    view.last_shown = shown
     view.glyph.markup = string.format('<span foreground="%s">%s</span>',
         stat_glyph_colour(v), glyph)
-    view.value.text = string.format(fmt, math.floor(v + 0.5))
+    view.value.text = string.format(fmt, shown)
 end
 
 local function update_resources()
@@ -237,7 +242,13 @@ local function update_resources()
         if gpu then set_stat(view.gpu, stat_glyphs.gpu, "%d%%", gpu) end
         if ram then set_stat(view.ram, stat_glyphs.ram, "%d%%", ram) end
         if ctemp and view.temp then set_stat(view.temp, stat_glyphs.temp, "%d°C", ctemp) end
-        if used and total then view.ram_tip:set_text(string.format("Memory: %.1f / %.1f GiB", used, total)) end
+        if used and total then
+            local tip = string.format("Memory: %.1f / %.1f GiB", used, total)
+            if tip ~= view.last_tip then
+                view.last_tip = tip
+                view.ram_tip:set_text(tip)
+            end
+        end
     end
 end
 
