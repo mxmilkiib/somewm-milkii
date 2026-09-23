@@ -2925,8 +2925,13 @@ awful.screen.connect_for_each_screen(function(s)
         expose = "Expose overview",
     }
     local layout_strip = wibox.layout.grid()
-    layout_strip.orientation = "horizontal"
-    layout_strip.forced_num_cols = 8
+    -- somewm's grid API: "vertical" fills each row up to column_count then
+    -- wraps to a new row ("horizontal" fills columns, bounded by row_count).
+    -- upstream's forced_num_cols/forced_num_rows do not exist here —
+    -- assigning them is a silent no-op, which is why the strip rendered as
+    -- a single line in whichever orientation was set
+    layout_strip.orientation = "vertical"
+    layout_strip.column_count = 8
     layout_strip.spacing = 2
     layout_strip.homogeneous = true
     local layout_popup = awful.popup {
@@ -2989,11 +2994,17 @@ awful.screen.connect_for_each_screen(function(s)
         layout_popup.visible = true
     end
 
-    -- wheel-changing the layout also refreshes the strip's selection
+    -- forward declarations for the middle-click grid menu (defined below);
+    -- the scroll refresh prefers it over the icon strip when it's open
+    local layout_menu_popup, show_layout_menu
+    -- wheel-changing the layout also refreshes the open popup's selection
     -- highlight so it always shows the actually selected layout
     local function refresh_layout_selection()
-        if not layout_popup.visible then return end
-        show_layout_strip()
+        if layout_menu_popup and layout_menu_popup.valid and layout_menu_popup.visible then
+            show_layout_menu()
+        elseif layout_popup.visible then
+            show_layout_strip()
+        end
     end
     local layout_changed = function(t)
         if t and t.screen == s then refresh_layout_selection() end
@@ -3003,65 +3014,133 @@ awful.screen.connect_for_each_screen(function(s)
     s.mylayoutbox:connect_signal("mouse::leave", guarded(function() layout_hide_timer:again() end))
     layout_popup:connect_signal("mouse::enter", guarded(function() layout_hide_timer:stop() end))
     layout_popup:connect_signal("mouse::leave", guarded(function() layout_hide_timer:again() end))
-    -- track the middle-click layout menu so it can be toggled
-    local layout_menu_ref = nil
+    -- middle-click layout menu: a labelled grid popup (icon left of the
+    -- name per cell), replacing the old single-column awful.menu. same grid
+    -- treatment as the hover strip — "vertical" fills each row up to
+    -- column_count then wraps (somewm renamed forced_num_cols)
+    local menu_gold = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
+    local layout_menu_grid = wibox.layout.grid()
+    layout_menu_grid.orientation = "vertical"
+    layout_menu_grid.column_count = 8
+    layout_menu_grid.spacing = 2
+    layout_menu_grid.homogeneous = true
+    layout_menu_popup = awful.popup {
+        widget = wibox.widget {
+            layout_menu_grid,
+            margins = 4,
+            widget = wibox.container.margin,
+        },
+        bg = "#000000",
+        border_width = beautiful.bar_edge_width or beautiful.border_width or 1,
+        border_color = menu_gold,
+        ontop = true,
+        visible = false,
+        shape = function(cr, w, h) gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or _hk_dpi(3)) end,
+    }
+    -- outside-click dismissal (client windows + wibar background), plus a
+    -- one-press guard so the middle-click that opened the menu doesn't get
+    -- seen by the handlers it just installed (same press event)
+    local menu_client_handler, menu_wibar_handlers
+    local menu_just_opened = false
+    local function hide_layout_menu()
+        if layout_menu_popup.valid then layout_menu_popup.visible = false end
+        if menu_client_handler then
+            client.disconnect_signal("button::press", menu_client_handler)
+            menu_client_handler = nil
+        end
+        if menu_wibar_handlers then
+            for _, e in ipairs(menu_wibar_handlers) do
+                e.wibox:disconnect_signal("button::press", e.handler)
+            end
+            menu_wibar_handlers = nil
+        end
+    end
+    show_layout_menu = function()
+        local t = s.selected_tag
+        if not t then return end
+        -- re-show while open just rebuilds the cells in place (scroll
+        -- refresh); placement and outside-click install run once
+        local opening = not layout_menu_popup.visible
+        local cur = awful.layout.get(s)
+        layout_menu_grid:reset()
+        for _, l in ipairs(awful.layout.layouts) do
+            local name = l.name or "?"
+            local cell = wibox.widget {
+                {
+                    {
+                        image = beautiful["layout_" .. name],
+                        forced_width = 24,
+                        forced_height = 24,
+                        resize = true,
+                        widget = wibox.widget.imagebox,
+                    },
+                    {
+                        text = name,
+                        font = font_utils.FONT_INFO,
+                        align = "left",
+                        valign = "center",
+                        widget = wibox.widget.textbox,
+                    },
+                    spacing = 4,
+                    layout = wibox.layout.fixed.horizontal,
+                },
+                border_width = l == cur and (beautiful.bar_edge_width or 3) or 0,
+                border_color = menu_gold,
+                bg = l == cur and "#62399755" or "#000000",
+                fg = "#FFFFFF",
+                widget = wibox.container.background,
+            }
+            cell:buttons(gears.table.join(awful.button({}, 1, function()
+                awful.layout.set(l, t)
+                hide_layout_menu()
+            end)))
+            awful.tooltip { objects = { cell }, text = layout_labels[name] or name, font = beautiful.menu_font }
+            layout_menu_grid:add(cell)
+        end
+        -- force size computation before placement, same fix as the strip
+        -- (construction-time 1x1 geometry would misposition the popup)
+        layout_menu_popup:_apply_size_now(false)
+        if not opening then return end
+        awful.placement.next_to(layout_menu_popup, {
+            preferred_positions = "bottom",
+            preferred_anchors = "middle",
+            geometry = mouse.current_widget_geometry,
+        })
+        layout_menu_popup.visible = true
+        menu_just_opened = true
+        gears.timer.delayed_call(function() menu_just_opened = false end)
+        -- buttons 4-7 are the scrollwheel — scrolling is not an outside
+        -- click (the layoutbox wheel cycles layouts while the menu stays up)
+        menu_client_handler = guarded(function(_, _, _, btn)
+            if (not btn or btn <= 3) and not menu_just_opened then hide_layout_menu() end
+        end)
+        client.connect_signal("button::press", menu_client_handler)
+        menu_wibar_handlers = {}
+        for sc in screen do
+            if sc.mywibox then
+                local wh = guarded(function(_, _, _, btn)
+                    if (not btn or btn <= 3) and not menu_just_opened then hide_layout_menu() end
+                end)
+                sc.mywibox:connect_signal("button::press", wh)
+                table.insert(menu_wibar_handlers, { wibox = sc.mywibox, handler = wh })
+            end
+        end
+    end
     s.mylayoutbox:buttons(gears.table.join(
                            awful.button({ }, 1, function () awful.layout.inc(-1) end),
                            awful.button({ }, 3, function () awful.layout.inc( 1) end),
                            awful.button({ }, 2, function ()
-                               -- toggle: if menu is open, close it
-                               if layout_menu_ref and layout_menu_ref.wibox and layout_menu_ref.wibox.visible then
-                                   layout_menu_ref:hide()
-                                   return
-                               end
-                               local t = s.selected_tag
-                               if not t then return end
-                               local cur = awful.layout.get(s)
-                               local items = {}
-                               for _, l in ipairs(awful.layout.layouts) do
-                                   local name = l.name or "?"
-                                   local label = (l == cur) and ("[" .. name .. "]") or name
-                                   local icon = beautiful["layout_" .. name]
-                                   table.insert(items, { label, function() awful.layout.set(l, t) end, icon })
-                               end
-                               local m = awful.menu({
-                                   items = items,
-                                   theme = {
-                                       height = 28,
-                                       width = 200,
-                                       font = font_utils.FONT_CLEAR,
-                                       border_color = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700",
-                                       border_width = beautiful.bar_edge_width or 2,
-                                   },
-                               })
-                               layout_popup.visible = false
-                               m:show({ coords = mouse.coords() })
-                               layout_menu_ref = m
-                               -- outside-click detection (same pattern as tag_pager popup)
-                               local m_ref = m
-                               local client_handler = function()
-                                   if m_ref.wibox and m_ref.wibox.visible then m_ref:hide() end
-                               end
-                               client.connect_signal("button::press", client_handler)
-                               local wibar_handlers = {}
-                               for sc in screen do
-                                   if sc.mywibox then
-                                       local wh = function()
-                                           if m_ref.wibox and m_ref.wibox.visible then m_ref:hide() end
-                                       end
-                                       sc.mywibox:connect_signal("button::press", wh)
-                                       table.insert(wibar_handlers, { wibox = sc.mywibox, handler = wh })
-                                   end
-                               end
-                               -- clean up handlers when menu hides
-                               local orig_hide = m_ref.hide
-                               m_ref.hide = function(self)
-                                   client.disconnect_signal("button::press", client_handler)
-                                   for _, entry in ipairs(wibar_handlers) do
-                                       entry.wibox:disconnect_signal("button::press", entry.handler)
-                                   end
-                                   layout_menu_ref = nil
-                                   orig_hide(self)
+                               -- swallow this press so the wibar outside-click
+                               -- handlers don't treat the toggling click as
+                               -- "outside" (same trick as popup_common)
+                               menu_just_opened = true
+                               gears.timer.delayed_call(function() menu_just_opened = false end)
+                               -- toggle: middle-click again closes it
+                               if layout_menu_popup.valid and layout_menu_popup.visible then
+                                   hide_layout_menu()
+                               else
+                                   layout_popup.visible = false
+                                   show_layout_menu()
                                end
                            end),
                            awful.button({ }, 4, function () awful.layout.inc(-1) end),
