@@ -692,8 +692,10 @@ local solo_super = require("plugins.solo_super")                        -- tap S
 require("plugins.shake_cursor").start()                                 -- KDE Shake Cursor: shake the pointer to enlarge it briefly
 require("somewm.layout_animation")                                      -- animated tiled-layout transitions (native frame clock)
 require("plugins.window_fx")                                            -- open fade, close shrink, focus dim, floating shadows
-require("plugins.power").start()                                        -- power mgmt: battery, profiles, idle dim/lock/suspend, lid
+require("plugins.power").start()                                        -- power mgmt: battery, profiles, lid (swayidle/swaylock disabled)
+require("plugins.screensaver").start()                                  -- idle saver: starfield + clock, then DPMS off (native idle timers)
 local battery_popup                                                    -- battery widget popup: info + power-profile switcher
+require("plugins.ipc_rescue")                                           -- re-bind IPC socket if a nested instance stole the path
 require("plugins.systray_dedup").start()                                 -- unregister SNI icons orphaned by hot-reloads (duplicate Steam tray icons)
 require("plugins.systray_icon_cache")                                    -- cache systray icon surface loads + theme lookups (fixes Quassel hover stutter)
 local volume_osd = require("plugins.volume_osd")                        -- volume keys OSD (KDE-style bar)
@@ -1406,6 +1408,8 @@ volume_popup = require("plugins.volume_popup")
 resource_popup = require("plugins.resource_popup")
 local media_popup = require("plugins.media_popup")
 local popup_common = require("plugins.popup_common")
+local ai_popup = require("plugins.ai_popup")
+local shimmer_popup = require("plugins.shimmer_popup")
 
 -- systray (SNI) context menus: same black/purple/gold style as the popups
 local _sni_gold = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
