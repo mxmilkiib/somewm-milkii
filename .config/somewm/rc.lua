@@ -3595,31 +3595,59 @@ awful.screen.connect_for_each_screen(function(s)
     end))
     -- media tooltip: shows current track + status via playerctl
     local media_tooltip = awful.tooltip({ objects = { media_widget }, text = "No player" })
-    local function update_media_tooltip()
+    local last_media_line
+    local function update_media_tooltip(text)
+        text = text and text:gsub("^%s+", ""):gsub("%s+$", "")
+        if text == last_media_line then return end
+        last_media_line = text
+        media_tooltip:set_text(text ~= "" and text or "No player")
+        -- update the playing/paused status indicator
+        local status = text and text:match("^([^|]+)") or ""
+        status = status and status:gsub("^%s+", ""):gsub("%s+$", "") or ""
+        if status == "Playing" then
+            media_status_icon.markup = "<span foreground='" .. ((beautiful.main_gold and beautiful.main_gold.base) or "#FFD700") .. "'>▶</span>"
+        elseif status == "Paused" then
+            media_status_icon.markup = "<span foreground='#AAAAAA'>⏸</span>"
+        else
+            media_status_icon.text = ""
+        end
+    end
+    -- one-shot fallback poll (also refreshes on hover and restarts --follow)
+    local function poll_media_tooltip()
         awful.spawn.easy_async(
             "bash -c 's=$(playerctl status 2>/dev/null); t=$(playerctl metadata --format \"{{title}} - {{artist}}\" 2>/dev/null); if [ -n \"$s\" ]; then echo \"$s | $t\"; fi'",
-            function(out)
-                local text = out and out:gsub("^%s+", ""):gsub("%s+$", "")
-                media_tooltip:set_text(text ~= "" and text or "No player")
-                -- update the playing/paused status indicator
-                local status = text and text:match("^([^|]+)") or ""
-                status = status and status:gsub("^%s+", ""):gsub("%s+$", "") or ""
-                if status == "Playing" then
-                    media_status_icon.markup = "<span foreground='" .. ((beautiful.main_gold and beautiful.main_gold.base) or "#FFD700") .. "'>▶</span>"
-                elseif status == "Paused" then
-                    media_status_icon.markup = "<span foreground='#AAAAAA'>⏸</span>"
-                else
-                    media_status_icon.text = ""
-                end
-            end
+            update_media_tooltip
         )
     end
-    media_widget:connect_signal("mouse::enter", guarded(update_media_tooltip))
-    track_timer(gears.timer.start_new(5, guarded(function()
-        update_media_tooltip()
+    -- event-driven status: one persistent playerctl prints on every
+    -- status/metadata change instead of polling bash+playerctl every few seconds
+    local media_follow_dead = true
+    local media_follow_pid
+    local function start_media_follow()
+        media_follow_pid = awful.spawn.with_line_callback(
+            { "playerctl", "--follow", "metadata", "--format", "{{status}} | {{title}} - {{artist}}" },
+            {
+                stdout = guarded(update_media_tooltip),
+                exit = guarded(function() media_follow_dead = true; media_follow_pid = nil end),
+            }
+        )
+        media_follow_dead = type(media_follow_pid) ~= "number"
+    end
+    track_signal(awesome, "exit", guarded(function()
+        if media_follow_pid then
+            awful.spawn.with_shell("kill " .. media_follow_pid .. " 2>/dev/null")
+            media_follow_pid = nil
+        end
+    end))
+    media_widget:connect_signal("mouse::enter", guarded(poll_media_tooltip))
+    -- slow fallback in case the --follow process dies or a player appears silently
+    track_timer(gears.timer.start_new(30, guarded(function()
+        if media_follow_dead then start_media_follow() end
+        poll_media_tooltip()
         return true
     end)))
-    update_media_tooltip()
+    start_media_follow()
+    poll_media_tooltip()
 
     local volume_widget = system_widgets.volume {
         open = function() end,  -- left-click handled by volume_popup.attach
