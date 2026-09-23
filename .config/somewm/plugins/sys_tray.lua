@@ -260,20 +260,18 @@ function M.create_widgets()
     update_battery()
     update_wifi()
 
-    -- periodic updates
+    -- periodic updates: each poll spawns subprocesses (bluetoothctl, nmcli,
+    -- and update_media's dbus-send ListNames — a full bus scan just to dim an
+    -- icon), so nothing here needs better than 30s
     gears.timer {
-        timeout = 10,
+        timeout = 30,
         autostart = true,
         callback = guarded(function()
             update_bluetooth()
             update_media()
             update_wifi()
+            update_battery()
         end),
-    }
-    gears.timer {
-        timeout = 30,
-        autostart = true,
-        callback = guarded(function() update_battery() end),
     }
 
     return {
