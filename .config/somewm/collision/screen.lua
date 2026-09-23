@@ -24,7 +24,9 @@ local pss   = capi.mouse.screen
 local last_clients = setmetatable({},{__mode="kv"})
 local last_clients_coords = {}
 
-local screens,screens_inv = util.get_ordered_screens()
+-- Screen tables are fetched lazily inside each caller: util invalidates its
+-- cache on "added"/"removed", but tables captured here at load time would go
+-- stale and leave screens_inv[ss] nil once outputs change at runtime.
 
 local function current_screen(focus)
   return (not focus) and capi.mouse.screen or (capi.client.focus and capi.client.focus.screen or capi.mouse.screen)
@@ -247,7 +249,10 @@ end
 local function next_screen(ss,dir,move)
   if capi.screen.count() == 1 then return 1 end
 
-  local scr_index = capi.screen[screens_inv[ss]].index
+  local screens,screens_inv = util.get_ordered_screens()
+  local cur = screens_inv[ss] and capi.screen[screens_inv[ss]]
+  if not cur then return ss end
+  local scr_index = cur.index
 
   if type(scr_index) == "screen" then
     scr_index = scr_index.index
@@ -323,6 +328,7 @@ end
 
 function module.select_screen(idx)
     save_cursor_position()
+    local _,screens_inv = util.get_ordered_screens()
     select_screen(screens_inv[idx],false)
     if #wiboxes == 0 then
         init_wiboxes()
