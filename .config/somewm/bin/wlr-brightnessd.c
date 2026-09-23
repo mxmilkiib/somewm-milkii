@@ -213,7 +213,8 @@ static double interpolate_position(time_t now, time_t start, time_t stop) {
 // MARK: CONTEXT
 
 struct output {
-    struct wl_output *wl_output;
+    struct wl_output *wl_output; /* NULL = free slot */
+    uint32_t global_id;          /* registry name, for removal tracking */
     char name[MAX_NAME];
     struct zwlr_gamma_control_v1 *control;
     uint32_t gamma_size;
@@ -392,9 +393,9 @@ static bool apply_gamma(struct output *o) {
 }
 
 static void apply_all_gamma(void) {
-    for (int i = 0; i < ctx.noutputs; i++) {
+    for (int i = 0; i < MAX_OUTPUTS; i++) {
         struct output *o = &ctx.outputs[i];
-        if (o->control && !o->failed)
+        if (o->wl_output && o->control && !o->failed)
             apply_gamma(o);
     }
     wl_display_flush(ctx.display);
@@ -404,8 +405,10 @@ static void apply_all_gamma(void) {
 static const struct zwlr_gamma_control_v1_listener gamma_listener;
 static void retry_failed_controls(void) {
     time_t now = time(NULL);
-    for (int i = 0; i < ctx.noutputs; i++) {
+    for (int i = 0; i < MAX_OUTPUTS; i++) {
         struct output *o = &ctx.outputs[i];
+        if (!o->wl_output)
+            continue;
         if (o->failed && o->retry_at > 0 && now >= o->retry_at) {
             o->retry_at = 0;
             o->failed = false;
@@ -417,9 +420,9 @@ static void retry_failed_controls(void) {
     }
     wl_display_roundtrip(ctx.display);
     /* apply gamma to any newly-recovered outputs */
-    for (int i = 0; i < ctx.noutputs; i++) {
+    for (int i = 0; i < MAX_OUTPUTS; i++) {
         struct output *o = &ctx.outputs[i];
-        if (o->control && !o->failed && o->ready)
+        if (o->wl_output && o->control && !o->failed && o->ready)
             apply_gamma(o);
     }
     wl_display_flush(ctx.display);
@@ -449,6 +452,35 @@ static const struct zwlr_gamma_control_v1_listener gamma_listener = {
     .gamma_size = gamma_size_cb,
     .failed = gamma_failed_cb,
 };
+
+static bool should_control(const char *name);
+
+/* create gamma controls for bound outputs that don't have one yet.
+ * called after each dispatch so outputs hotplugged after startup get
+ * controlled too; the wl_output.name event arrives in the same dispatch
+ * batch as the registry global, so the name is known by then. */
+static void ensure_gamma_controls(void) {
+    if (!ctx.gamma_manager)
+        return;
+    for (int i = 0; i < MAX_OUTPUTS; i++) {
+        struct output *o = &ctx.outputs[i];
+        if (!o->wl_output || o->control || o->failed || o->name[0] == '\0')
+            continue;
+        if (!should_control(o->name))
+            continue;
+        o->brightness = ctx.brightness;
+        for (int j = 0; j < ctx.n_no_brightness; j++) {
+            if (strcmp(o->name, ctx.no_brightness_names[j]) == 0) {
+                o->no_brightness = true;
+                break;
+            }
+        }
+        o->control = zwlr_gamma_control_manager_v1_get_gamma_control(
+            ctx.gamma_manager, o->wl_output);
+        zwlr_gamma_control_v1_add_listener(o->control, &gamma_listener, o);
+        fprintf(stderr, "wlr-brightnessd: bound gamma control for %s\n", o->name);
+    }
+}
 
 static void wl_output_name_cb(void *data, struct wl_output *wl_output, const char *name) {
     struct output *o = data;
@@ -480,20 +512,45 @@ static bool should_control(const char *name) {
 
 static void registry_global(void *data, struct wl_registry *reg, uint32_t id,
     const char *iface, uint32_t version) {
-    if (strcmp(iface, "wl_output") == 0 && ctx.noutputs < MAX_OUTPUTS) {
-        struct output *o = &ctx.outputs[ctx.noutputs];
-        memset(o, 0, sizeof(*o));
-        o->wl_output = wl_registry_bind(reg, id, &wl_output_interface,
-            version >= 4 ? 4 : version);
-        wl_output_add_listener(o->wl_output, &output_listener, o);
-        ctx.noutputs++;
+    if (strcmp(iface, "wl_output") == 0) {
+        /* find a free slot; removed outputs leave their slot free for reuse */
+        for (int i = 0; i < MAX_OUTPUTS; i++) {
+            struct output *o = &ctx.outputs[i];
+            if (o->wl_output) continue;
+            memset(o, 0, sizeof(*o));
+            o->global_id = id;
+            o->wl_output = wl_registry_bind(reg, id, &wl_output_interface,
+                version >= 4 ? 4 : version);
+            wl_output_add_listener(o->wl_output, &output_listener, o);
+            ctx.noutputs++;
+            break;
+        }
     } else if (strcmp(iface, "zwlr_gamma_control_manager_v1") == 0) {
         ctx.gamma_manager = wl_registry_bind(reg, id,
             &zwlr_gamma_control_manager_v1_interface, 1);
     }
 }
 
-static void registry_global_remove(void *data, struct wl_registry *reg, uint32_t id) {}
+static void registry_global_remove(void *data, struct wl_registry *reg, uint32_t id) {
+    for (int i = 0; i < MAX_OUTPUTS; i++) {
+        struct output *o = &ctx.outputs[i];
+        if (!o->wl_output || o->global_id != id)
+            continue;
+        /* destroy our gamma control first; the output global is already
+         * gone server-side, so this only cleans up the client proxy */
+        if (o->control)
+            zwlr_gamma_control_v1_destroy(o->control);
+        if (wl_output_get_version(o->wl_output) >= WL_OUTPUT_RELEASE_SINCE_VERSION)
+            wl_output_release(o->wl_output);
+        else
+            wl_output_destroy(o->wl_output);
+        fprintf(stderr, "wlr-brightnessd: output %s removed\n",
+            o->name[0] ? o->name : "(unnamed)");
+        memset(o, 0, sizeof(*o));
+        ctx.noutputs--;
+        break;
+    }
+}
 
 static const struct wl_registry_listener registry_listener = {
     .global = registry_global,
@@ -540,7 +597,9 @@ static void handle_client(int fd) {
             if (pct < 1) pct = 1;
             if (pct > 100) pct = 100;
             bool found = false;
-            for (int i = 0; i < ctx.noutputs; i++) {
+            for (int i = 0; i < MAX_OUTPUTS; i++) {
+                if (!ctx.outputs[i].wl_output)
+                    continue;
                 if (strncmp(ctx.outputs[i].name, rest, namelen) == 0
                     && ctx.outputs[i].name[namelen] == '\0') {
                     ctx.outputs[i].brightness = pct;
@@ -559,8 +618,10 @@ static void handle_client(int fd) {
             if (pct < 1) pct = 1;
             if (pct > 100) pct = 100;
             ctx.brightness = pct;
-            for (int i = 0; i < ctx.noutputs; i++)
-                ctx.outputs[i].brightness = pct;
+            for (int i = 0; i < MAX_OUTPUTS; i++) {
+                if (ctx.outputs[i].wl_output)
+                    ctx.outputs[i].brightness = pct;
+            }
             apply_all_gamma();
             dprintf(fd, "ok %d\n", pct);
         }
@@ -577,8 +638,10 @@ static void handle_client(int fd) {
     } else if (strcmp(buf, "get_temp") == 0) {
         dprintf(fd, "%d\n", get_temp());
     } else if (strcmp(buf, "status") == 0) {
-        for (int i = 0; i < ctx.noutputs; i++) {
+        for (int i = 0; i < MAX_OUTPUTS; i++) {
             struct output *o = &ctx.outputs[i];
+            if (!o->wl_output)
+                continue;
             dprintf(fd, "%s: gamma_size=%u failed=%d ready=%d no_brightness=%d brightness=%d\n",
                 o->name, o->gamma_size, o->failed, o->ready, o->no_brightness, o->brightness);
         }
@@ -607,7 +670,7 @@ static void signal_handler(int sig) {
 
 // MARK: EVENT LOOP
 
-static void event_loop(void) {
+static int event_loop(void) {
     while (1) {
         fd_set fds;
         FD_ZERO(&fds);
@@ -629,8 +692,14 @@ static void event_loop(void) {
             break;
         }
 
-        if (FD_ISSET(wl_fd, &fds))
-            wl_display_dispatch(ctx.display);
+        if (FD_ISSET(wl_fd, &fds)) {
+            if (wl_display_dispatch(ctx.display) < 0) {
+                fprintf(stderr, "wlr-brightnessd: wayland display disconnected, exiting\n");
+                return 1;
+            }
+            /* pick up controls for outputs bound in this dispatch (hotplug) */
+            ensure_gamma_controls();
+        }
 
         if (FD_ISSET(ctx.signal_pipe[0], &fds)) {
             int sig;
@@ -654,6 +723,7 @@ static void event_loop(void) {
             apply_all_gamma();
         }
     }
+    return 0;
 }
 
 
@@ -728,6 +798,10 @@ int main(int argc, char *argv[]) {
     else
         ctx.longitude_time_offset = -get_timezone();
 
+    /* ignore SIGPIPE so a dead display socket errors out of dispatch
+     * cleanly instead of killing the process mid-write */
+    signal(SIGPIPE, SIG_IGN);
+
     /* connect to Wayland */
     ctx.display = wl_display_connect(NULL);
     if (!ctx.display) {
@@ -745,21 +819,8 @@ int main(int argc, char *argv[]) {
 
     /* create gamma controls for matching outputs */
     wl_display_roundtrip(ctx.display); /* get output names */
-    for (int i = 0; i < ctx.noutputs; i++) {
-        struct output *o = &ctx.outputs[i];
-        if (!should_control(o->name)) continue;
-        o->brightness = ctx.brightness;
-        for (int j = 0; j < ctx.n_no_brightness; j++) {
-            if (strcmp(o->name, ctx.no_brightness_names[j]) == 0) {
-                o->no_brightness = true;
-                break;
-            }
-        }
-        o->control = zwlr_gamma_control_manager_v1_get_gamma_control(
-            ctx.gamma_manager, o->wl_output);
-        zwlr_gamma_control_v1_add_listener(o->control, &gamma_listener, o);
-    }
-    wl_display_roundtrip(ctx.display);
+    ensure_gamma_controls();
+    wl_display_roundtrip(ctx.display); /* get gamma sizes */
 
     /* setup signals and timer */
     pipe(ctx.signal_pipe);
@@ -784,8 +845,8 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "wlr-brightnessd: ready on %s (brightness=%d%%, temp=%dK, outputs=%d)\n",
         ctx.sock_path, ctx.brightness, get_temp(), ctx.noutputs);
 
-    event_loop();
+    int ret = event_loop();
 
     unlink(ctx.sock_path);
-    return 0;
+    return ret;
 }
