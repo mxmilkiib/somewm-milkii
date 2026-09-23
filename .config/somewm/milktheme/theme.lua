@@ -102,6 +102,11 @@ theme.font          = scale_font("Hack Nerd Font Mono 9")
 -- Menu font (kept with typography for consistency)
 theme.menu_font   = scale_font("Hack Nerd Font Mono 13")
 
+-- Tooltip font: larger than the wibar's 9pt base so hover hints read clearly.
+-- awful.tooltip falls back to beautiful.font when this is unset; setting it
+-- here bumps every tooltip that doesn't pass an explicit font= at the call site
+theme.tooltip_font = scale_font("Hack Nerd Font Mono 11")
+
 -- Hotkeys popup styling
 -- theme.hotkeys_font = "Hack Nerd Font 12"
 theme.hotkeys_font = theme.font
