@@ -1424,7 +1424,11 @@ beautiful.tasklist_fg_focus = beautiful.tasklist_fg_focus or "#d2b48c"  -- warm 
 -- optionally tune normal/unfocused to a neutral; leave commented if not desired
 -- beautiful.tasklist_fg_normal = beautiful.tasklist_fg_normal or "#c0c0c0"
 
--- title change logger - logs all client title changes (no duplicates)
+-- title change logger - logs all client title changes (no duplicates).
+-- disabled by default: terminals/browsers retitle on every command and tab
+-- switch, so this writes a stderr line (and allocates a fresh string) on each
+-- one. flip to true when debugging title handling
+local LOG_TITLE_CHANGES = false
 local __title_log = setmetatable({}, { __mode = 'k' }) -- weak keys to avoid leaks
 local function __log_title(c, reason)
     if not c or not c.valid then return end
@@ -1441,10 +1445,12 @@ local function __log_title(c, reason)
     end
 end
 
-client.connect_signal("property::name", guarded(function(c) __log_title(c, "name") end))
--- somewm 2.0 renamed manage/unmanage to request::manage/request::unmanage
-client.connect_signal("request::manage", guarded(function(c) __log_title(c, "init") end))
-client.connect_signal("request::unmanage", guarded(function(c) __title_log[c] = nil end))
+if LOG_TITLE_CHANGES then
+    client.connect_signal("property::name", guarded(function(c) __log_title(c, "name") end))
+    -- somewm 2.0 renamed manage/unmanage to request::manage/request::unmanage
+    client.connect_signal("request::manage", guarded(function(c) __log_title(c, "init") end))
+    client.connect_signal("request::unmanage", guarded(function(c) __title_log[c] = nil end))
+end
 
 
 -- // MARK: ICONS
