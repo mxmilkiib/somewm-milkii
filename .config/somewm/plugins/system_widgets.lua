@@ -351,45 +351,137 @@ end
 
 -- // MARK -- ai status
 
--- Single bar icon for local AI services. Coloured by overall status:
--- green when llama-server is running (main LLM available), gold when
--- other services are up but llama-server is down, grey when all are down.
--- Left-click opens the AI popup (attached in rc.lua). Polls every 3s
--- and also refreshes on the "ai::status_changed" signal emitted by the
--- popup after a toggle.
+-- Two bar icons on a purple badge: a robot for the main LLM server
+-- (llama-server) and a microphone for dictation (whisper-dictate). The
+-- robot is green while llama-server runs, the mic green only while
+-- dictation is actually recording — an idle whisper-server shows grey.
+-- Both glyphs brighten to gold on hover. Left-click opens the AI popup
+-- (attached in rc.lua). Polls every 15s and also refreshes on the
+-- "ai::status_changed" signal emitted by the popup after a toggle.
+local AI_BG = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
+local AI_GLYPH_SERVER = "\u{F06A9}"  -- nf-md-robot
+local AI_GLYPH_VOICE  = "\u{F036C}"  -- nf-md-microphone
+local AI_COLOR_ACTIVE = "#69D665"
+local AI_COLOR_IDLE   = "#CCCCCC"
+local AI_COLOR_HOVER  = "#FFD700"
+
+local function set_ai_glyph(w, glyph, color)
+    w.markup = string.format('<span foreground="%s">%s</span>', color, glyph)
+end
+
+-- old: single glyph coloured by overall status (green for llama, gold for
+--      any other service, grey when all idle)
+-- local function update_ai_status()
+--     ai_popup.query_status(guarded(function(status)
+--         local llama = status.llama == "active"
+--         local whisper = status.whisper == "active"
+--         local openwebui = status.openwebui == "active"
+--         local any = llama or whisper or openwebui
+--         local color = llama and "#69D665" or any and "#FFD700" or "#CCCCCC"
+--         for _, view in ipairs(ai_views) do
+--             view.glyph.markup = string.format('<span foreground="%s">\u{F06A9}</span>', color)
+--         end
+--     end))
+-- end
+
 local function update_ai_status()
     ai_popup.query_status(guarded(function(status)
         local llama = status.llama == "active"
-        local whisper = status.whisper == "active"
-        local openwebui = status.openwebui == "active"
-        local any = llama or whisper or openwebui
-        local color = llama and "#69D665" or any and "#FFD700" or "#AAAAAA"
+        -- the mic is a recording indicator, not a service indicator: green
+        -- only while whisper-dictate is capturing, not for an idle
+        -- whisper-server
+        local voice = status.dictate == "active"
+        local server_color = llama and AI_COLOR_ACTIVE or AI_COLOR_IDLE
+        local voice_color  = voice  and AI_COLOR_ACTIVE or AI_COLOR_IDLE
         for _, view in ipairs(ai_views) do
-            view.glyph.markup = string.format('<span foreground="%s">\u{F06A9}</span>', color)
+            view.server_color = server_color
+            view.voice_color  = voice_color
+            if not view.hovering then
+                set_ai_glyph(view.glyph_server, AI_GLYPH_SERVER, server_color)
+                set_ai_glyph(view.glyph_voice,  AI_GLYPH_VOICE,  voice_color)
+            end
+            if view.tooltip then
+                view.tooltip.text = string.format("Local AI: %s | %s",
+                    llama and "server running" or "server idle",
+                    voice and "recording" or "not recording")
+            end
         end
     end))
 end
 
 function M.ai_status(args)
     args = args or {}
-    local glyph = wibox.widget {
-        markup = '<span foreground="#AAAAAA">\u{F06A9}</span>',
+    local glyph_server = wibox.widget {
+        markup = string.format('<span foreground="%s">%s</span>', AI_COLOR_IDLE, AI_GLYPH_SERVER),
         font = font_utils.mono_size(13),
         valign = "center",
         widget = wibox.widget.textbox,
     }
-    local widget = centered(glyph)
-    ai_views[#ai_views + 1] = { glyph = glyph }
+    local glyph_voice = wibox.widget {
+        markup = string.format('<span foreground="%s">%s</span>', AI_COLOR_IDLE, AI_GLYPH_VOICE),
+        font = font_utils.mono_size(13),
+        valign = "center",
+        widget = wibox.widget.textbox,
+    }
+    -- distinctive purple badge: the AI widget is the only bar icon with a
+    -- permanent coloured background, set flush so the purple band spans the
+    -- full height of the bar, setting it apart from the outline-only hover
+    -- borders on the other info widgets. No place wrapper and no rounded
+    -- shape: anything that shrink-wraps the badge vertically turns the
+    -- purple back into a floating pill.
+    -- old: rounded pill — top/bottom = dpi(1) margins + rounded_rect shape,
+    --      returned via centered(badge)
+    local badge = wibox.widget {
+        {
+            {
+                glyph_server,
+                glyph_voice,
+                spacing = dpi(4),
+                layout = wibox.layout.fixed.horizontal,
+            },
+            left = dpi(5), right = dpi(5),
+            widget = wibox.container.margin,
+        },
+        bg = AI_BG,
+        widget = wibox.container.background,
+    }
+    local widget = badge
+    local view = {
+        glyph_server = glyph_server,
+        glyph_voice  = glyph_voice,
+        server_color = AI_COLOR_IDLE,
+        voice_color  = AI_COLOR_IDLE,
+        hovering     = false,
+    }
+    -- hover: brighten both glyphs to gold; restore status colours on leave
+    widget:connect_signal("mouse::enter", function()
+        view.hovering = true
+        set_ai_glyph(glyph_server, AI_GLYPH_SERVER, AI_COLOR_HOVER)
+        set_ai_glyph(glyph_voice,  AI_GLYPH_VOICE,  AI_COLOR_HOVER)
+    end)
+    widget:connect_signal("mouse::leave", function()
+        view.hovering = false
+        set_ai_glyph(glyph_server, AI_GLYPH_SERVER, view.server_color)
+        set_ai_glyph(glyph_voice,  AI_GLYPH_VOICE,  view.voice_color)
+    end)
+    ai_views[#ai_views + 1] = view
     widget:buttons(gears.table.join(
         awful.button({}, 1, args.open or function() end)
     ))
     if not ai_timer then
-        ai_timer = gears.timer { timeout = 3, autostart = true, call_now = true,
+        -- toggles inside the popup emit ai::status_changed for an instant
+        -- refresh; the poll only needs to catch services changed elsewhere
+        ai_timer = gears.timer { timeout = 15, autostart = true, call_now = true,
             callback = guarded(update_ai_status) }
         awesome.connect_signal("exit", guarded(function() ai_timer:stop() end))
         awesome.connect_signal("ai::status_changed", guarded(update_ai_status))
     end
-    awful.tooltip { objects = { widget }, text = "Local AI services" }
+    local tip = awful.tooltip { objects = { widget }, text = "Local AI services" }
+    view.tooltip = tip
+    return widget
+end
+
+
     return widget
 end
 
