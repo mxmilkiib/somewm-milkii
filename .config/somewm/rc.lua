@@ -3356,7 +3356,7 @@ awful.screen.connect_for_each_screen(function(s)
 
     -- // MARK: --wibox
     -- create the wibox
-    s.mywibox = awful.wibar({ position = "top", screen = s, height = 32 })
+    s.mywibox = awful.wibar({ position = "top", screen = s, height = 30 })
 
     -- add widgets to the wibox
     -- create systray with base size from theme
@@ -3665,6 +3665,12 @@ awful.screen.connect_for_each_screen(function(s)
     local keyboard_widget = system_widgets.keyboard()
     local show_desktop_widget = system_widgets.show_desktop(s)
     local resource_widgets = system_widgets.resources()
+    local ai_widget = system_widgets.ai_status {
+        open = function() end,  -- left-click handled by ai_popup.attach
+    }
+    local shimmer_widget = system_widgets.shimmer {
+        open = function() end,  -- left-click handled by shimmer_popup.attach
+    }
     -- left-click a cpu/gpu/ram/temp widget for the history-graphs popup;
     -- clicking any of them again (or Escape/right-click) closes it.
     -- attaches happen on the centered_bar wrappers below so the padding counts
@@ -3674,25 +3680,64 @@ awful.screen.connect_for_each_screen(function(s)
 
     -- previous notification center widget creation: none
 
-    local function centered_bar(widget, left, right, top)
-        return wibox.container.margin({
+    -- purple outline drawn around a widget's padded box while the pointer is
+    -- over it, so one can see which info widget the mouse is aiming at. the
+    -- border lives on a background container wrapping the whole padded area;
+    -- mouse::enter/leave propagate up from the inner widget through the margin
+    -- to this wrapper, and button::press likewise propagates so the popup
+    -- attach handlers (connected to the returned wrapper) still fire.
+    local hover_border_color = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
+    local function hover_border(widget)
+        local bg = wibox.widget {
+            widget,
+            border_width = 0,
+            widget = wibox.container.background,
+        }
+        bg:connect_signal("mouse::enter", guarded(function()
+            bg.border_width = 1
+            bg.border_color = hover_border_color
+        end))
+        bg:connect_signal("mouse::leave", guarded(function()
+            bg.border_width = 0
+        end))
+        return bg
+    end
+
+    local function centered_bar(widget, left, right, top, hover)
+        local margin = wibox.container.margin({
             widget,
             halign = "center",
             valign = "center",
             widget = wibox.container.place,
         }, left or 0, right or 0, top or 0, 0)
+        return hover and hover_border(margin) or margin
     end
 
     -- popup widgets are attached to their padded centered_bar wrappers so a
     -- click anywhere in a widget's area (padding included) toggles it
-    local cpu_bar        = centered_bar(resource_widgets.cpu, 11, 4, 2)
-    local gpu_bar        = centered_bar(resource_widgets.gpu, 4, 4, 2)
-    local ram_bar        = centered_bar(resource_widgets.ram, 4, 2, 2)
-    local temp_bar       = centered_bar(resource_widgets.temp, 4, 2, 2)
-    local battery_bar    = centered_bar(battery_widget, 2, 0, 1)
-    local brightness_bar = centered_bar(brightness_widget, 2, 4, 2)
-    local volume_bar     = centered_bar(volume_widget, 2, 3, 2)
-    local media_bar      = centered_bar(media_widget, 2, 0, 2)
+    local cpu_bar        = centered_bar(resource_widgets.cpu, 6, 3, 2)
+    local gpu_bar        = centered_bar(resource_widgets.gpu, 3, 3, 2)
+    local ram_bar        = centered_bar(resource_widgets.ram, 3, 3, 2)
+    local temp_bar       = centered_bar(resource_widgets.temp, 3, 6, 2)
+    -- thermal blink target: the temp widget, not the battery (the original
+    -- code flashed battery_widget by mistake)
+    temp_blink_widget = temp_bar
+    -- system resources share one hover box: mousing over any of cpu/gpu/ram/temp
+    -- outlines the whole group, since they open the same resource popup
+    local resource_group = hover_border(wibox.widget {
+        cpu_bar, gpu_bar, ram_bar, temp_bar,
+        layout = wibox.layout.fixed.horizontal,
+    })
+    local battery_bar    = centered_bar(battery_widget, 3, 6, 2, true)
+    local brightness_bar = centered_bar(brightness_widget, 3, 3, 2, true)
+    local volume_bar     = centered_bar(volume_widget, 3, 6, 2, true)
+    local media_bar      = centered_bar(media_widget, 3, 6, 2, true)
+    -- the AI badge's purple spans the full bar height, so it gets a bare
+    -- margin instead of centered_bar's place wrapper (a place would shrink
+    -- it back to glyph height and centre the pill vertically)
+    -- old: local ai_bar      = centered_bar(ai_widget, 4, 4, 2, true)
+    local ai_bar         = hover_border(wibox.container.margin(ai_widget, 4, 4, 0, 0))
+    local shimmer_bar    = centered_bar(shimmer_widget, 4, 4, 2, true)
 
     resource_popup.attach(cpu_bar)
     resource_popup.attach(gpu_bar)
@@ -3702,6 +3747,8 @@ awful.screen.connect_for_each_screen(function(s)
     brightness_popup.attach(brightness_bar)
     volume_popup.attach(volume_bar)
     media_popup.attach(media_bar)
+    ai_popup.attach(ai_bar)
+    shimmer_popup.attach(shimmer_bar)
 
     s.mywibox:setup {
         layout = wibox.layout.align.horizontal,
@@ -3724,18 +3771,17 @@ awful.screen.connect_for_each_screen(function(s)
         s.mytasklist, -- middle: expands to fill available space
         { -- right widgets
             layout = wibox.layout.fixed.horizontal,
-            cpu_bar,
-            gpu_bar,
-            ram_bar,
-            temp_bar,
+            ai_bar,
+            resource_group,
             battery_bar,
             brightness_bar,
             volume_bar,
             media_bar,
+            shimmer_bar,
             -- centered_bar(keyboard_widget, 0, 0, 0),
             -- notifications sit immediately to the left of the SNI tray; its
             -- side spacing lives inside the widget so the padding is clickable
-            centered_bar(notification_toggle_widget, 0, 0, 2),
+            centered_bar(notification_toggle_widget, 0, 0, 2, true),
             centered_bar(mysystray, s == screen.primary and 2 or 1, 1, 1),
             -- full-height clock: a plain margin lets fixed.horizontal stretch
             -- the purple background to bar height (centered_bar's place would
@@ -3752,7 +3798,7 @@ awful.screen.connect_for_each_screen(function(s)
     s.myaltwibox = awful.wibar({
         position = "top",
         screen = s,
-        height = 32,
+        height = 30,
         visible = false
     })
 
