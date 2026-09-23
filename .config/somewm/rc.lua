@@ -675,10 +675,13 @@ local layout_widetile = require("layouts.widetile")                   -- Wide-ma
 local layout_expose = require("layouts.expose")                       -- Exposé-style overview
 
 local shimmer = require("plugins.shimmer")                        -- Unified shimmer & border animation system
--- shimmer is loaded and configured but the animation timer is NOT started
--- automatically; call shimmer.start() (or the toggle keybinding) to enable.
--- This keeps CPU load at zero until the user opts in.
+-- shimmer starts automatically a moment after boot (see post_startup_init
+-- below); the toggle keybinding or shimmer.stop() disables it.
 local SHIMMER_ENABLED = false
+
+-- textbox drop-in that takes per-frame colour spans instead of Pango markup,
+-- so animation ticks skip the markup parser entirely
+local shimmer_text = require("plugins.shimmer.textwidget")
 
 local mode_glyphs = require("plugins.mode_glyphs")                    -- stable tasklist mode glyphs
 local hotkey_dupe_detector = require("plugins.hotkey_dupe_detector")  -- duplicate hotkey detection
@@ -734,7 +737,15 @@ shimmer.configure({
 -- minimal startup timer for shimmer - just enough for tasklist widgets to initialize
 shimmer.post_startup_init()  -- defer small init to module (tasklist mapping + focused init)
 
--- toggle shimmer animation on/off (off by default for CPU load)
+-- shimmer on by default: deferred so the post-startup tasklist widget mapping
+-- lands before the first animation ticks
+gears.timer.start_new(0.3, guarded(function()
+    SHIMMER_ENABLED = true
+    shimmer.start()
+    return false
+end))
+
+-- toggle shimmer animation on/off
 local function toggle_shimmer()
     SHIMMER_ENABLED = not SHIMMER_ENABLED
     if SHIMMER_ENABLED then
@@ -3171,7 +3182,7 @@ awful.screen.connect_for_each_screen(function(s)
                 {
                     {
                         id = 'text_role',
-                        widget = wibox.widget.textbox,
+                        widget = shimmer_text,
                     },
                     left = TAGLIST_MARGIN_H,
                     right = TAGLIST_MARGIN_H,
@@ -3259,7 +3270,7 @@ awful.screen.connect_for_each_screen(function(s)
                                     widget = wibox.widget.textbox,
                                 }
                             },
-                            { id = 'text_role', widget = wibox.widget.textbox },
+                            { id = 'text_role', widget = shimmer_text },
                         },
                     },
                 },
