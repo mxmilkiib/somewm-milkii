@@ -2356,7 +2356,7 @@ awesomesubmenu = {
 
 -- Power submenu: session actions that used to need a terminal
 powersubmenu = {
-    {"Lock", "swaylock -f", menu_action_icons.lock},
+    {"Screensaver", "echo 'require(\"plugins.screensaver\").preview()' | awesome-client", menu_action_icons.lock},
     {"Suspend", "systemctl suspend", menu_action_icons.suspend},
     {"Hibernate", "systemctl hibernate", menu_action_icons.suspend},
     {"Logout", session_id and ("loginctl terminate-session " .. session_id) or "loginctl terminate-user $USER", menu_action_icons.logout},
@@ -4946,10 +4946,11 @@ session.init()
 -- PolicyKit authentication agent (polkit-kde-agent works standalone outside Plasma)
 awful.spawn.with_shell("pgrep -u $USER -f polkit-kde-authentication-agent-1 > /dev/null || /usr/lib/polkit-kde-authentication-agent-1")
 
--- Idle and lock management is now owned by plugins/power.lua: swayidle is
--- launched there with a dim -> lock -> suspend chain whose timeouts adapt to
--- AC/battery. Old inline launch kept commented for reference (note: it also
--- used `.[].name` but wlopm -j's field is `output`, so DPMS-off never fired).
+-- Idle handling is owned by plugins/screensaver.lua: native idle timers drive
+-- a starfield saver then awesome.dpms_off(); swayidle/swaylock are disabled
+-- (plugins/power.lua M.idle stages all nil). Old inline launch kept commented
+-- for reference (note: it also used `.[].name` but wlopm -j's field is
+-- `output`, so DPMS-off never fired).
 -- awful.spawn.with_shell("pgrep -u $USER -x swayidle > /dev/null || swayidle -w before-sleep 'swaylock -f' timeout 600 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --off {}' resume 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --on {}'")
 
 -- Night light + software brightness (wlr-brightnessd replaces wlsunset)
@@ -4976,7 +4977,8 @@ awful.spawn.with_shell("pgrep -u $USER -x blueman-applet > /dev/null || blueman-
 
 -- KDE Connect tray icon (kdeconnectd itself is autostarted by /etc/xdg/autostart)
 -- pgrep -f needed: kdeconnect-indicator is longer than 15 chars
-awful.spawn.with_shell("pgrep -u $USER -f kdeconnect-indicator > /dev/null || kdeconnect-indicator")
+-- [k] bracket trick: pattern matches the running process but not this shell's own cmd line
+awful.spawn.with_shell("pgrep -u $USER -f '[k]deconnect-indicator' > /dev/null || kdeconnect-indicator")
 
 -- Battery icon (native wibar widget; cbatticon/xfce4-power-manager are XEmbed-only with no SNI host on somewm)
 
