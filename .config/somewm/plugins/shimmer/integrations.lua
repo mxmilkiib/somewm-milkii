@@ -50,16 +50,8 @@ local shimmer_config = {
     }
 }
 
--- static text cache: cache markup for unchanging content
--- cache: stable text -> ready-made markup; avoids regen for static labels
-local static_text_cache = {}
-local STATIC_CACHE_MAX_ENTRIES = 100  -- limit cache size
-local static_cache_stats = { hits = 0, misses = 0, size = 0 }
-
--- generate cache key for static text
-local function get_static_cache_key(text, phase_offset, per_letter)
-    return text .. "|" .. (phase_offset or 0) .. "|" .. tostring(per_letter or false)
-end
+-- the static text cache was removed: it keyed markup by text, but shimmer
+-- colours advance every frame, so cached entries froze the animation forever
 
 -- attach hover wiring for a tag widget
 function M.attach_tag_hover(tag_widget, tag)
@@ -106,63 +98,18 @@ end
 -- forward declaration for get_animation function
 local get_animation
 
--- get or generate cached markup for static text
-local function get_cached_static_markup(text, phase_offset, options)
-    if not text or text == "" then return "" end
-    
-    local animation = require("plugins.shimmer.animation")
-    local per_letter = animation.should_use_per_character(options)
-    local cache_key = get_static_cache_key(text, phase_offset, per_letter)
-    
-    -- check cache first
-    if static_text_cache[cache_key] then
-        static_cache_stats.hits = static_cache_stats.hits + 1
-        return static_text_cache[cache_key]
-    end
-    
-    -- cache miss - generate markup
-    static_cache_stats.misses = static_cache_stats.misses + 1
-    local markup = animation.get_letter_shimmer_markup(text, phase_offset, options)
-    
-    -- store in cache
-    static_text_cache[cache_key] = markup
-    static_cache_stats.size = static_cache_stats.size + 1
-    
-    -- cleanup if cache gets too large
-    if static_cache_stats.size > STATIC_CACHE_MAX_ENTRIES then
-        -- clear 25% of cache entries
-        local new_cache = {}
-        local count = 0
-        local keep_count = math_floor(STATIC_CACHE_MAX_ENTRIES * 0.75)
-        
-        for key, value in pairs(static_text_cache) do
-            if count < keep_count then
-                new_cache[key] = value
-                count = count + 1
-            end
-        end
-        
-        static_text_cache = new_cache
-        static_cache_stats.size = count
-    end
-    
-    return markup
-end
-
 -- // MARK: WIDGET TRACKING
 
 -- widget registration and reference storage
+-- weak keys on client/widget tables so dead objects don't accumulate
 local registered_widgets = {
     taglist = {},  -- [screen_index][tag] = widget
     tasklist = {},
-    tasklist_clients = {},  -- [client] = text_widget for direct shimmer updates
+    tasklist_clients = setmetatable({}, { __mode = "k" }),  -- [client] = text_widget
     launcher = nil
 }
 
-local last_applied_colors = {}  -- [text_widget] = {color, title}
-
--- widget update locks to prevent race conditions between multiple callbacks
-local widget_update_locks = {}  -- [text_widget] = true when locked
+local last_applied_colors = setmetatable({}, { __mode = "k" })  -- [text_widget] = {color, title}
 
 -- // MARK: MODULE DEPENDENCIES
 
@@ -253,6 +200,7 @@ local function apply_color_safe(text_widget, title, color, is_shimmer)
         else
             text_widget:set_markup(markup)
         end
+        text_widget.__last_shimmer_markup = markup
         last_applied_colors[text_widget] = {color = color, title = title}
     end
     
@@ -276,9 +224,10 @@ local function protect_widget_from_interference(widget)
         if last_applied_colors[self] then
             return -- ignore external plain text calls
         end
+        self.__last_shimmer_markup = nil  -- plain text invalidates markup tracking
         return self.__original_set_text(self, text)
     end
-    
+
     -- override set_markup to only allow shimmer markup
     -- only accept colored markup while shimmer controls the widget
     widget.set_markup = function(self, markup)
@@ -291,6 +240,7 @@ local function protect_widget_from_interference(widget)
                 return -- ignore external plain markup calls
             end
         end
+        self.__last_shimmer_markup = markup
         return self.__original_set_markup(self, markup)
     end
 end
@@ -533,41 +483,26 @@ function M.handle_tag_hover(tag_widget, tag, mode)
     end
 end
 
--- // MARK: STATIC TEXT CACHE MANAGEMENT
-
--- clear static text cache (useful when changing presets or settings)
-function M.clear_static_cache()
-    static_text_cache = {}
-    static_cache_stats = { hits = 0, misses = 0, size = 0 }
-end
-
--- get static cache statistics
-function M.get_static_cache_stats()
-    local hit_rate = static_cache_stats.hits + static_cache_stats.misses > 0 
-        and (static_cache_stats.hits / (static_cache_stats.hits + static_cache_stats.misses) * 100) or 0
-    return {
-        hits = static_cache_stats.hits,
-        misses = static_cache_stats.misses,
-        size = static_cache_stats.size,
-        hit_rate = string_format("%.1f%%", hit_rate),
-        max_entries = STATIC_CACHE_MAX_ENTRIES
-    }
-end
-
 -- // MARK: WIDGET UPDATE SYSTEM
+
+-- reusable batch buffer for update_widgets; cleared after each pass
+local batch_updates = {}
 
 -- update all registered widgets with current shimmer on each animation frame application
 -- batch updates for focused screen; one redraw to keep things smooth
 function M.update_widgets()
     local animation = get_animation()
-    
+
+    -- signal handlers also land here; do nothing while the timer is stopped
+    if not animation.is_running() then return end
+
     -- visibility culling: only process tags on currently focused screen
     local focused_screen = awful.screen.focused()
     if not focused_screen then return end  -- no focused screen, skip all updates
-    
-    -- batch collection: collect all widget updates before applying
-    local batch_updates = {}
-    
+
+    local tag_options = { phase_offset = shimmer_config.tag_phase }
+    local task_options = { phase_offset = shimmer_config.task_phase }
+
     -- collect tag widget updates for focused screen
     local screen_index = focused_screen.index
     local tag_widgets = registered_widgets.taglist[screen_index]
@@ -578,13 +513,17 @@ function M.update_widgets()
                 local text_widget = widget:get_children_by_id('text_role')[1]
                 if text_widget and not text_widget.__hover_lock and not text_widget.__hover_fade_lock then
                     if tag.selected then
-                        -- use static cache for selected tag (tag names rarely change)
-                        local options = {
-                            phase_offset = shimmer_config.tag_phase
-                            -- removed per_letter override to allow global toggle
-                        }
-                        local markup = get_cached_static_markup(tag.name or "", options.phase_offset, options)
-                        table.insert(batch_updates, {widget = text_widget, markup = markup})
+                        -- fresh frame each tick so the selected tag animates;
+                        -- the old static cache froze its colours at first build
+                        if text_widget.set_shimmer_frame then
+                            local raw, spans, sig = animation.get_letter_shimmer_spans(tag.name or "", tag_options.phase_offset, tag_options)
+                            if raw then
+                                table.insert(batch_updates, {widget = text_widget, frame = {raw, spans, sig}})
+                            end
+                        else
+                            local markup = animation.get_letter_shimmer_markup(tag.name or "", tag_options.phase_offset, tag_options)
+                            table.insert(batch_updates, {widget = text_widget, markup = markup})
+                        end
                     else
                         -- collect plain text for unselected tags
                         table.insert(batch_updates, {widget = text_widget, markup = tag.name or ""})
@@ -593,7 +532,7 @@ function M.update_widgets()
             end
         end
     end
-    
+
     -- collect focused client update if it's on the focused screen
     local focused = client.focus
     if focused and focused.screen == focused_screen then
@@ -601,48 +540,56 @@ function M.update_widgets()
         if text_widget and not text_widget.__hover_lock then
             local title = focused.name or focused.class or ""
             if title ~= "" then
-                local options = {
-                    phase_offset = shimmer_config.task_phase
-                    -- removed per_letter override to allow global toggle
-                }
-                local markup = animation.get_letter_shimmer_markup(title, options.phase_offset, options)
-                table.insert(batch_updates, {widget = text_widget, markup = markup})
+                if text_widget.set_shimmer_frame then
+                    local raw, spans, sig = animation.get_letter_shimmer_spans(title, task_options.phase_offset, task_options)
+                    if raw then
+                        table.insert(batch_updates, {widget = text_widget, frame = {raw, spans, sig}})
+                    end
+                else
+                    local markup = animation.get_letter_shimmer_markup(title, task_options.phase_offset, task_options)
+                    table.insert(batch_updates, {widget = text_widget, markup = markup})
+                end
             end
         end
     end
-    
-    -- collect launcher update if registered (use static cache - 'gear' text never changes)
+
+    -- launcher ('gear' glyph) goes through apply_to_widget so the
+    -- per_letter=false option is honoured with a single solid-colour span
     if registered_widgets.launcher then
-        local launcher_options = {
+        animation.apply_to_widget(registered_widgets.launcher, 'gear', nil, {
             phase_offset = shimmer_config.launcher_phase,
             per_letter = false  -- force solid color for launcher
-        }
-        local markup = get_cached_static_markup('gear', launcher_options.phase_offset, launcher_options)
-        table.insert(batch_updates, {widget = registered_widgets.launcher, markup = markup})
+        })
     end
-    
-    -- batch apply: apply all collected updates in single pass
-    for _, update in ipairs(batch_updates) do
+
+    -- batch apply: apply all collected updates in single pass, skipping
+    -- widgets whose content is unchanged (spares the Pango re-parse)
+    for i, update in ipairs(batch_updates) do
         local widget = update.widget
         local markup = update.markup
-        
-        -- use original method if widget is protected, otherwise use normal method
-        if widget.__original_set_markup then
-            widget.__original_set_markup(widget, markup)
-        else
-            widget:set_markup(markup)
+        local frame = update.frame
+        batch_updates[i] = nil
+
+        if frame then
+            -- span-capable widget: set_shimmer_frame deduplicates via sig
+            widget:set_shimmer_frame(frame[1], frame[2], frame[3])
+        elseif markup ~= widget.__last_shimmer_markup then
+            -- use original method if widget is protected, otherwise use normal method
+            if widget.__original_set_markup then
+                widget.__original_set_markup(widget, markup)
+            else
+                widget:set_markup(markup)
+            end
+            widget.__last_shimmer_markup = markup
         end
     end
-    
-    -- single tasklist redraw after all updates are complete
+
+    -- single tasklist redraw after all updates are complete; updates above are
+    -- synchronous so the redraw can be flagged directly
     if focused and focused.screen == focused_screen then
         local focused_tasklist = registered_widgets.tasklist[screen_index]
         if focused_tasklist then
-            -- defer redraw slightly to allow batch updates to complete first
-            gears.timer.start_new(0.01, guarded(function()
-                focused_tasklist:emit_signal("widget::redraw_needed")
-                return false
-            end))
+            focused_tasklist:emit_signal("widget::redraw_needed")
         end
     end
 end

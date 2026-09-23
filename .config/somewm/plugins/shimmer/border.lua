@@ -43,6 +43,9 @@ local border_loop = 1.0
 local border_step = 1.0
 local border_paused = false
 local border_timer = nil
+-- set by M.start()/M.stop(); when false, focus/unfocus handlers leave
+-- border_color alone entirely so the theme keeps control
+local border_enabled = false
 local border_params = {
     speed = 0.15,         -- animation timer interval (default smoothness 1)
     step_size = 1.0,      -- animation step increment (default smoothness 1)
@@ -104,7 +107,13 @@ end
 
 -- start border animation timer
 function M.start()
-    if border_timer then return end
+    border_enabled = true
+    -- the tick callback self-stops the timer when no client is focused, so an
+    -- existing-but-stopped timer must be restarted rather than treated as running
+    if border_timer then
+        if not border_timer.started then border_timer:start() end
+        return
+    end
     
     border_timer = gears.timer {
         timeout = border_params.speed,
@@ -183,6 +192,7 @@ end
 
 -- stop border animation and cleanup timer
 function M.stop()
+    border_enabled = false
     if border_timer then 
         border_timer:stop()
         border_timer = nil
@@ -257,6 +267,7 @@ end
 
 function M.get_state()
     return {
+        enabled = border_enabled,
         running = border_timer and border_timer.started or false,
         paused = border_paused,
         index = border_loop
@@ -269,6 +280,8 @@ generate_default_palette()
 -- set up client signals
 if not signals_connected then
 client.connect_signal("focus", guarded(function(c)
+    -- shimmer disabled: leave the border to the theme handlers
+    if not border_enabled then return end
     border_loop = 0.0
     border_step = border_params.step_size or 0.5
     local palette = get_active_palette()
@@ -276,11 +289,17 @@ client.connect_signal("focus", guarded(function(c)
         c.border_color = palette[1]
         awesome.emit_signal("shimmer::border_tick", border_loop, #palette, palette[1])
     end
-    if not border_paused then M.start() end
+    -- revive a self-stopped timer on refocus; never create one here so that
+    -- the off-by-default state survives focus events
+    if border_timer and not border_timer.started and not border_paused then
+        border_timer:start()
+    end
 end))
 
 client.connect_signal("unfocus", guarded(function(c)
-    c.border_color = "#00000000"
+    if border_enabled then
+        c.border_color = "#00000000"
+    end
 end))
 
 -- listen for external pause/resume requests (e.g., DnD)

@@ -614,9 +614,22 @@ end
 M.set_mode = animation.set_mode
 M.get_mode = animation.get_mode
 M.get_color = animation.get_color
-M.start = animation.start
-M.stop = animation.stop
-M.restart = animation.restart
+M.start = function()
+    animation.start()
+    border.start()
+    awesome.emit_signal("shimmer::state_changed", true)
+end
+M.stop = function()
+    animation.stop()
+    border.stop()
+    awesome.emit_signal("shimmer::state_changed", false)
+end
+M.restart = function()
+    animation.restart()  -- also resets step counters
+    border.stop()
+    border.start()
+    awesome.emit_signal("shimmer::state_changed", true)
+end
 M.is_running = animation.is_running or function() return false end
 M.toggle = function()
     if M.is_running() then M.stop() else M.start() end
@@ -678,21 +691,8 @@ M.get_hsv_cache_stats = animation.get_hsv_cache_stats
 M.set_target_fps = animation.set_target_fps
 M.get_target_fps = animation.get_target_fps
 
--- // MARK: STATIC TEXT CACHE MANAGEMENT
--- static text caching for unchanging content
-M.clear_static_cache = integrations.clear_static_cache
-M.get_static_cache_stats = integrations.get_static_cache_stats
-
-
--- // MARK: PALETTE PRE-COMPUTATION MANAGEMENT
--- palette pre-computation for performance
-M.clear_precomputed_palettes = animation.clear_precomputed_palettes
-M.get_palette_precompute_stats = animation.get_palette_precompute_stats
-
--- // MARK: CHARACTER CLASSIFICATION CACHE MANAGEMENT
--- character type classification caching
-M.clear_char_class_cache = animation.clear_char_class_cache
-M.get_char_class_stats = animation.get_char_class_stats
+-- the static-text, precomputed-palette and char-classification caches were
+-- removed: the first froze animations, the latter two served dead code paths
 
 -- // MARK: MARKUP TEMPLATE CACHE MANAGEMENT
 -- markup template caching for performance
@@ -795,11 +795,9 @@ function M.configure(config)
         integrations.set_per_letter_modes(config.per_letter)
     end
     
-    -- start systems
-    animation.start()
-    border.start()
-    
-    -- setup focus signal handling to ensure shimmer on focus changes
+    -- no auto-start: timers only run via M.start()/the toggle keybinding so
+    -- the off-by-default promise in rc.lua actually holds. signal handlers
+    -- below still apply one-shot colors so focused text avoids white flash.
     integrations.setup_focus_signals()
 end
 

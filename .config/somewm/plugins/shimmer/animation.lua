@@ -21,6 +21,7 @@
 -- - should_use_per_character() determines final per-character state
 
 local gears = require("gears")
+local gfs = require("gears.filesystem")
 local bit = require("bit")
 -- local awful = require("awful")  -- unused
 local guarded = require("error_guard")
@@ -53,6 +54,10 @@ local shine_step = 0.1    -- separate shine progression timing
 -- global override for max animated characters (nil = use preset defaults)
 local global_max_animated_chars = nil
 
+-- forward declaration: the preset table is defined below but referenced by
+-- the config setters above it
+local shimmer_config
+
 -- character selection strategies for max_animated_chars feature
 local function select_animated_chars(text_length, max_chars, strategy, text_seed)
     strategy = strategy or "wave"
@@ -68,7 +73,9 @@ local function select_animated_chars(text_length, max_chars, strategy, text_seed
     end
     
     local selected = {}
-    local rotation_offset = math_floor(char_animation_rotation_step * text_length)
+    -- rotate one position per step; multiplying by text_length first made the
+    -- offset always a multiple of n, so the selection never actually rotated
+    local rotation_offset = math_floor(char_animation_rotation_step) % text_length
     
     if strategy == "wave" then
         -- rolling wave of animated characters
@@ -135,11 +142,8 @@ end
 
 -- // MARK: PERFORMANCE CACHING SYSTEMS
 -- high-performance caching to avoid expensive per-character processing
--- cache: text+phase bucket -> full markup; bounded to avoid memory bloat
-local markup_cache = {}
-local PHASE_GRANULARITY = 0.1  -- cache every N animation steps for smooth transitions
-local MAX_CACHE_ENTRIES = 256  -- prevent memory bloat
-local cache_stats = { hits = 0, misses = 0, size = 0 }
+-- legacy full-markup cache removed: its keys bucketed the animation steps,
+-- but the steps advance every tick so entries could never be reused
 
 -- HSV lookup table for shine-modified colors
 -- cache: base color + quantized shine -> final color; quantization boosts hit rate
@@ -167,8 +171,8 @@ local string_format, string_byte, string_sub, string_len =
       string.format, string.byte, string.sub, string.len
 
 -- cached table functions for performance
-local table_concat, table_insert, table_unpack =
-      table.concat, table.insert, unpack or table.unpack
+local table_concat, table_insert =
+      table.concat, table.insert
 
 -- additional mathematical constants
 local THREE_QUARTERS = 0.75
@@ -219,21 +223,6 @@ local function hsv_to_rgb(h, s, v)
     return string_format("#%02x%02x%02x", r, g, b)
 end
 
--- generate deterministic hash for cache key
-local function calculate_markup_hash(text, colour_prog_mode, shine_prog_mode, base_phase)
-    -- create hash from text content and animation parameters
-    local hash_string = text .. "|" .. (colour_prog_mode or "") .. "|" .. (shine_prog_mode or "") 
-    local hash = 0
-    for i = 1, #hash_string do
-        hash = (hash * 31 + string_byte(hash_string, i)) % 1000000
-    end
-    -- add phase bucket to hash - include both color and shine steps for better animation sensitivity
-    local phase_bucket = math.floor((base_phase or 0) / PHASE_GRANULARITY)
-    local color_bucket = math.floor(color_step / PHASE_GRANULARITY)
-    local shine_bucket = math.floor(shine_step / PHASE_GRANULARITY)
-    return hash .. "_" .. phase_bucket .. "_" .. color_bucket .. "_" .. shine_bucket
-end
-
 -- quantize shine modifier to reduce cache variants
 local function quantize_shine(modifier)
     return math.floor((modifier or 1.0) / SHINE_QUANTIZATION + 0.5) * SHINE_QUANTIZATION
@@ -243,7 +232,7 @@ end
 local function get_shine_modified_color(base_color, shine_modifier)
     -- quantize modifier for better cache hits
     local quantized_modifier = quantize_shine(shine_modifier)
-    local cache_key = base_color .. "_" .. string.format("%.1f", quantized_modifier)
+    local cache_key = base_color .. "_" .. quantized_modifier
     
     -- check cache first
     if hsv_shine_cache[cache_key] then
@@ -280,26 +269,6 @@ local function get_shine_modified_color(base_color, shine_modifier)
     end
     
     return result
-end
-
--- cleanup old cache entries to prevent memory growth
-local function cleanup_markup_cache()
-    if cache_stats.size <= MAX_CACHE_ENTRIES then return end
-    
-    -- simple LRU: clear half the cache when limit exceeded
-    local new_cache = {}
-    local count = 0
-    local keep_count = math_floor(MAX_CACHE_ENTRIES / 2)
-    
-    for key, value in pairs(markup_cache) do
-        if count < keep_count then
-            new_cache[key] = value
-            count = count + 1
-        end
-    end
-    
-    markup_cache = new_cache
-    cache_stats.size = count
 end
 
 -- import constants from constants module (proper way)
@@ -568,9 +537,14 @@ end
 
 -- character animation control functions
 function M.set_max_animated_chars(count)
-    local preset_config = get_preset_config(shimmer_mode)
-    if preset_config then
-        preset_config.max_animated_chars = count
+    -- write through to the real preset; get_preset_config returns a fresh
+    -- normalized table each call, so writing to it would be lost
+    local preset = shimmer_config[shimmer_mode]
+    if not preset then return end
+    if preset.animation then
+        preset.animation.max_animated_chars = count
+    else
+        preset.max_animated_chars = count
     end
 end
 
@@ -584,9 +558,12 @@ function M.get_max_animated_chars()
 end
 
 function M.set_char_selection_strategy(strategy)
-    local preset_config = get_preset_config(shimmer_mode)
-    if preset_config then
-        preset_config.char_selection_strategy = strategy
+    local preset = shimmer_config[shimmer_mode]
+    if not preset then return end
+    if preset.animation then
+        preset.animation.char_selection_strategy = strategy
+    else
+        preset.char_selection_strategy = strategy
     end
 end
 
@@ -694,7 +671,7 @@ local preset_list = {
 -- // MARK: PRESET CONF
 -- normalized shimmer preset structure
 -- each preset defines: color generation, progression modes, and animation settings
-local shimmer_config = {
+shimmer_config = {
     -- PRESETS ORDERED BY ACCESS SEQUENCE (matching preset_list)
     
     -- no animation - static gold color
@@ -1295,6 +1272,87 @@ local shimmer_config = {
 }
 
 
+-- // MARK: USER PRESETS
+-- presets saved from the popup live in the XDG data dir rather than the
+-- config tree, so they survive dotfiles churn without polluting the repo
+local USER_PRESETS_PATH = gfs.get_xdg_data_home() .. "/somewm/shimmer_user_presets.lua"
+local user_presets = {}
+
+-- serialize a plain-data table (strings/numbers/booleans/nested tables) back
+-- to Lua source; keys are sorted so the file diffs cleanly between saves
+local function serialize_value(v)
+    local t = type(v)
+    if t == "string" then return string.format("%q", v) end
+    if t == "number" or t == "boolean" then return tostring(v) end
+    if t ~= "table" then return "nil" end
+    local parts = {}
+    for k, val in pairs(v) do
+        local key = (type(k) == "string" and k:match("^[%a_][%w_]*$"))
+            and k or "[" .. serialize_value(k) .. "]"
+        parts[#parts + 1] = key .. " = " .. serialize_value(val)
+    end
+    table.sort(parts)
+    return "{ " .. table.concat(parts, ", ") .. " }"
+end
+
+local function persist_user_presets()
+    gfs.make_parent_directories(USER_PRESETS_PATH)
+    local f = io.open(USER_PRESETS_PATH, "w")
+    if not f then return end
+    f:write("return " .. serialize_value(user_presets) .. "\n")
+    f:close()
+end
+
+local function register_preset(name, preset)
+    shimmer_config[name] = preset
+    for _, n in ipairs(preset_list) do
+        if n == name then return end
+    end
+    preset_list[#preset_list + 1] = name
+end
+
+do
+    local ok, loaded = pcall(dofile, USER_PRESETS_PATH)
+    if ok and type(loaded) == "table" then
+        for name, preset in pairs(loaded) do
+            user_presets[name] = preset
+            register_preset(name, preset)
+        end
+    end
+end
+
+-- snapshot the effective current configuration into a normalized preset
+-- named `name`, persist it to USER_PRESETS_PATH, and register it in the
+-- selectable list. returns the name on success
+function M.save_preset_as(name)
+    local cur = get_preset_config(shimmer_mode)
+    if not cur then return nil end
+    local preset = {
+        color_gen = {
+            type = cur.color_gen_type,
+            params = gears.table.clone(cur.color_gen_params, true),
+            color = cur.static_color,
+        },
+        progression = {
+            color_mode = current_colour_prog_mode,
+            shine_mode = current_shine_prog_mode,
+        },
+        animation = {
+            speed = cur.speed,
+            color_speed = color_speed_multiplier,
+            shine_speed = shine_speed_multiplier,
+            per_character_default = cur.per_character_default,
+            max_animated_chars = global_max_animated_chars or cur.max_animated_chars,
+            char_selection_strategy = M.get_char_selection_strategy(),
+        },
+    }
+    user_presets[name] = preset
+    register_preset(name, preset)
+    persist_user_presets()
+    return name
+end
+
+
 -- extract configuration values from normalized preset structure
 function get_preset_config(preset_name)
     local preset = shimmer_config[preset_name or shimmer_mode]
@@ -1316,6 +1374,9 @@ function get_preset_config(preset_name)
             color_speed = preset.animation.color_speed or 1.0,
             shine_speed = preset.animation.shine_speed or 1.0,
             per_character_default = preset.animation.per_character_default,
+            -- character limiting (was silently dropped, so the limit never applied)
+            max_animated_chars = preset.animation.max_animated_chars,
+            char_selection_strategy = preset.animation.char_selection_strategy,
             -- legacy compatibility
             use_gold_shine = preset.color_gen.type == "hsv",
             gold_shine_opts = preset.color_gen.type == "hsv" and preset.color_gen.params or nil,
@@ -1340,14 +1401,9 @@ function get_dynamic_timer_interval()
     if not effective_multiplier or effective_multiplier <= 0 then
         return base_fps_interval
     end
-    return base_fps_interval / effective_multiplier
+    -- floor at 1/120s so stacked multipliers can't run the tick arbitrarily fast
+    return math_max(base_fps_interval / effective_multiplier, 1 / 120)
 end
-
--- // MARK: CHARACTER CLASSIFICATION CACHING
--- cache character type classification to avoid repeated regex operations
-local char_class_cache = {}
-local CHAR_CLASS_MAX_ENTRIES = 512  -- limit cache size
-local char_class_stats = { hits = 0, misses = 0, size = 0 }
 
 -- // MARK: MARKUP TEMPLATE CACHING
 -- cache complete markup templates with placeholders for common patterns
@@ -1492,11 +1548,14 @@ local shine_calc_cache_stats = { hits = 0, misses = 0, size = 0 }
 local SHINE_TIME_QUANTIZATION = 0.5  -- quantize time for better cache hits
 
 
--- // MARK: DIFFERENTIAL MARKUP GENERATION
--- track character-level changes to avoid full markup regeneration
+-- // MARK: PER-TEXT MARKUP CACHE
+-- per-text derived data cached across frames: escaped characters, whitespace
+-- flags, colour phase offsets and shine modifiers. the animation steps advance
+-- every tick so per-character change detection can never hit; instead the span
+-- list is rebuilt each frame and only the step-independent data is cached.
 local differential_markup_cache = {}
-local char_state_cache = {}  -- stores per-character color/shine state
-local DIFF_CACHE_MAX_ENTRIES = 1024
+local differential_cache_size = 0
+local DIFF_CACHE_MAX_ENTRIES = 256
 local diff_cache_stats = { hits = 0, misses = 0, updates = 0, full_rebuilds = 0 }
 
 -- precomputed lookup tables for common calculations
@@ -1632,22 +1691,9 @@ local function get_shine_cache_key(char_index, total_chars, shine_prog_mode, tex
                         text_seed or "0", quantized_time)
 end
 
--- generate differential markup cache key
-local function get_diff_cache_key(text, colour_prog_mode, shine_prog_mode)
-    return string_format("diff_%s_%s_%s", text, colour_prog_mode or "off", shine_prog_mode or "off")
-end
-
 -- forward declarations for functions used in differential markup
 local get_color_progression_offset
 local get_shine_progression_modifier
-
--- calculate character state hash for change detection
-local function get_char_state_hash(char_index, total_chars, colour_prog_mode, shine_prog_mode, text_seed, color_step, shine_step)
-    -- simplified hash based on animation steps only to avoid circular dependencies
-    local quantized_color = math.floor(color_step * 10 + 0.5) / 10
-    local quantized_shine = math.floor(shine_step * 10 + 0.5) / 10
-    return string.format("%.1f_%.2f_%d_%s_%s", quantized_color, quantized_shine, char_index, colour_prog_mode or "off", shine_prog_mode or "off")
-end
 
 -- cached helper function wrapper
 local function cached_helper_call(func_name, func, ...)
@@ -1724,52 +1770,12 @@ cached_shine_calculation = function(char_index, total_chars, shine_prog_mode, te
     return modifier
 end
 
--- // MARK: PALETTE PRE-COMPUTATION SYSTEM
--- pre-compute all palettes to avoid runtime generation overhead
-local precomputed_palettes = {}
-local PALETTE_PRECOMPUTE_LENGTH = 256  -- standard palette size
-
--- pre-compute palette for a given preset configuration
-local function precompute_palette(preset_name, config)
-    if precomputed_palettes[preset_name] then return end
-    
-    local palette
-    if config.color_gen_type == "gradient" or config.gradient then
-        local g = config.color_gen_params or config.gradient
-        palette = makeSineGradient(PALETTE_PRECOMPUTE_LENGTH, g)
-    elseif config.color_gen_type == "hsv" or config.use_gold_shine then
-        local params = config.color_gen_params or config.gold_shine_opts
-        palette = makeGoldShinePalette(PALETTE_PRECOMPUTE_LENGTH, params)
-    elseif config.color_gen_type == "static" then
-        palette = {}
-        for i = 1, PALETTE_PRECOMPUTE_LENGTH do
-            palette[i] = config.static_color or base_gold
-        end
-    end
-    
-    if palette then
-        precomputed_palettes[preset_name] = palette
-    end
-end
-
--- initialize all palettes at startup
-local function init_all_palettes()
-    for preset_name, config in pairs(shimmer_config) do
-        local preset_config = get_preset_config(preset_name)
-        if preset_config then
-            precompute_palette(preset_name, preset_config)
-        end
-    end
-end
+-- // MARK: PALETTE GENERATION
+-- palettes build lazily via ensure_palette on first use; pre-computing every
+-- preset up front stalled the main loop by ~100-800ms on each start
 
 local function ensure_palette(mode_name)
-    -- try precomputed palette first
-    if precomputed_palettes[mode_name] then
-        color_palettes[mode_name] = precomputed_palettes[mode_name]
-        return color_palettes[mode_name]
-    end
-    
-    -- fallback to existing runtime generation
+    -- reuse the already-generated palette if present
     if color_palettes[mode_name] then
         return color_palettes[mode_name]
     end
@@ -1928,6 +1934,10 @@ get_color_progression_offset = function(char_index, total_chars, colour_prog_mod
     
     local offset = 0
     
+    -- LUTs are built lazily by start(); callers that render before start
+    -- (e.g. the popup's per-mode previews) would otherwise hit nil tables
+    init_helper_optimization()
+
     -- try strategy pattern first with caching
     local strategy = progression_strategies[colour_prog_mode]
     if strategy then
@@ -2222,186 +2232,233 @@ local function generate_letter_markup_internal(text, base_phase_offset, options)
     return result
 end
 
--- differential markup generation - only update changed characters
-local function generate_differential_markup(text, base_phase_offset, options)
-    if not text or text == "" then return "" end
-    
-    options = options or {}
-    local colour_prog_mode = options.colour_prog_mode or current_colour_prog_mode
-    local shine_prog_mode = options.shine_prog_mode or current_shine_prog_mode
-    local mode_name = shimmer_mode
-    
-    local cache_key = get_diff_cache_key(text, colour_prog_mode, shine_prog_mode)
-    local cached_entry = differential_markup_cache[cache_key]
-    
-    -- validate UTF-8 and escape XML before processing
-    local escaped_text = gears.string.xml_escape(text)
-    local safe_text = escaped_text:gsub("[\128-\255]+", function(match) return "*" end)
-    
-    local chars = get_temp_table()
-    for i = 1, safe_text:len() do
+-- per-character markup generation backed by the per-text cache
+-- animation steps advance every tick, so change detection per character can
+-- never hit; instead each frame pays one color sample and one span format per
+-- character, and everything step-independent lives in the cache entry.
+
+-- single-character XML escaping without a gsub call per char
+local xml_escape_char = {
+    ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;",
+    ['"'] = "&quot;", ["'"] = "&apos;",
+}
+
+-- build a per-text cache entry: collapse multi-byte UTF-8 runs to a
+-- placeholder, then split into single-byte characters, escaping each one
+-- individually. escaping the whole string first (e.g. "&" -> "&amp;") and then
+-- splitting by byte tears multi-character entities apart across separate
+-- <span> tags, which Pango's markup parser rejects.
+local function build_text_entry(text)
+    local safe_text = text:gsub("[\128-\255]+", "*")
+    local n = safe_text:len()
+    local chars = {}
+    local raw_chars = {}
+    local is_space = {}
+    for i = 1, n do
         local char = safe_text:sub(i, i)
-        if char ~= "" then
-            table.insert(chars, char)
-        end
+        chars[i] = xml_escape_char[char] or char
+        raw_chars[i] = char
+        is_space[i] = char:match("%s") ~= nil
     end
-    
     -- generate text seed for consistent random phases
     local text_seed = 0
     for i = 1, #text do
         text_seed = text_seed + string.byte(text, i)
     end
-    
-    -- character animation limiting - determine which characters should animate
-    local preset_config = get_preset_config(shimmer_mode)
-    local max_animated_chars = M.get_max_animated_chars()  -- use function to get global override if set
-    local char_selection_strategy = preset_config and preset_config.char_selection_strategy or "wave"
-    local animated_chars = select_animated_chars(#chars, max_animated_chars, char_selection_strategy, text_seed)
-    
-    local changed_chars = {}
-    local needs_full_rebuild = false
-    
-    -- check if we have a cached entry
-    if cached_entry and cached_entry.char_states and #cached_entry.char_states == #chars then
-        -- check each character for changes
-        for i, char in ipairs(chars) do
-            local current_state = get_char_state_hash(i, #chars, colour_prog_mode, shine_prog_mode, text_seed, color_step, shine_step)
-            if cached_entry.char_states[i] ~= current_state then
-                changed_chars[i] = true
-            end
-        end
-        diff_cache_stats.hits = diff_cache_stats.hits + 1
-    else
-        -- no cache or length mismatch - full rebuild needed
-        needs_full_rebuild = true
-        diff_cache_stats.misses = diff_cache_stats.misses + 1
-    end
-    
-    local colored_chars = get_temp_table()
-    local char_states = get_temp_table()
-    
-    if needs_full_rebuild then
-        -- full rebuild - generate all characters
-        diff_cache_stats.full_rebuilds = diff_cache_stats.full_rebuilds + 1
-        
-        for i, char in ipairs(chars) do
-            char_states[i] = get_char_state_hash(i, #chars, colour_prog_mode, shine_prog_mode, text_seed, color_step, shine_step)
-            
-            if char:match("%s") then
-                colored_chars[i] = char
-            elseif animated_chars[i] then
-                -- animate this character
-                local letter_phase = (base_phase_offset or 0) + get_color_progression_offset(i, #chars, colour_prog_mode, text_seed)
-                local color = M.get_color(mode_name, #chars, letter_phase)
-                local shine_mod = get_shine_progression_modifier(i, #chars, shine_prog_mode, text_seed)
-                color = get_shine_modified_color(color, shine_mod)
-                colored_chars[i] = string.format('<span foreground="%s">%s</span>', color, char)
-            else
-                -- static character - use base color without animation
-                local static_color = M.get_color(mode_name, #chars, 0)  -- phase 0 for static
-                colored_chars[i] = string.format('<span foreground="%s">%s</span>', static_color, char)
-            end
-        end
-    else
-        -- differential update - only regenerate changed characters
-        diff_cache_stats.updates = diff_cache_stats.updates + 1
-        
-        -- start with cached markup spans
-        for i = 1, #chars do
-            colored_chars[i] = cached_entry.markup_spans[i]
-            char_states[i] = cached_entry.char_states[i]
-        end
-        
-        -- update only changed characters
-        for i, char in ipairs(chars) do
-            if changed_chars[i] then
-                char_states[i] = get_char_state_hash(i, #chars, colour_prog_mode, shine_prog_mode, text_seed, color_step, shine_step)
-                
-                if char:match("%s") then
-                    colored_chars[i] = char
-                elseif animated_chars[i] then
-                    -- animate this character
-                    local letter_phase = (base_phase_offset or 0) + get_color_progression_offset(i, #chars, colour_prog_mode, text_seed)
-                    local color = M.get_color(mode_name, #chars, letter_phase)
-                    local shine_mod = get_shine_progression_modifier(i, #chars, shine_prog_mode, text_seed)
-                    color = get_shine_modified_color(color, shine_mod)
-                    colored_chars[i] = string_format('<span foreground="%s">%s</span>', color, char)
-                else
-                    -- static character - use base color without animation
-                    local static_color = M.get_color(mode_name, #chars, 0)  -- phase 0 for static
-                    colored_chars[i] = string_format('<span foreground="%s">%s</span>', static_color, char)
-                end
-            end
-        end
-    end
-    
-    -- update cache with new state
-    differential_markup_cache[cache_key] = {
-        markup_spans = {table_unpack(colored_chars)},  -- copy array
-        char_states = {table_unpack(char_states)}      -- copy array
-    }
-    
-    -- cleanup cache if too large
-    local cache_size = 0
-    for _ in pairs(differential_markup_cache) do cache_size = cache_size + 1 end
-    if cache_size > DIFF_CACHE_MAX_ENTRIES then
-        local new_cache = {}
-        local count = 0
-        local keep_count = math_floor(DIFF_CACHE_MAX_ENTRIES * THREE_QUARTERS)
-        for key, value in pairs(differential_markup_cache) do
-            if count < keep_count then
-                new_cache[key] = value
-                count = count + 1
-            end
-        end
-        differential_markup_cache = new_cache
-    end
-    
-    local result = table_concat(colored_chars)
-    return_temp_table(chars)
-    return_temp_table(colored_chars)
-    return_temp_table(char_states)
-    return result
+    return { raw = safe_text, n = n, chars = chars, raw_chars = raw_chars,
+             is_space = is_space, text_seed = text_seed }
 end
 
--- per-letter shimmer function with differential markup generation
--- prevents white flashes by ensuring atomic markup updates
-function M.get_letter_shimmer_markup(text, base_phase_offset, options)
-    if not text or text == "" then return "" end
-    
+-- core frame generator: returns the sanitised text plus a flat span list
+-- {text_run, color_hex_or_false, ...} and a signature covering colours and
+-- run boundaries so callers can skip identical frames cheaply
+local function generate_spans(text, base_phase_offset, options)
+    if not text or text == "" then return nil end
+
     options = options or {}
     local colour_prog_mode = options.colour_prog_mode or current_colour_prog_mode
     local shine_prog_mode = options.shine_prog_mode or current_shine_prog_mode
-    
-    -- use differential markup generation for optimal performance
-    local markup = generate_differential_markup(text, base_phase_offset, options)
-    return markup
-    
-    --[[ DISABLED CACHING - was preventing animation
-    -- generate cache key from text and animation parameters
-    local cache_key = calculate_markup_hash(text, colour_prog_mode, shine_prog_mode, base_phase_offset)
-    
-    -- check cache first for instant return (prevents any flash)
-    if markup_cache[cache_key] then
-        cache_stats.hits = cache_stats.hits + 1
-        return markup_cache[cache_key]
+    local mode_name = shimmer_mode
+
+    -- fetch or build the per-text entry
+    local entry = differential_markup_cache[text]
+    if entry then
+        diff_cache_stats.hits = diff_cache_stats.hits + 1
+    else
+        entry = build_text_entry(text)
+        diff_cache_stats.misses = diff_cache_stats.misses + 1
+        diff_cache_stats.full_rebuilds = diff_cache_stats.full_rebuilds + 1
+        if differential_cache_size >= DIFF_CACHE_MAX_ENTRIES then
+            -- evict ~25% of entries once the cap is reached
+            local new_cache = {}
+            local count = 0
+            local keep_count = math_floor(DIFF_CACHE_MAX_ENTRIES * THREE_QUARTERS)
+            for key, value in pairs(differential_markup_cache) do
+                if count < keep_count then
+                    new_cache[key] = value
+                    count = count + 1
+                end
+            end
+            differential_markup_cache = new_cache
+            differential_cache_size = count
+        end
+        differential_markup_cache[text] = entry
+        differential_cache_size = differential_cache_size + 1
     end
-    
-    -- cache miss - generate new markup
-    cache_stats.misses = cache_stats.misses + 1
-    local markup = generate_letter_markup_internal(text, base_phase_offset, options)
-    
-    -- store in cache atomically
-    markup_cache[cache_key] = markup
-    cache_stats.size = cache_stats.size + 1
-    
-    -- periodic cleanup to prevent memory bloat
-    if cache_stats.size > MAX_CACHE_ENTRIES then
-        cleanup_markup_cache()
+
+    local n = entry.n
+    local raw_chars = entry.raw_chars
+    local is_space = entry.is_space
+    local text_seed = entry.text_seed
+
+    -- colour progression offsets are step-independent; rebuild only when the
+    -- mode or the colour-disabled state changes
+    local colour_disabled = color_speed_multiplier == 0
+        or SHIMMER_DISABLE_COLOR or SHIMMER_SHINE_ONLY
+    if entry.phase_mode ~= colour_prog_mode or entry.phase_disabled ~= colour_disabled then
+        if colour_disabled then
+            entry.phase_off = nil
+        else
+            local offsets = entry.phase_off or {}
+            for i = 1, n do
+                offsets[i] = get_color_progression_offset(i, n, colour_prog_mode, text_seed)
+            end
+            entry.phase_off = offsets
+        end
+        entry.phase_mode = colour_prog_mode
+        entry.phase_disabled = colour_disabled
+        diff_cache_stats.updates = diff_cache_stats.updates + 1
     end
-    
-    return markup
-    --]]
+    local phase_off = entry.phase_off
+
+    -- shine modifiers rebuild when the quantized shine step advances or the
+    -- mode/disabled state changes; disabled shine stores no array at all
+    local shine_disabled = shine_speed_multiplier == 0 or SHIMMER_DISABLE_SHINE
+        or shine_prog_mode == "shine_prog_off"
+    if shine_disabled then
+        entry.shine_mods = nil
+        entry.shine_mode = shine_prog_mode
+        entry.shine_qtime = nil
+    else
+        local shine_qtime = math_floor(shine_step / SHINE_TIME_QUANTIZATION + 0.5) * SHINE_TIME_QUANTIZATION
+        if entry.shine_mode ~= shine_prog_mode or entry.shine_qtime ~= shine_qtime then
+            local mods = entry.shine_mods or {}
+            for i = 1, n do
+                mods[i] = calculate_shine_modifier_internal(i, n, shine_prog_mode, text_seed, shine_step)
+            end
+            entry.shine_mods = mods
+            entry.shine_mode = shine_prog_mode
+            entry.shine_qtime = shine_qtime
+            diff_cache_stats.updates = diff_cache_stats.updates + 1
+        end
+    end
+    local shine_mods = entry.shine_mods
+
+    -- character animation limiting - rebuild the selection only when the
+    -- effective rotation epoch or the limiting config changes
+    local animated_chars
+    local max_animated_chars = M.get_max_animated_chars()  -- use function to get global override if set
+    if max_animated_chars and max_animated_chars > 0 and max_animated_chars < n then
+        local preset_config = get_preset_config(shimmer_mode)
+        local strategy = preset_config and preset_config.char_selection_strategy or "wave"
+        -- step*100 granularity covers every strategy's rotation input
+        local anim_epoch = math_floor(char_animation_rotation_step * 100)
+        if entry.anim_epoch ~= anim_epoch or entry.anim_strategy ~= strategy
+            or entry.anim_max ~= max_animated_chars then
+            entry.animated = select_animated_chars(n, max_animated_chars, strategy, text_seed)
+            entry.anim_epoch = anim_epoch
+            entry.anim_strategy = strategy
+            entry.anim_max = max_animated_chars
+            diff_cache_stats.updates = diff_cache_stats.updates + 1
+        end
+        animated_chars = entry.animated
+    else
+        entry.animated = nil
+    end
+
+    -- emit spans: one entry per animated character, one entry per run of
+    -- consecutive non-animated characters (they all share static_color).
+    -- whitespace runs carry color=false so direct-render widgets skip them.
+    local spans = {}
+    local sig_parts = get_temp_table()
+    local base_phase = base_phase_offset or 0
+    local static_color  -- computed lazily on the first non-animated char
+    local out, k = 0, 0
+    local i = 1
+
+    while i <= n do
+        if is_space[i] then
+            out = out + 2
+            spans[out - 1] = raw_chars[i]
+            spans[out] = false
+            i = i + 1
+        elseif not animated_chars or animated_chars[i] then
+            local letter_phase = base_phase + (phase_off and phase_off[i] or 0)
+            local color = M.get_color(mode_name, n, letter_phase)
+            local shine_mod = shine_mods and shine_mods[i] or 1.0
+            if shine_mod ~= 1.0 then
+                color = get_shine_modified_color(color, shine_mod)
+            end
+            out = out + 2
+            spans[out - 1] = raw_chars[i]
+            spans[out] = color
+            k = k + 1
+            sig_parts[k] = color .. i
+            i = i + 1
+        else
+            -- static character run - single entry covering i..j-1
+            if not static_color then
+                static_color = M.get_color(mode_name, n, 0)  -- phase 0 for static
+            end
+            local j = i + 1
+            while j <= n and not is_space[j] and not animated_chars[j] do
+                j = j + 1
+            end
+            out = out + 2
+            spans[out - 1] = table_concat(raw_chars, "", i, j - 1)
+            spans[out] = static_color
+            k = k + 1
+            sig_parts[k] = static_color .. i .. j
+            i = j
+        end
+    end
+
+    local sig = table_concat(sig_parts, "|")
+    return_temp_table(sig_parts)
+    return entry.raw, spans, sig
+end
+
+-- escape a raw span run for markup output; single bytes go through the
+-- lookup table, longer runs through the shared escaper
+local function escape_span_text(t)
+    if #t == 1 then return xml_escape_char[t] or t end
+    return gears.string.xml_escape(t)
+end
+
+-- per-letter shimmer markup formatted from the span list
+-- prevents white flashes by ensuring atomic markup updates
+function M.get_letter_shimmer_markup(text, base_phase_offset, options)
+    local raw, spans = generate_spans(text, base_phase_offset, options or {})
+    if not raw then return "" end
+    local parts = get_temp_table()
+    for i = 1, #spans, 2 do
+        local t, color = spans[i], spans[i + 1]
+        if color then
+            parts[#parts + 1] = string_format('<span foreground="%s">%s</span>', color, escape_span_text(t))
+        else
+            parts[#parts + 1] = t
+        end
+    end
+    local result = table_concat(parts)
+    return_temp_table(parts)
+    return result
+end
+
+-- span-list variant for direct-render widgets (plugins.shimmer.textwidget):
+-- returns the sanitised text, the flat {text, color|false, ...} span list,
+-- and a signature that changes whenever colours or run boundaries change
+function M.get_letter_shimmer_spans(text, base_phase_offset, options)
+    return generate_spans(text, base_phase_offset, options or {})
 end
 
 
@@ -2433,9 +2490,7 @@ function M.set_mode(mode)
         
         -- clear all cached palettes to force regeneration with new preset
         color_palettes = {}
-        -- also clear static text cache in integrations (cache key omits preset)
-        pcall(function() get_integrations().clear_static_cache() end)
-        
+
         -- clear markup cache to prevent stale cached markup with old preset
         M.clear_markup_cache()
         
@@ -2450,12 +2505,14 @@ function M.set_mode(mode)
             end
         end
         
-        -- defer border notification to prevent cascading calls
-        -- gears.timer.start_new(0.1, function()
-            local border = require("plugins.shimmer.border")
-            border.on_mode_changed(mode)
-            return false
-        -- end)
+        -- border notification is synchronous; the old 0.1s deferral timer is
+        -- commented out but its stray `return false` would end the block early
+        local border = require("plugins.shimmer.border")
+        border.on_mode_changed(mode)
+
+        -- preset name feeds the wibar status tooltip; emit from here so
+        -- direct animation.cycle_preset callers are covered too
+        awesome.emit_signal("shimmer::state_changed", M.is_running())
     end
 end
 
@@ -2529,8 +2586,8 @@ end
 function M.start()
     if shimmer_timer then return end
     
-    -- initialize precomputed palettes and helper optimization for performance
-    init_all_palettes()
+    -- helper LUTs are cheap; palettes build lazily per preset via
+    -- ensure_palette so enabling shimmer doesn't stall the main loop
     init_helper_optimization()
     
     -- create timer with dynamic interval based on speed multipliers
@@ -2604,10 +2661,9 @@ end
 function M.apply_to_widget(widget, text, status_symbols, options)
     if not widget or not widget.set_markup then return end
     if widget.__hover_lock or widget.__hover_fade_lock then return end
-    -- lazy-start the animation timer if not already running
-    if not shimmer_timer or not shimmer_timer.started then
-        M.start()
-    end
+    -- note: no lazy-start here. this runs from signal handlers that fire even
+    -- while shimmer is disabled; starting the timer from here would defeat
+    -- the off state and keep the per-frame churn alive.
     
     local display_text = (status_symbols or "") .. (text or "")
     if display_text == "" then return end
@@ -2617,21 +2673,24 @@ function M.apply_to_widget(widget, text, status_symbols, options)
     
     -- use enhanced per-character logic
     local use_per_character = M.should_use_per_character(options)
-    
+
+    -- direct-render widgets take the span list and skip Pango markup parsing
+    if use_per_character and widget.set_shimmer_frame then
+        local raw, spans, sig = M.get_letter_shimmer_spans(display_text, phase_offset, options)
+        if raw then widget:set_shimmer_frame(raw, spans, sig) end
+        return
+    end
+
+    local markup
+
     if use_per_character then
-        local markup = M.get_letter_shimmer_markup(display_text, phase_offset, options)
-        -- use original method if widget is protected, otherwise use normal method
-        if widget.__original_set_markup then
-            widget.__original_set_markup(widget, markup)
-        else
-            widget:set_markup(markup)
-        end
+        markup = M.get_letter_shimmer_markup(display_text, phase_offset, options)
     else
         -- old solid branch (kept for reference): applied base color only
         --[[
         local solid_phase = (options and options.use_phase_when_solid) and (options.phase_offset or 0) or 0
         local shimmer_color = M.get_color(nil, #display_text, solid_phase)
-        local markup = '<span foreground="' .. shimmer_color .. '">' .. 
+        local markup = '<span foreground="' .. shimmer_color .. '">' ..
                        gears.string.xml_escape(display_text) .. '</span>'
         if widget.__original_set_markup then
             widget.__original_set_markup(widget, markup)
@@ -2653,18 +2712,24 @@ function M.apply_to_widget(widget, text, status_symbols, options)
         local mid_index = math.max(1, math.floor(#display_text / 2))
         local shine_prog_mode = (options and options.shine_prog_mode) or current_shine_prog_mode
         local shine_mod = get_shine_progression_modifier(mid_index, #display_text, shine_prog_mode, text_seed)
-        -- use cached HSV conversion for solid colors too
-        shimmer_color = get_shine_modified_color(shimmer_color, shine_mod)
-
-        local markup = '<span foreground="' .. shimmer_color .. '">' .. 
-                       gears.string.xml_escape(display_text) .. '</span>'
-        -- use original method if widget is protected, otherwise use normal method
-        if widget.__original_set_markup then
-            widget.__original_set_markup(widget, markup)
-        else
-            widget:set_markup(markup)
+        if shine_mod ~= 1.0 then
+            -- use cached HSV conversion for solid colors too
+            shimmer_color = get_shine_modified_color(shimmer_color, shine_mod)
         end
+
+        markup = '<span foreground="' .. shimmer_color .. '">' ..
+                 gears.string.xml_escape(display_text) .. '</span>'
     end
+
+    -- skip the write (and the Pango re-parse it triggers) when nothing changed
+    if markup == widget.__last_shimmer_markup then return end
+    -- use original method if widget is protected, otherwise use normal method
+    if widget.__original_set_markup then
+        widget.__original_set_markup(widget, markup)
+    else
+        widget:set_markup(markup)
+    end
+    widget.__last_shimmer_markup = markup
 end
 
 function M.get_palette(mode_name)
@@ -2691,8 +2756,7 @@ function M.set_gradient_params(mode_name, params)
         -- backward compatibility with legacy structure
         preset.gradient = params
     end
-    -- clear caches so new gradient takes effect immediately
-    precomputed_palettes[mode_name] = nil
+    -- clear cached palette so the new gradient takes effect immediately
     color_palettes[mode_name] = nil
     
     return true
@@ -2707,20 +2771,13 @@ function M.clear_palette_cache(mode_name)
 end
 
 -- cache management and debugging functions
+-- the per-text cache replaced the old step-bucketed markup cache
 function M.clear_markup_cache()
-    markup_cache = {}
-    cache_stats = { hits = 0, misses = 0, size = 0 }
+    M.clear_diff_cache()
 end
 
 function M.get_cache_stats()
-    local hit_rate = cache_stats.hits + cache_stats.misses > 0 
-        and (cache_stats.hits / (cache_stats.hits + cache_stats.misses) * 100) or 0
-    return {
-        hits = cache_stats.hits,
-        misses = cache_stats.misses,
-        size = cache_stats.size,
-        hit_rate = string.format("%.1f%%", hit_rate)
-    }
+    return M.get_diff_cache_stats()
 end
 
 -- HSV cache management
@@ -2738,41 +2795,6 @@ function M.get_hsv_cache_stats()
         size = hsv_cache_stats.size,
         hit_rate = string.format("%.1f%%", hit_rate),
         max_entries = MAX_HSV_CACHE_ENTRIES
-    }
-end
-
--- palette pre-computation management
-function M.clear_precomputed_palettes()
-    precomputed_palettes = {}
-end
-
-function M.get_palette_precompute_stats()
-    local count = 0
-    for _ in pairs(precomputed_palettes) do
-        count = count + 1
-    end
-    return {
-        precomputed_count = count,
-        palette_length = PALETTE_PRECOMPUTE_LENGTH,
-        total_presets = 0  -- count shimmer_config entries
-    }
-end
-
--- character classification cache management
-function M.clear_char_class_cache()
-    char_class_cache = {}
-    char_class_stats = { hits = 0, misses = 0, size = 0 }
-end
-
-function M.get_char_class_stats()
-    local hit_rate = char_class_stats.hits + char_class_stats.misses > 0 
-        and (char_class_stats.hits / (char_class_stats.hits + char_class_stats.misses) * 100) or 0
-    return {
-        hits = char_class_stats.hits,
-        misses = char_class_stats.misses,
-        size = char_class_stats.size,
-        hit_rate = string.format("%.1f%%", hit_rate),
-        max_entries = CHAR_CLASS_MAX_ENTRIES
     }
 end
 
@@ -3252,10 +3274,10 @@ M.get_shine_cache_stats = function()
     }
 end
 
--- clear differential markup cache
+-- clear per-text markup cache
 M.clear_diff_cache = function()
     differential_markup_cache = {}
-    char_state_cache = {}
+    differential_cache_size = 0
     diff_cache_stats = { hits = 0, misses = 0, updates = 0, full_rebuilds = 0 }
 end
 
