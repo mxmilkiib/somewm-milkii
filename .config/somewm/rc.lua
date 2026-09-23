@@ -3370,7 +3370,7 @@ awful.screen.connect_for_each_screen(function(s)
         mysystray:set_spacing(6)
     end
     local notification_toggle_widget = notification_center.create_toggle_widget()
-    local tag_pager_widget = tag_pager.create_pager_widget(s, 32)
+    local tag_pager_widget = tag_pager.create_pager_widget(s, 30)
 
     -- brightness widget: icon + percentage, scroll to adjust
     local brightness_icon_path = "/usr/share/icons/Adwaita/symbolic/status/display-brightness-symbolic.svg"
