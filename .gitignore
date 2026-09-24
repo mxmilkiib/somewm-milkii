@@ -1,0 +1,5 @@
+*.bak
+*.bak.*
+old/
+luac.out
+.ig/
