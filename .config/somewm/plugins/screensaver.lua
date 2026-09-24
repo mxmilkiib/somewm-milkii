@@ -8,8 +8,9 @@
 -- awesome.idle_inhibit = true toggle):
 --
 --   1. saver_timeout  -> animated saver: a warp starfield in the classic
---                        Windows style — stars spawning at screen center
---                        and flying outward — with subtle chromatic
+--                        Windows style — stars spawning anywhere on screen
+--                        and accelerating outward until they exit — with
+--                        subtle chromatic
 --                        aberration fringes toward the edges, plus a clock
 --                        wandering a slow Lissajous path. Luminance is
 --                        capped low so almost no pixels are lit; nothing
@@ -62,9 +63,11 @@ local hide
 
 -- deterministic per-star parameters from an index, so every frame is a pure
 -- function of time and no per-star state table needs updating.
--- A star's depth cycles 1 -> 0 over 1/v seconds; its screen position is the
--- classic projection (dir * k / depth) so it spawns near center and flies
--- outward, wrapping back to depth=1 when it leaves the frustum.
+-- A star's trip is one exponential fly-out: it spawns at a point hashed from
+-- (index, cycle) — uniformly over the screen plus margin, so there is no
+-- bordered spawn region — then travels outward along its radial at speed
+-- proportional to its distance, exiting past the screen edge exactly at the
+-- cycle's end and wrapping to a fresh spawn point.
 local function star_params(i)
     -- cheap hash -> reproducible pseudo-randoms in [0,1)
     local function h(n)
@@ -72,9 +75,7 @@ local function star_params(i)
         return x - math.floor(x)
     end
     return {
-        dx    = h(1) * 2 - 1,            -- direction in unit box [-1,1]
-        dy    = h(2) * 2 - 1,
-        v     = 0.06 + h(3) * 0.13,      -- cycles/sec: full trip 5-16s
+        v     = 0.10 + h(3) * 0.22,      -- cycles/sec: full trip ~3-10s
         phase = h(4),                    -- cycle offset
         r0    = 0.45 + h(5) * 0.6,       -- base radius
         lum   = 0.55 + h(6) * 0.45,      -- per-star brightness variance
@@ -83,6 +84,12 @@ local function star_params(i)
         tg    = 0.92 + h(7) * 0.08,
         tb    = 0.88 + h(8) * 0.12,
     }
+end
+
+-- hash keyed on star index AND trip number, for per-cycle respawn points
+local function star_spawn(i, cyc, n)
+    local x = math.sin(i * 127.1 + cyc * 74.7 + n * 311.7) * 43758.5453
+    return x - math.floor(x)
 end
 
 local draw_failed = false
@@ -103,59 +110,82 @@ function draw_saver_inner(self, context, cr, width, height)
     local t = now() - start_epoch
     local maxlum = M.max_luminance
 
-    -- warp starfield: each star flies from screen center outward as its
-    -- depth decays; chromatic aberration fringes grow with radius like a
-    -- lens, so the effect is invisible at center and subtle at the edges
+    -- warp starfield: each star spawns somewhere on screen and accelerates
+    -- outward along its radial until it leaves the frame; chromatic
+    -- aberration fringes grow with radius like a lens, so the effect is
+    -- invisible at center and subtle at the edges
     local cx, cy = width / 2, height / 2
     local mindim = math.min(width, height)
-    local k = mindim * 0.14            -- spawn extent: how far off-center a depth=1 star lands
     local rnorm_scale = 2 / mindim
     local count = math.max(24, math.floor(width * height * M.star_density))
 
     for i = 1, count do
         local p = star_params(i)
-        local depth = 1 - ((t * p.v + p.phase) % 1)
-        if depth > 0.06 then
-            local proj = k / depth
-            local x = cx + p.dx * proj
-            local y = cy + p.dy * proj
-            if x > -20 and x < width + 20 and y > -20 and y < height + 20 then
-                local a = math.min(1, (1 - depth) / 0.25) * maxlum * p.lum
-                local r = math.min(4, p.r0 * (0.9 / depth))
+        local tt = t * p.v + p.phase
+        local cyc = math.floor(tt)
+        local u = tt - cyc               -- trip progress 0 -> 1
 
-                -- radial direction for fringe offsets
-                local ox, oy = x - cx, y - cy
-                local dist = math.sqrt(ox * ox + oy * oy)
-                local ux, uy = 0, 0
-                if dist > 1 then ux, uy = ox / dist, oy / dist end
-                local ca = M.aberration * math.min(1, dist * rnorm_scale)
+        -- this trip's spawn point: uniform over the screen plus a small
+        -- margin, re-hashed per cycle so wrapping is a teleport, not a rewind
+        local sx = star_spawn(i, cyc, 1) * (width + 40) - 20
+        local sy = star_spawn(i, cyc, 2) * (height + 40) - 20
+        local ox, oy = sx - cx, sy - cy
+        local od = math.sqrt(ox * ox + oy * oy)
+        if od < 8 then ox, oy, od = 6, 6, 8.5 end  -- centre spawn: nudge off the singularity
+        local ux, uy = ox / od, oy / od
 
-                -- motion streak: line back toward the previous depth position
-                if M.streak and a > 0.08 then
-                    local pd = math.min(1, depth + p.v * 4 / M.fps)
-                    local pproj = k / pd
+        -- distance from centre to the screen boundary (plus margin) along
+        -- the star's radial — the trip exits the frame at u = 1
+        local rx = ux > 0 and (width + 40 - cx) / ux
+            or (ux < 0 and (cx + 40) / -ux or math.huge)
+        local ry = uy > 0 and (height + 40 - cy) / uy
+            or (uy < 0 and (cy + 40) / -uy or math.huge)
+        local R = math.min(rx, ry)
+        if od >= R then
+            -- a spawn beyond its own exit boundary would travel inward;
+            -- pull it inside along the same radial instead
+            local s = (R * 0.9) / od
+            ox, oy, od = ox * s, oy * s, R * 0.9
+        end
+
+        -- exponential travel: r = od * (R/od)^u — speed ∝ radius, so stars
+        -- creep off their spawn and whip out of the frame like warp
+        local r = od * ((R / od) ^ u)
+        local x, y = cx + ux * r, cy + uy * r
+        if x > -40 and x < width + 40 and y > -40 and y < height + 40 then
+            local a = math.min(1, u / 0.12) * maxlum * p.lum
+            local rr = math.min(4, p.r0 * (0.5 + 3 * u))
+
+            local ca = M.aberration * math.min(1, r * rnorm_scale)
+
+            -- motion streak: line back toward where the star was a few
+            -- frames ago on this same trip
+            if M.streak and a > 0.08 then
+                local pu = u - p.v * 4 / M.fps
+                if pu > 0 then
+                    local pr = od * ((R / od) ^ pu)
                     cr:set_source_rgba(1, 1, 1, a * 0.4)
-                    cr:set_line_width(r * 0.8)
+                    cr:set_line_width(rr * 0.8)
                     cr:move_to(x, y)
-                    cr:line_to(cx + p.dx * pproj, cy + p.dy * pproj)
+                    cr:line_to(cx + ux * pr, cy + uy * pr)
                     cr:stroke()
                 end
+            end
 
-                -- chromatic fringes: red pushed outward, blue pulled inward
-                if ca > 0.5 and a > 0.06 then
-                    local fr = r * 0.9
-                    cr:set_source_rgba(1, 0.3, 0.35, a * 0.5)
-                    cr:arc(x + ux * ca, y + uy * ca, fr, 0, math.pi * 2)
-                    cr:fill()
-                    cr:set_source_rgba(0.35, 0.55, 1, a * 0.5)
-                    cr:arc(x - ux * ca, y - uy * ca, fr, 0, math.pi * 2)
-                    cr:fill()
-                end
-
-                cr:set_source_rgba(p.tr, p.tg, p.tb, a)
-                cr:arc(x, y, r, 0, math.pi * 2)
+            -- chromatic fringes: red pushed outward, blue pulled inward
+            if ca > 0.5 and a > 0.06 then
+                local fr = rr * 0.9
+                cr:set_source_rgba(1, 0.3, 0.35, a * 0.5)
+                cr:arc(x + ux * ca, y + uy * ca, fr, 0, math.pi * 2)
+                cr:fill()
+                cr:set_source_rgba(0.35, 0.55, 1, a * 0.5)
+                cr:arc(x - ux * ca, y - uy * ca, fr, 0, math.pi * 2)
                 cr:fill()
             end
+
+            cr:set_source_rgba(p.tr, p.tg, p.tb, a)
+            cr:arc(x, y, rr, 0, math.pi * 2)
+            cr:fill()
         end
     end
 

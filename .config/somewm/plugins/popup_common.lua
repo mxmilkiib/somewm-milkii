@@ -286,20 +286,26 @@ function M.hide(popup)
 end
 
 -- compute the anchor widget's absolute screen rectangle from a widget
--- geometry table (as returned by mouse.current_widget_geometry) already
--- carries absolute screen coords — get_current_widgets adds the wibox
--- offset via `v.x = geo.x + bw + v.x`. returns nil when the input is
--- insufficient for manual placement
+-- geometry table (as returned by mouse.current_widget_geometry). somewm's
+-- find_widgets reports x/y in drawable-surface coords (wibox-relative,
+-- inside the border); the wibox's global position + border must be added —
+-- the same offset awful.placement applies internally (placement.lua:770).
+-- returns nil when the input is insufficient for manual placement
 function M.abs_anchor_rect(widget_geo)
     if not widget_geo or not widget_geo.width or not widget_geo.height then
         return nil
     end
-    -- widget_geo.x/y from mouse.current_widget_geometry are already
-    -- absolute screen coords (get_current_widgets adds the wibox offset
-    -- via `v.x = geo.x + bw + v.x`). do NOT add the drawable offset again.
+    local ox, oy = 0, 0
+    local d = widget_geo.drawable
+    local wb = d and d.get_wibox and d.get_wibox()
+    if wb then
+        local dg = wb:geometry()
+        local bw = wb.border_width or 0
+        ox, oy = dg.x + bw, dg.y + bw
+    end
     return {
-        x = widget_geo.x,
-        y = widget_geo.y,
+        x = ox + widget_geo.x,
+        y = oy + widget_geo.y,
         width = widget_geo.width,
         height = widget_geo.height,
     }
@@ -405,12 +411,24 @@ function M.show_placement(popup, anchor, opts)
     if root._append_key then root._append_key(popup._escape_key) end
 end
 
+-- keep a widget's hover_border outline drawn while the popup is visible.
+-- wrappers that don't implement set_sticky_hover are ignored, so this is
+-- safe to call with any attach target
+function M.sticky_border(popup, widget)
+    popup:connect_signal("property::visible", guarded(function()
+        if widget.set_sticky_hover then widget:set_sticky_hover(popup.visible) end
+    end))
+end
+
 -- wire left-click toggle (and optional right-click dismiss / scroll-swallow)
 -- on a wibar widget. on_left(widget) is the toggle callback. opts:
 --   right_hide     function  called on right-click (default: opts.hide)
 --   swallow_scroll bool      swallow wibar click while scrolling (volume_popup)
+--   highlight      widget    hover_border wrapper to outline while the popup
+--                            is open (default: the attached widget itself)
 function M.attach(popup, widget, on_left, opts)
     opts = opts or {}
+    M.sticky_border(popup, opts.highlight or widget)
     widget:connect_signal("button::press", guarded(function(_, _, _, pressed)
         if pressed == 1 then
             -- capture the widget geometry and screen at press time, before

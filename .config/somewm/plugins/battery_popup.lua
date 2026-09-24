@@ -477,6 +477,7 @@ end
 -- to call once per screen; all widgets share the single popup.
 function M.attach(widget)
     ensure_popup()
+    popup_common.sticky_border(popup, widget)
     widget:buttons(gears.table.join(
         awful.button({}, 1, function()
             -- capture geometry at press time (see popup_common.attach comment)

@@ -42,7 +42,10 @@ local FONT_HEAD      = font_utils.FONT_HEAD
 local FONT_COUNTDOWN = font_utils.FONT_SMALL
 
 -- circle-phase glyphs for the header countdown (quarter steps, empty→full)
-local TIMER_GLYPHS = { "○", "◔", "◑", "◕", "●" }
+-- local TIMER_GLYPHS = { "○", "◔", "◑", "◕", "●" }
+-- braille-cell countdown for the header (dots picked off top row first,
+-- left then right within each row, so the cell erodes downward)
+local TIMER_GLYPHS = { "⣿", "⣾", "⣶", "⣴", "⣤", "⣠", "⣀", "⢀", "⠀" }
 
 
 -- Per-screen active notification boxes (for manual stacking)
@@ -215,11 +218,11 @@ local function build_widget(n, s)
         widget = wibox.widget.imagebox,
     }
 
-    -- countdown indicator: unicode circle-phase glyph + seconds at text
+    -- countdown indicator: braille drain glyph + seconds at text
     -- height, so the header stays one line tall like the widget popups
     -- (the old 28px arcchart forced the header to ~40px)
     local countdown_text = wibox.widget {
-        markup = string.format("<span foreground='%s'>● %ds</span>",
+        markup = string.format("<span foreground='%s'>⣿ %ds</span>",
             COLOR_GOLD, n.timeout or DEFAULT_TIMEOUT),
         font = FONT_COUNTDOWN,
         align = "center",
@@ -236,11 +239,12 @@ local function build_widget(n, s)
         widget = wibox.widget.textbox,
     }
 
-    -- sender: gold text in the header's right slot (widget-popup form),
-    -- at info size so it doesn't outgrow the title like FONT_VALUE did
+    -- sender + timestamp: gold text in the header's right slot, matching the
+    -- notification centre's "app  ·  YYYY-MM-DD HH:MM" value format
     local app_name_widget = wibox.widget {
-        markup = "<span foreground='" .. COLOR_GOLD .. "'>"
-            .. gstring.xml_escape(n.app_name or "") .. "</span>",
+        markup = "<b><span foreground='" .. COLOR_GOLD .. "'>"
+            .. gstring.xml_escape((n.app_name or "") .. "  ·  "
+                .. os.date("%Y-%m-%d %H:%M")) .. "</span></b>",
         font = font_utils.FONT_INFO,
         align = "right",
         valign = "center",
@@ -461,7 +465,7 @@ function M.display(n)
     local timeout_timer
     local countdown_timer
     if timeout > 0 then
-        -- countdown timer (updates the unicode phase glyph + seconds text)
+        -- countdown timer (updates the braille drain glyph + seconds text)
         -- uses a tick counter instead of os.clock() (which measures CPU time,
         -- not wall time, and barely advances while awesome is idle)
         local arc_duration = timeout
@@ -474,7 +478,9 @@ function M.display(n)
                 arc_ticks = arc_ticks + 1
                 local elapsed = arc_ticks / ARC_RATE
                 local remaining = math.max(0, 1 - elapsed / arc_duration)
-                local glyph = TIMER_GLYPHS[math.floor(remaining * 4 + 0.5) + 1]
+                -- TIMER_GLYPHS runs full→empty, so index by elapsed fraction:
+                -- remaining=1 -> ⣿, remaining=0 -> ⠀
+                local glyph = TIMER_GLYPHS[math.floor((1 - remaining) * (#TIMER_GLYPHS - 1) + 0.5) + 1]
                 local secs_left = math.ceil(remaining * arc_duration)
                 countdown_text:set_markup(string.format(
                     "<span foreground='%s'>%s %ds</span>", COLOR_GOLD, glyph, secs_left))

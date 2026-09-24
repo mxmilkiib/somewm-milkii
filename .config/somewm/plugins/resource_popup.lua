@@ -659,7 +659,7 @@ end
 -- Wire left-click toggle (and right-click dismiss) on a resource widget. Uses
 -- connect_signal so nothing else bound to the widget is clobbered. Safe to
 -- call once per widget per screen; all of them share the single popup.
-function M.attach(widget)
+function M.attach(widget, highlight)
     ensure_popup()
     if not sample_timer then
         -- created stopped: show() samples once and starts the timer, so no
@@ -681,7 +681,7 @@ function M.attach(widget)
             end
         end))
     end
-    popup_common.attach(popup, widget, toggle, { right_hide = hide })
+    popup_common.attach(popup, widget, toggle, { right_hide = hide, highlight = highlight })
 end
 
 return M

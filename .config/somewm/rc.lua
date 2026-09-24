@@ -1415,6 +1415,7 @@ tag_pager = require("plugins.tag_pager")
 tag_pager.init()
 battery_popup = require("plugins.battery_popup")
 brightness_popup = require("plugins.brightness_popup")
+local displays_popup = require("plugins.displays_popup")
 volume_popup = require("plugins.volume_popup")
 resource_popup = require("plugins.resource_popup")
 local media_popup = require("plugins.media_popup")
@@ -2008,6 +2009,20 @@ hotkey_dupe_detector.notify_duplicates(globalkeys, clientkeys)
 -- define wallpaper function
 -- old (X11): gears.wallpaper.maximized() — not available in somewm
 -- new (Wayland): awful.wallpaper{} widget-based API with request::wallpaper signal
+-- per-screen wallpaper records so the cover crop can be recomputed in place
+-- when geometry changes (rotation, mode switch) instead of creating a new
+-- wallpaper object each time
+local wallpapers = setmetatable({}, { __mode = "k" })
+
+-- fill (cover) mode: crop image to screen aspect ratio, then stretch
+local function cover_surface(s, path)
+    local sw, sh = s.geometry.width, s.geometry.height
+    return gears.surface.crop_surface {
+        surface = gears.surface.load(path),
+        ratio   = sw / sh,
+    }
+end
+
 local function set_wallpaper(s)
     -- per-screen wallpaper: prefer beautiful.wallpapers[s.index] if provided
     if beautiful.wallpapers and beautiful.wallpapers[s.index] then
@@ -2031,31 +2046,38 @@ local function set_wallpaper(s)
         if type(wallpaper) == "function" then
             wallpaper = wallpaper(s)
         end
-        -- fill (cover) mode: crop image to screen aspect ratio, then stretch
-        local sw, sh = s.geometry.width, s.geometry.height
-        local surf = gears.surface.load(wallpaper)
-        local cropped = gears.surface.crop_surface {
-            surface = surf,
-            ratio   = sw / sh,
-        }
-        awful.wallpaper {
-            screen = s,
-            widget = {
-                image     = cropped,
-                upscale   = true,
-                downscale = true,
-                widget    = wibox.widget.imagebox,
-            },
-        }
+        if not wallpaper then return end
+
+        -- reuse the existing wallpaper object: this handler runs from both
+        -- request::wallpaper and connect_for_each_screen, and recreating the
+        -- object each time left stale objects that GC could free while C
+        -- code still referenced them
+        local rec = wallpapers[s]
+        if not rec then
+            rec = { ib = wibox.widget.imagebox() }
+            rec.ib.upscale   = true
+            rec.ib.downscale = true
+            rec.wp = awful.wallpaper { screen = s, widget = rec.ib }
+            wallpapers[s] = rec
+        end
+        rec.path = wallpaper
+        rec.ib:set_image(cover_surface(s, wallpaper))
+        rec.wp:repaint()
     end
 end
 
 -- Set wallpaper on startup and when screens change
 screen.connect_signal("request::wallpaper", guarded(set_wallpaper))
--- NOTE: property::geometry is handled by awful.wallpaper module internally
--- (backgrounds[s]:repaint()). Connecting set_wallpaper here created duplicate
--- wallpaper objects on every kanshi profile switch, causing use-after-free
--- crashes when GC collected the old objects while C code still referenced them.
+-- recrop the cover surface when a screen's geometry changes (e.g. rotation):
+-- awful.wallpaper's own property::geometry handler repaints the widget tree
+-- but cannot fix a crop ratio that was baked for the old aspect
+screen.connect_signal("property::geometry", guarded(function(s)
+    local rec = wallpapers[s]
+    if rec then
+        rec.ib:set_image(cover_surface(s, rec.path))
+        rec.wp:repaint()
+    end
+end))
 
 
 
@@ -3708,13 +3730,19 @@ awful.screen.connect_for_each_screen(function(s)
             border_width = 0,
             widget = wibox.container.background,
         }
-        bg:connect_signal("mouse::enter", guarded(function()
-            bg.border_width = 1
-            bg.border_color = hover_border_color
-        end))
-        bg:connect_signal("mouse::leave", guarded(function()
-            bg.border_width = 0
-        end))
+        -- sticky keeps the border drawn while the widget's popup is open,
+        -- so the owning widget stays identifiable when the pointer leaves
+        local hovering, sticky = false, false
+        local function paint()
+            bg.border_width = (hovering or sticky) and 1 or 0
+            if hovering or sticky then bg.border_color = hover_border_color end
+        end
+        bg:connect_signal("mouse::enter", guarded(function() hovering = true; paint() end))
+        bg:connect_signal("mouse::leave", guarded(function() hovering = false; paint() end))
+        function bg:set_sticky_hover(on)
+            sticky = on and true or false
+            paint()
+        end
         return bg
     end
 
@@ -3754,12 +3782,14 @@ awful.screen.connect_for_each_screen(function(s)
     local ai_bar         = hover_border(wibox.container.margin(ai_widget, 4, 4, 0, 0))
     local shimmer_bar    = centered_bar(shimmer_widget, 4, 4, 2, true)
 
-    resource_popup.attach(cpu_bar)
-    resource_popup.attach(gpu_bar)
-    resource_popup.attach(ram_bar)
-    resource_popup.attach(temp_bar)
+    resource_popup.attach(cpu_bar, resource_group)
+    resource_popup.attach(gpu_bar, resource_group)
+    resource_popup.attach(ram_bar, resource_group)
+    resource_popup.attach(temp_bar, resource_group)
     battery_popup.attach(battery_bar)
     brightness_popup.attach(brightness_bar)
+    -- middle-click the same widget for the monitor-management popup
+    displays_popup.attach(brightness_bar)
     volume_popup.attach(volume_bar)
     media_popup.attach(media_bar)
     ai_popup.attach(ai_bar)
@@ -4976,9 +5006,8 @@ awful.spawn.with_shell("pgrep -u $USER -x nm-applet > /dev/null || nm-applet --i
 awful.spawn.with_shell("pgrep -u $USER -x blueman-applet > /dev/null || blueman-applet")
 
 -- KDE Connect tray icon (kdeconnectd itself is autostarted by /etc/xdg/autostart)
--- pgrep -f needed: kdeconnect-indicator is longer than 15 chars
--- [k] bracket trick: pattern matches the running process but not this shell's own cmd line
-awful.spawn.with_shell("pgrep -u $USER -f '[k]deconnect-indicator' > /dev/null || kdeconnect-indicator")
+-- -x on the 15-char-truncated comm: pgrep -f self-matches the sh -c cmdline
+awful.spawn.with_shell("pgrep -u $USER -x kdeconnect-indi > /dev/null || kdeconnect-indicator")
 
 -- Battery icon (native wibar widget; cbatticon/xfce4-power-manager are XEmbed-only with no SNI host on somewm)
 
