@@ -4,30 +4,6 @@ Personal [somewm](https://github.com/trip-zip/somewm) (AwesomeWM fork) configura
 
 The layout mirrors `$HOME` (`.config/somewm/...`) so the directory tree drops straight in. It happens to be a GNU Stow package in the parent repo, but nothing here needs Stow — see [Install](#install).
 
-## Screenshots
-
-The bar: taglist, in-bar tag pager, system stats (net/cpu/gpu/ram/temp), battery/brightness/volume icons, systray, clock.
-
-![wibar](docs/screenshots/bar.png)
-
-Clicking a bar widget opens its popup; all share the same purple-header style, pin button, drag-by-header and outside-click dismissal.
-
-| | |
-|---|---|
-| ![resource popup](docs/screenshots/resource_popup.png) | ![shimmer popup](docs/screenshots/shimmer_popup.png) |
-| resource monitor | shimmer animation config |
-| ![brightness popup](docs/screenshots/brightness_popup.png) | ![battery popup](docs/screenshots/battery_popup.png) |
-| per-output brightness/gamma | battery + power profiles |
-| ![displays popup](docs/screenshots/displays_popup.png) | ![ai popup](docs/screenshots/ai_popup.png) |
-| output/mode/scale manager | local AI service toggles |
-| ![volume popup](docs/screenshots/volume_popup.png) | ![tag pager](docs/screenshots/tag_pager.png) |
-| per-sink/source volume | in-bar tag pager cells |
-
-Notifications slide in top-right with a braille-cell countdown; expired ones land in the notification centre:
-
-![notification](docs/screenshots/notification.png)
-![notification centre](docs/screenshots/notification_center.png)
-
 ## Install
 
 All the config needs is `.config/somewm/` ending up under `$HOME` — clone and symlink/copy it directly, or use whatever dotfiles manager suits. The author uses GNU Stow from the parent dotfiles repo (`stow somewm`, which symlinks the directory tree), but that's incidental — Stow, chezmoi, a bare `cp -r`, nothing specific is required.
@@ -81,6 +57,37 @@ External commands, all optional — a widget degrades to a `--` placeholder or e
 ```
 
 See also `CODEBASE_AUDIT.md` — a running audit of known issues and fixed findings.
+
+## Screenshots
+
+The bar: taglist, in-bar tag pager, system stats (net/cpu/gpu/ram/temp), battery/brightness/volume icons, systray, clock.
+
+![wibar](docs/screenshots/bar.png)
+
+The layoutbox widget shows the current layout's glyph. Hovering opens a compact strip of layout icons; middle-click opens the full named grid. Left/right-click and the wheel cycle layouts directly.
+
+| | | |
+|---|---|---|
+| ![layoutbox widget](docs/screenshots/layout_widget.png) | ![layout strip](docs/screenshots/layout_strip.png) | ![layout menu](docs/screenshots/layout_menu.png) |
+| layoutbox widget | hover strip | middle-click grid |
+
+Clicking a bar widget opens its popup; all share the same purple-header style, pin button, drag-by-header and outside-click dismissal.
+
+| | |
+|---|---|
+| ![resource popup](docs/screenshots/resource_popup.png) | ![shimmer popup](docs/screenshots/shimmer_popup.png) |
+| resource monitor | shimmer animation config |
+| ![brightness popup](docs/screenshots/brightness_popup.png) | ![battery popup](docs/screenshots/battery_popup.png) |
+| per-output brightness/gamma | battery + power profiles |
+| ![displays popup](docs/screenshots/displays_popup.png) | ![ai popup](docs/screenshots/ai_popup.png) |
+| output/mode/scale manager | local AI service toggles |
+| ![volume popup](docs/screenshots/volume_popup.png) | ![tag pager](docs/screenshots/tag_pager.png) |
+| per-sink/source volume | in-bar tag pager cells |
+
+Notifications render as an in-bar banner anchored at the systray edge, with a braille-cell countdown; expired ones land in the notification centre:
+
+![notification](docs/screenshots/notification.png)
+![notification centre](docs/screenshots/notification_center.png)
 
 ## Keybindings
 
