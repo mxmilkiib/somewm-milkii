@@ -70,8 +70,10 @@ local function flush_log()
     out = {}
 end
 
+local tracing = true
+
 local function record(kind, detail, t0, dt)
-    blockers[#blockers + 1] = { kind = kind, detail = detail, at = t0 - t_init, dt = dt }
+    if tracing then blockers[#blockers + 1] = { kind = kind, detail = detail, at = t0 - t_init, dt = dt } end
     if dt > SLOW_CALL then
         emit("%s %s took %.1fms (at %.3fs)", kind, detail, dt * 1000, t0 - t_init)
     end
@@ -108,7 +110,7 @@ function M.install_require_tracer()
         local r = pack(pcall(real_require, name))
         req_depth = req_depth - 1
         local dt = now() - t0
-        req_log[#req_log + 1] = { name = tostring(name), at = t0 - t_init, dt = dt, depth = req_depth }
+        if tracing then req_log[#req_log + 1] = { name = tostring(name), at = t0 - t_init, dt = dt, depth = req_depth } end
         if dt > SLOW_REQ then
             emit("require %s took %.1fms (at %.3fs)", name, dt * 1000, t0 - t_init)
         end
@@ -148,7 +150,7 @@ local function arm_watchdog()
         local late = t - last - WATCHDOG_S
         last = t
         if late > STALL_MIN then
-            stalls[#stalls + 1] = { at = t - t_init, dt = late }
+            if tracing then stalls[#stalls + 1] = { at = t - t_init, dt = late } end
             emit("STALL main loop unresponsive %.0fms (at %.3fs)", late * 1000, t - t_init)
             flush_log()
         end
@@ -277,6 +279,14 @@ function M.report(tag)
     flush_log()
 end
 
+-- Restore plain require and drop the logs once startup is over; wibox.drawable
+-- requires somewm.animation on every redraw, so the log grows without bound
+function M.stop_tracing()
+    tracing = false
+    if rawget(_G, "require") ~= real_require then rawset(_G, "require", real_require) end
+    req_log, blockers, stalls = {}, {}, {}
+end
+
 function M.install()
     if M._installed then return M end
     M._installed = true
@@ -296,6 +306,7 @@ function M.install()
         for _, delay in ipairs({ 3, 30 }) do
             gears.timer.start_new(delay, function()
                 M.report("t+" .. delay .. "s")
+                if delay == 30 then M.stop_tracing() end
                 return false
             end)
         end
