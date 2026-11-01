@@ -90,7 +90,9 @@ local make_text = popup_common.make_text
 
 -- opt-in for the hdr commit: setting BT.2020/PQ image description on eDP
 -- hard-hung this box's amdgpu display core (kernel 7.3.0-rc6). re-test on a
--- fixed kernel by exporting SOMEWM_HDR_UNSAFE=1 before somewm starts
+-- fixed kernel by exporting SOMEWM_HDR_UNSAFE=1 before somewm starts; the
+-- flag also makes ~/bin/somewm select the vulkan renderer, which is the one
+-- that applies the sRGB-to-BT.2020/PQ output transform
 local HDR_ARMED = os.getenv("SOMEWM_HDR_UNSAFE") == "1"
 
 local function separator()
