@@ -17,6 +17,8 @@ local style   = require("plugins.style")
 
 local dpi = style.dpi
 
+local capi_output = output
+
 local COLOR_PURPLE = popup_common.theme.PURPLE
 local COLOR_BLACK  = popup_common.theme.BLACK
 local COLOR_WHITE  = popup_common.theme.WHITE
