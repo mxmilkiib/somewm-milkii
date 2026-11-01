@@ -31,6 +31,8 @@ local FONT_HEAD  = popup_common.fonts.FONT_HEAD
 local CFG = {
     content_w = dpi(240),
 }
+-- sdr-white slider bounds for HDR outputs, in nits (PQ reference is 203)
+local NITS_MIN, NITS_MAX = 80, 600
 
 
 
@@ -355,6 +357,15 @@ local function get_display_info(callback)
                         end
                     end
 
+                    -- output objects keyed by name: an HDR output's slider
+                    -- drives its SDR white level in nits (output.sdr_white)
+                    -- instead of a gamma ramp, which is meaningless in PQ
+                    local out_by_name = {}
+                    for i = 1, capi_output.count() do
+                        local o = capi_output[i]
+                        if o and o.valid and o.name then out_by_name[o.name] = o end
+                    end
+
                     -- assemble per-display info
                     local bl_idx = 1
                     for _, d in ipairs(info) do
@@ -377,6 +388,13 @@ local function get_display_info(callback)
                             d.brightness = st.brightness or daemon_brightness
                             d.source = "gamma"
                         end
+                        local o = out_by_name[d.name]
+                        if o and o.hdr and type(o.sdr_white) == "number" then
+                            d.output = o
+                            d.hdr = true
+                            d.source = "sdr-white"
+                            d.brightness = math.floor(o.sdr_white + 0.5)
+                        end
                     end
 
                     callback(info)
@@ -394,6 +412,12 @@ local refresh_btn_ref
 -- gamma outputs go through wlr-brightnessd's per-output command; backlight
 -- outputs are set directly via brightnessctl on their mapped device.
 local function set_display_brightness(d, pct)
+    if d.hdr and d.output then
+        pcall(function()
+            d.output.sdr_white = math.max(NITS_MIN, math.min(NITS_MAX, pct))
+        end)
+        return
+    end
     pct = math.max(1, math.min(100, pct))
     if d.source == "gamma" then
         awful.spawn.with_shell(string.format(
@@ -430,7 +454,7 @@ function refresh_popup(on_done)
 
             local pct_color = d.gamma_failed and COLOR_RED or COLOR_GOLD
             local pct_text = wibox.widget {
-                text  = d.brightness .. "%",
+                text  = d.brightness .. (d.hdr and " nits" or "%"),
                 fg    = pct_color,
                 font  = popup_common.fonts.FONT_VALUE,
                 widget = wibox.widget.textbox,
@@ -476,8 +500,8 @@ function refresh_popup(on_done)
                 handle_color        = COLOR_WHITE,
                 handle_border_width = style.popup.border_width,
                 handle_border_color = COLOR_PURPLE,
-                min   = 1,
-                max   = 100,
+                min   = d.hdr and NITS_MIN or 1,
+                max   = d.hdr and NITS_MAX or 100,
                 value = d.brightness,
                 -- slider:fit() returns the full available height, so without a
                 -- forced height the popup would grow to the whole workarea
@@ -485,6 +509,7 @@ function refresh_popup(on_done)
                 forced_height = dpi(14),
                 widget = wibox.widget.slider,
             }
+            slider._d = d
 
             -- debounce the actual hardware/daemon write so dragging the handle
             -- only fires one command after the user pauses
@@ -498,10 +523,15 @@ function refresh_popup(on_done)
                 end,
             }
             active_send_timers[#active_send_timers + 1] = send_timer
+            local function row_clamp(v)
+                v = math.floor(v + 0.5)
+                return d.hdr and math.max(NITS_MIN, math.min(NITS_MAX, v))
+                    or math.max(1, math.min(100, v))
+            end
             slider:connect_signal("property::value", function(_, val)
-                val = math.max(1, math.min(100, math.floor(val + 0.5)))
+                val = row_clamp(val)
                 pending_val = val
-                pct_text.text = val .. "%"
+                pct_text.text = val .. (d.hdr and " nits" or "%")
                 send_timer:stop()
                 send_timer:start()
             end)
@@ -509,13 +539,13 @@ function refresh_popup(on_done)
             -- mouse wheel over the slider nudges the value by STEP; setting
             -- .value reuses the property::value handler above so the write is
             -- debounced just like dragging the handle
-            local STEP = 5
+            local STEP = d.hdr and 10 or 5
             slider:buttons(gears.table.join(
                 awful.button({}, 4, function()
-                    slider.value = math.max(1, math.min(100, math.floor(slider.value + 0.5) + STEP))
+                    slider.value = row_clamp(slider.value) + STEP
                 end),
                 awful.button({}, 5, function()
-                    slider.value = math.max(1, math.min(100, math.floor(slider.value + 0.5) - STEP))
+                    slider.value = row_clamp(slider.value) - STEP
                 end)
             ))
 
@@ -538,14 +568,24 @@ function refresh_popup(on_done)
                 widget = wibox.container.background,
             }
 
-            sliders[#sliders + 1] = slider
+            -- hdr rows stay out of the combined slider: a percent value is
+            -- meaningless as a nits level
+            if not d.hdr then sliders[#sliders + 1] = slider end
             individual_rows[#individual_rows + 1] = row_bg
         end
 
         -- combined "All Displays" slider: moving it sets every individual
         -- slider at once; each individual slider's property::value handler
         -- then debounces its own hardware/daemon write, so no separate
-        -- command is needed here
+        -- command is needed here. only percent rows take part — hdr rows
+        -- carry nits
+        if #sliders == 0 then
+            for _, r in ipairs(individual_rows) do
+                rows_container_ref:add(r)
+            end
+            if on_done then on_done() end
+            return
+        end
         local function clamp_round(v)
             return math.max(1, math.min(100, math.floor(v + 0.5)))
         end
