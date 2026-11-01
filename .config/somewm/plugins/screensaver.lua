@@ -276,6 +276,10 @@ local function show()
                         urgency = "critical",
                     }
                 end
+                -- each Frame's Surface is a few dozen Bytes of Lua Object
+                -- holding Megabytes of Pixels; stepping the Collector every
+                -- Tick keeps dead Surfaces from batching into Gigabytes
+                collectgarbage("step", 8)
             end,
         }
     end
