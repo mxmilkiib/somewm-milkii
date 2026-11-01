@@ -51,8 +51,9 @@ theme.layout_icons       = theme_dir .. "icons/layouts/"  -- renamed from extras
 -- // MARK: ICONS
 
 -- set a concrete icon theme so xdg icon lookups succeed (used by desktop icons, menus, etc.)
--- choose from installed icon themes; Adwaita and hicolor are common
-theme.icon_theme = "Adwaita"
+-- breeze-dark matches gtk-icon-theme-name in ~/.config/gtk-3.0/settings.ini;
+-- its index.theme inherits breeze and hicolor, so hicolor-only icons still resolve
+theme.icon_theme = "breeze-dark"
 
 
 -- // MARK: WALLPAPER
@@ -265,6 +266,16 @@ theme.border_radius = dpi(2)
 
 
 
+-- tag switch pans the client layer: one slide word drives both the
+-- arriving and departing tag, always toward the right. Upstream keeps only
+-- the first slide word of a table and has no direction mirroring or
+-- minimize word; the pair and minimize keys below need the combined tree
+-- theme.animation_tag              = { "slide_right", "slide_left" }
+-- theme.animation_minimize          = "slide_up"
+-- theme.animation_minimize_duration = 0.3
+theme.animation_tag          = "slide_right"
+theme.animation_tag_duration = 0.3
+
 -- // MARK: COLORS
 -- There are other variable sets
 -- overriding the default one when
@@ -434,7 +445,7 @@ theme.awesome_icon = theme_dir .. "icons/somewm-logo.svg"
 
 -- Define the icon theme for application icons. If not set then the icons
 -- from /usr/share/icons and /usr/share/icons/hicolor will be used.
-theme.icon_theme = "Adwaita"
+theme.icon_theme = "breeze-dark"
 
 
 

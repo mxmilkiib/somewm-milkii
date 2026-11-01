@@ -17,16 +17,28 @@
 --
 -- On the first shake the cursor is magnified by `magnification`; each
 -- subsequent shake adds `over_magnification` (additive, matching KWin).
--- Inflate and deflate animate root.cursor_scale() with ease-in-out-cubic
--- easing (KWin uses QEasingCurve::InOutCubic) via awesome.start_animation,
--- which ticks on the compositor refresh cycle. root.cursor_scale() re-renders
--- a pre-loaded high-resolution cursor image at a new size — it never reloads
--- the xcursor theme — so the animation is smooth and crisp without the
--- per-step manager rebuild that root.cursor_size() would incur. The animated
--- size is quantised to whole pixels (sub-pixel scaling is invisible and would
--- otherwise re-render the cursor buffer ~1000x/sec). The cursor deflates
--- `deflate_delay` seconds after the last shake or direction-change while
--- oscillating, so it stays enlarged throughout a continuous shake.
+-- KWin has no magnification cap; it loads the cursor theme at
+-- Magnification + 8*OverMagnification = 11x device pixels, so `max_scale`
+-- caps growth at that same crisp range (the compositor's hires cursor is
+-- loaded at CURSOR_HIRES_MULT = 11x for the same reason).
+-- Inflate and deflate animate root._cursor_magnify() with the C-side ease
+-- easing (KWin uses QEasingCurve::InOutCubic, 200ms in both directions)
+-- via awesome.start_animation, which ticks on the compositor refresh cycle.
+-- root._cursor_magnify() re-renders a pre-loaded high-resolution cursor image
+-- at a new size — it never reloads the xcursor theme — so the animation is
+-- smooth and crisp without the per-step manager rebuild that
+-- root.cursor_size() would incur. The animated size is quantised to whole
+-- pixels (sub-pixel scaling is invisible and would otherwise re-render the
+-- cursor buffer ~1000x/sec). The cursor deflates `deflate_delay` seconds
+-- (KDE: 2000ms) after the last detected shake; mere continued oscillation
+-- does not defer it.
+--
+-- KWin resets the detector while any pointer button is held and on pointer
+-- warps (event->buttons / event->warp in ShakeCursorEffect::pointerMotion).
+-- Buttons are matched by polling mouse.coords().buttons on each event;
+-- warps need no handling because wlr_cursor_warp does not emit
+-- pointer::motion at all. KWin also skips detection while the pointer is
+-- confined by a pointer-constraints region, which is not exposed to Lua.
 --
 -- somewm draws the cursor itself for clients using cursor-shape-v1 (GTK4,
 -- Qt6, most modern toolkits) and for wibars/root; clients that upload their
@@ -38,7 +50,7 @@
 local gears = require("gears")
 local guarded = require("error_guard")
 
--- High-resolution monotonic clock for the history window and cooldown.
+-- High-resolution monotonic clock for the history window.
 local ffi = require("ffi")
 ffi.cdef("struct timespec { long tv_sec; long tv_nsec; };")
 ffi.cdef("int clock_gettime(int, struct timespec *);")
@@ -54,77 +66,49 @@ local M = {
     min_diagonal = 100,          -- minimum bounding-box diagonal in pixels (KDE hardcoded)
     magnification = 3.0,         -- first-shake magnification (KDE Magnification)
     over_magnification = 1.0,    -- additive per subsequent shake (KDE OverMagnification)
-    max_scale = 4.0,             -- cap: hires image is 4x, beyond that it upscales blurry
-    deflate_delay = 1.5,         -- seconds after last shake before deflating
+    max_scale = 11.0,            -- KDE keeps growing unbounded; its hires prefetch is
+                               -- Magnification + 8*OverMagnification = 11x (CURSOR_HIRES_MULT)
+    deflate_delay = 2.0,         -- seconds after last detected shake (KDE: start(2000))
     anim_duration = 0.2,         -- inflate animation duration (KDE: 200ms)
-    deflate_duration = 1.0,      -- deflate animation duration
+    deflate_duration = 0.2,      -- deflate animation duration (KDE: same 200ms both ways)
     anim_easing = "ease-in-out-cubic", -- KDE uses QEasingCurve::InOutCubic
 }
 
 local samples = {}               -- history of {x, y, t} (direction-change vertices only)
-local base_size                  -- nominal cursor size, captured on first shake
 local current_scale = 1          -- current magnification factor
 local target_scale = 1           -- target magnification factor
-local last_px                    -- last integer pixel size sent to C (throttle)
-local deflate_timer, scale_animation
-local cooldown_until = 0         -- monotonic time until which detection is suppressed
+local deflate_timer
 local connected = false
 local on_motion_guarded
 
--- awesome.start_animation ticks on the compositor refresh cycle, which the
--- animation keepalive wakes at ~1ms; without throttling that would re-render
--- the cursor buffer ~1000x/sec. Quantise the displayed size to whole pixels
--- (a sub-pixel scale change is invisible anyway) and skip no-op sends.
-local function set_scale(scale)
-    current_scale = scale
-    if not base_size then return end
-    local px = math.floor(base_size * scale + 0.5)
-    if px == last_px then return end
-    last_px = px
-    root.cursor_scale(px / base_size)
-end
-
+-- root._cursor_magnify(scale, duration) animates the declared cursor leaf in
+-- C on the frame clock (upstream's ease is fixed); no per-frame Lua calls or
+-- buffer throttling needed. Instant when duration is 0.
 local function reset_scale()
-    if scale_animation then
-        pcall(function() scale_animation:cancel() end)
-        scale_animation = nil
-    end
-    last_px = nil
-    set_scale(1)
+    current_scale = 1
     target_scale = 1
+    root._cursor_magnify(1, 0)
 end
 
 -- Movements within `tolerance` pixels of zero count as either direction
--- (handles sub-pixel jitter). Mirrors KWin's sameSign() in shakedetector.cpp.
+-- (handles sub-pixel jitter). Mirrors KWin's sameSign() in shakedetector.cpp:
+--   (a >= -tolerance && b >= -tolerance) || (a <= tolerance && b <= tolerance)
+-- so a large delta followed by sub-tolerance jitter still counts as the same
+-- direction (no vertex is recorded for it).
 local function same_sign(a, b)
     local tolerance = 1
-    if math.abs(a) <= tolerance and math.abs(b) <= tolerance then
-        return true
-    end
-    return (a < 0 and b < 0) or (a > 0 and b > 0)
+    return (a >= -tolerance and b >= -tolerance) or (a <= tolerance and b <= tolerance)
 end
 
--- Animate to a target magnification, mirroring KWin's animateTo(). Drives
--- root.cursor_scale() on the frame clock; each frame re-renders the existing
--- high-res cursor image at a new size, so there are no xcursor theme reloads.
+-- Animate to a target magnification, mirroring KWin's animateTo(). The C
+-- side eases the leaf on the frame clock; a client-owned cursor image is
+-- left alone (root._cursor_magnify resets to 1 for it).
 local function animate_to(target)
     if target_scale == target then return end
-    if scale_animation then
-        pcall(function() scale_animation:cancel() end)
-    end
-    local from = current_scale
-    local duration = (target < from) and M.deflate_duration or M.anim_duration
-    scale_animation = awesome.start_animation(duration, M.anim_easing,
-        function(progress)
-            set_scale(from + (target - from) * progress)
-        end,
-        function()
-            scale_animation = nil
-            if target == 1 then
-                set_scale(1)
-            end
-        end)
+    local duration = (target < current_scale) and M.deflate_duration or M.anim_duration
+    current_scale = target
     target_scale = target
+    root._cursor_magnify(target, duration)
 end
 
 local function inflate()
@@ -137,10 +121,12 @@ end
 
 local function deflate()
     animate_to(1)
-    -- Clear residual motion samples so small movements after deflation do
-    -- not combine with stale history to falsely re-trigger a shake.
+    -- Deliberate deviation from KWin, which does not reset the detector here:
+    -- the deflate fires while the user may still be moving, and surviving
+    -- pre-deflate motion can immediately re-satisfy the shake criterion,
+    -- producing an inflate/deflate ping-pong. Fresh history after deflation
+    -- requires a genuinely new shake.
     samples = {}
-    cooldown_until = now() + 0.5
 end
 
 -- Feed a position sample to the shake detector. Returns true if a shake
@@ -198,36 +184,40 @@ local function detect_shake(x, y, t)
 end
 
 local function on_motion(x, y)
-    local t = now()
-    if t < cooldown_until then return end
-    local before = #samples
-    local shook = detect_shake(x, y, t)
-    if shook then
-        base_size = base_size or root.cursor_size()
+    -- KWin resets the detector while any pointer button is held
+    -- (event->buttons != Qt::NoButton) so dragging never counts as shaking.
+    -- buttons[4]/[5] are scroll up/down, never held (somewm_api.c), so only
+    -- buttons 1-3 need checking.
+    local b = mouse.coords().buttons
+    if b[1] or b[2] or b[3] then
+        samples = {}
+        return
+    end
+    if detect_shake(x, y, now()) then
+
         inflate()
-        deflate_timer:again()
-    elseif current_scale > 1 and #samples > before then
-        -- A new direction-change vertex was added: the pointer is still
-        -- oscillating, so keep the cursor enlarged even though a full shake
-        -- has not (yet) been re-detected. This prevents the deflate timer
-        -- from firing mid-shake when the detection interval (~1s after a
-        -- history clear) approaches deflate_delay.
+        -- KWin restarts the deflate timer only on a detected shake, not on
+        -- mere continued oscillation.
         deflate_timer:again()
     end
 end
 
 function M.start()
     if connected then return end
+    -- root._cursor_magnify and pointer::motion live only in the combined
+    -- tree; on upstream the whole plugin is inert, so bail now rather than
+    -- erroring inside the first timer callback
+    if not root._cursor_magnify then return end
     -- Reset C-side cursor_scale: it persists across Lua reloads and may be
     -- stuck at a magnified value from before the reload. Defer to the next
     -- event loop iteration so some_apply_cursor() doesn't schedule output
     -- frames while the hot-reload is still in progress (that freezes the WM).
     gears.timer { timeout = 0, single_shot = true, callback = function()
-        root.cursor_scale(1.0)
+        root._cursor_magnify(1, 0)
     end }
     current_scale = 1
     target_scale = 1
-    last_px = nil
+    samples = {}
     deflate_timer = gears.timer { timeout = M.deflate_delay, single_shot = true, callback = guarded(deflate) }
     on_motion_guarded = guarded(on_motion)
     awesome.connect_signal("pointer::motion", on_motion_guarded)

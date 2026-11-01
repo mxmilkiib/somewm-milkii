@@ -1,6 +1,7 @@
 -- Modern notification display with shared-timer slide animation
 -- Uses awful.popup for full placement control + naughty.widget.* for content
 -- Slide-in animation uses a single shared gears.timer for all active animations
+-- Close fades the popup's opacity out over CFG.fade_duration before removal
 -- Stacking is manual (per-screen list) to anchor at the systray's left edge
 
 local awful = require("awful")
@@ -13,39 +14,61 @@ local gtimer = require("gears.timer")
 local gdebug = require("gears.debug")
 local gstring = require("gears.string")
 local guarded = require("error_guard")
-local font_utils = require("rc.font_utils")
-local dpi = beautiful.xresources.apply_dpi
-local COLOR_GOLD = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
-local COLOR_PURPLE = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
-local COLOR_BLACK  = "#000000"
-local COLOR_WHITE  = "#FFFFFF"
+local style   = require("plugins.style")
+local dpi = style.dpi
+local COLOR_GOLD   = style.color.accent
+local COLOR_PURPLE = style.color.accent2
+local COLOR_BLACK  = style.color.bg
+local COLOR_WHITE  = style.color.fg
 
 local M = {}
 
 -- Configuration
-local SLIDE_DURATION = 0.3
-local NOTIF_GAP = dpi(4)
-local NOTIF_TOP_MARGIN = dpi(4)
-local NOTIF_RIGHT_GAP = dpi(6)
-local MAX_NOTIF_WIDTH = dpi(800)
-local DEFAULT_TIMEOUT = 50
+-- module configuration; override via M.configure{...} before first use
+local CFG = {
+    slide_duration = 0.3,
+    fade_duration = 0.12,
+    gap = dpi(4),
+    top_margin = dpi(4),
+    right_gap = dpi(6),
+    max_width = dpi(1400),
+    -- fraction of screen width; high enough that typical notifications all hit
+    -- the floor and render at the same width
+    min_width_frac = 0.45,
+    timeout = 3.125,
+}
+
+function M.configure(opts) style.merge(CFG, opts) end
 
 -- The title is differentiated by bold markup + gold background, not font size.
 -- Use the theme font directly; the theme already handles DPI + ui_scale scaling.
 -- local NOTIF_FONT = beautiful.notification_font or beautiful.font or "Sans 10"
 -- Widget-Popup Fonts (same as the resource/battery/volume/displays popups)
-local FONT           = font_utils.FONT
-local FONT_HEAD      = font_utils.FONT_HEAD
--- local FONT_VALUE  = font_utils.FONT_BOLD  -- too large for the header sender
--- local FONT_COUNTDOWN = font_utils.FONT
--- local FONT_COUNTDOWN = font_utils.FONT_INFO
-local FONT_COUNTDOWN = font_utils.FONT_SMALL
+local FONT           = style.font.normal
+local FONT_HEAD      = style.font.head
+-- local FONT_VALUE  = style.font.bold  -- too large for the header sender
+-- local FONT_COUNTDOWN = style.font.normal
+-- local FONT_COUNTDOWN = style.font.info
+local FONT_COUNTDOWN = style.font.small
 
--- circle-phase glyphs for the header countdown (quarter steps, empty→full)
--- local TIMER_GLYPHS = { "○", "◔", "◑", "◕", "●" }
--- braille-cell countdown for the header (dots picked off top row first,
--- left then right within each row, so the cell erodes downward)
-local TIMER_GLYPHS = { "⣿", "⣾", "⣶", "⣴", "⣤", "⣠", "⣀", "⢀", "⠀" }
+-- countdown indicator: remaining seconds as braille cells, one dot per
+-- second packed eight to a cell. the leftmost cell erodes first — each
+-- tick picks a dot off it; once empty it drops off and the cell to its
+-- right starts draining. DRAIN is indexed by dot count (0-8), ordered to
+-- empty a cell's left column (dots 1,2,3,7) before the right (4,5,6,8)
+-- bottom to top within each column.
+-- (earlier styles: one "⡀" per second grouped in tens; a single "⣿…⠀"
+-- cell as a fraction gauge; "○◔◑◕●" quarter-phase circle)
+local DRAIN = { "⠀", "⢀", "⢠", "⢰", "⢸", "⣸", "⣼", "⣾", "⣿" }
+local function seconds_dots(secs)
+    secs = math.floor(secs)
+    if secs <= 0 then return "" end
+    local cells = {}
+    local partial = secs % 8
+    if partial > 0 then cells[#cells + 1] = DRAIN[partial + 1] end
+    for _ = 1, math.floor(secs / 8) do cells[#cells + 1] = DRAIN[9] end
+    return table.concat(cells)
+end
 
 
 -- Per-screen active notification boxes (for manual stacking)
@@ -143,7 +166,10 @@ local function reflow(s)
     local wibar = s.mywibox
     local wibar_h = (wibar and wibar.valid and wibar:geometry().height) or 0
     -- include screen y offset for correct multi-screen stacking
-    local y = s.geometry.y + wibar_h + NOTIF_TOP_MARGIN
+    local y = s.geometry.y + wibar_h + CFG.top_margin
+    -- lower popups overlap the one above by the border width minus 1px so
+    -- stacked borders nearly share a single line (matches popup creation)
+    local bw = style.popup.border_width
     for i = #boxes, 1, -1 do
         local entry = boxes[i]
         if entry.popup and entry.popup.valid then
@@ -152,7 +178,7 @@ local function reflow(s)
                 entry.popup:geometry({ y = math.floor(y) })
             end
             local geo = entry.popup:geometry()
-            y = y + geo.height + NOTIF_GAP
+            y = y + geo.height + CFG.gap - bw
         end
     end
 end
@@ -177,16 +203,45 @@ end
 
 
 -- // MARK --animation
--- old: a shared 60fps gears.timer stepped every active slide (see
---      ensure_anim_timer in git history).
--- new: somewm's native C frame clock via awesome.start_animation —
---      vsync-paced ticks, easing in C, and a :cancel() handle.
+-- awesome.start_animation is gone with the declarative animation rework;
+-- a shared 60fps gears.timer steps every active animation instead (the
+-- pre-native approach). step(progress 0..1), done() once at the end.
 
 local anim_count = 0
 
+local active_anims = setmetatable({}, { __mode = "k" })
+local anim_timer
+
+local function animate(duration, easing, step, done)
+    local eased = easing == "ease-out-cubic"
+        and function(p) return 1 - (1 - p) ^ 3 end
+        or function(p) return p end
+    local t0 = os.clock()
+    local t = gtimer {
+        timeout = 1 / 60,
+        autostart = true,
+        call_now = false,
+        callback = function(self)
+            local p = math.min((os.clock() - t0) / duration, 1)
+            step(eased(p))
+            if p >= 1 then
+                self:stop()
+                active_anims[self] = nil
+                if not next(active_anims) and anim_timer then
+                    anim_timer:stop()
+                    anim_timer = nil
+                end
+                if done then done() end
+            end
+        end,
+    }
+    active_anims[t] = true
+    return t
+end
+
 local function slide_to(entry, popup, start_y, target_y)
     anim_count = anim_count + 1
-    awesome.start_animation(SLIDE_DURATION, "ease-out-cubic",
+    animate(CFG.slide_duration, "ease-out-cubic",
         function(progress)
             if popup.valid then
                 popup:geometry({ y = math.floor(start_y + (target_y - start_y) * progress) })
@@ -202,84 +257,244 @@ local function slide_to(entry, popup, start_y, target_y)
 end
 
 
+-- Quick fade-out on close: marks the entry animating so reflow leaves its
+-- Stack Slot alone (lower Notifications reflow once the space frees, not
+-- mid-fade), then hides and removes it
+local function fade_out(entry, popup, s)
+    anim_count = anim_count + 1
+    entry.animating = true
+    animate(CFG.fade_duration, "linear",
+        function(progress)
+            if popup.valid then
+                popup.opacity = 1 - progress
+            end
+        end,
+        function()
+            anim_count = anim_count - 1
+            if popup.valid then
+                popup.visible = false
+            end
+            remove_box(s, entry)
+        end)
+end
+
+
 -- // MARK --widget-template
 
 -- Widget-Popup Form (same as resource/battery/volume/displays popups):
 -- Purple Header Bar (Title left, Sender + Countdown Glyph right in Gold),
 -- Black Body (Icon left, Message filling the rest), Actions Section below.
 local function build_widget(n, s)
+    -- naughty's fallback icon (/usr/share/awesome/icons/awesomeNN.png) is a
+    -- 1-bit image that renders as a grey blob at this size; treat it as
+    -- "no icon" so sender-less notifications don't get the placeholder
+    local icon = n.icon
+    if type(icon) == "string" and icon:match("/icons/awesome%d+%.png$") then
+        icon = nil
+    end
+
+    -- compact icon inline in the header, kept under text line height so it
+    -- doesn't stretch the row and leave the meta text floating off-centre
     local icon_widget = wibox.widget {
-        image = n.icon,
+        image = icon,
         resize = true,
         halign = "center",
         valign = "center",
-        forced_width = dpi(36),
-        forced_height = dpi(36),
+        forced_width = dpi(15),
+        forced_height = dpi(15),
         widget = wibox.widget.imagebox,
     }
 
-    -- countdown indicator: braille drain glyph + seconds at text
-    -- height, so the header stays one line tall like the widget popups
-    -- (the old 28px arcchart forced the header to ~40px)
+    -- countdown indicator: a braille dot per remaining second, rendered at
+    -- the right edge of the black body band (the old 28px arcchart forced
+    -- the header to ~40px; braille stays one line tall)
     local countdown_text = wibox.widget {
-        markup = string.format("<span foreground='%s'>⣿ %ds</span>",
-            COLOR_GOLD, n.timeout or DEFAULT_TIMEOUT),
+        markup = string.format("<span foreground='%s'>%s</span>",
+            COLOR_GOLD, seconds_dots(n.timeout or CFG.timeout)),
         font = FONT_COUNTDOWN,
         align = "center",
         valign = "center",
         widget = wibox.widget.textbox,
     }
 
-    -- title: white bold text on the purple header bar
+    -- title: white bold text on the purple header bar; top-aligned so a
+    -- wrapping message doesn't drift it off the first line
     local title_widget = wibox.widget {
         markup = "<b>" .. (n.title or "") .. "</b>",
         font = FONT_HEAD,
         align = "left",
-        valign = "center",
+        valign = "top",
         widget = wibox.widget.textbox,
     }
 
-    -- sender + timestamp: gold text in the header's right slot, matching the
-    -- notification centre's "app  ·  YYYY-MM-DD HH:MM" value format
+    -- sender: bold gold in the header's right slot; timestamp sits at the
+    -- very right in regular weight — same "app  ·  YYYY-MM-DD HH:MM"
+    -- value format as the notification centre
     local app_name_widget = wibox.widget {
         markup = "<b><span foreground='" .. COLOR_GOLD .. "'>"
-            .. gstring.xml_escape((n.app_name or "") .. "  ·  "
-                .. os.date("%Y-%m-%d %H:%M")) .. "</span></b>",
-        font = font_utils.FONT_INFO,
+            .. gstring.xml_escape(n.app_name or "") .. " ·"
+            .. "</span></b>",
+        font = style.font.info,
         align = "right",
         valign = "center",
         widget = wibox.widget.textbox,
     }
 
+    local time_widget = wibox.widget {
+        markup = "<span foreground='" .. COLOR_GOLD .. "'>"
+            .. os.date("%Y-%m-%d %H:%M") .. "</span>",
+        font = style.font.info,
+        align = "right",
+        valign = "center",
+        widget = wibox.widget.textbox,
+    }
+
+    -- message takes the header's expanding middle slot (align's "inside"
+    -- default), so it wraps instead of overlapping the right-side meta.
+    -- top-aligned: extra lines grow downward, keeping the first line level
+    -- with the title and meta
+    local message_widget = wibox.widget {
+        markup = n.message or n.text or "",
+        font = FONT,
+        align = "left",
+        valign = "top",
+        wrap = "word_char",
+        widget = wibox.widget.textbox,
+    }
+
+    -- centre a one-line message in the band, and start a multiline body's
+    -- first line at that same offset. the pad is symmetric so a body taller
+    -- than its siblings stays centred; the floor keeps a few px of black
+    -- breathing room around short bodies
+    local probe = wibox.widget { text = "Ag", font = FONT,
+        widget = wibox.widget.textbox }
+    -- somewm textboxes measure via get_preferred_size; fall back to fit on
+    -- builds that still carry the classic widget API
+    local function measure(w)
+        if w.get_preferred_size then return w:get_preferred_size(s) end
+        return w:fit(s, 9999, 9999)
+    end
+    local _, line_h = measure(probe)
+    local title_w, title_h = measure(title_widget)
+    local app_w, meta_h = measure(app_name_widget)
+    local time_w = select(1, measure(time_widget))
+    local has_app = n.app_name and n.app_name ~= ""
+    if not has_app then app_w = 0 end
+    local sib_h = math.max(icon and dpi(15) or 0, title_h, meta_h)
+    local msg_pad = math.max(dpi(4), math.floor((sib_h - line_h) / 2))
+
+    -- countdown lives inside the black band now; the right meta section is
+    -- sender + timestamp only (frozen exact so the purple box never shrinks)
+    local show_cd = (n.timeout or CFG.timeout) > 5
+    local right_w = app_w + (has_app and dpi(6) or 0) + time_w
+
+    -- the title column keeps its dpi(180) floor so the black band stays
+    -- aligned across typical notifications, but grows to the title's natural
+    -- width so longer titles render on a single line
+    local title_col_w = math.max(dpi(180),
+        title_w + (icon and (dpi(15) + style.spacing.l) or 0))
+
     local title_bar = wibox.widget {
         {
             {
-                title_widget,
-                nil,
                 {
-                    app_name_widget,
-                    (n.timeout or DEFAULT_TIMEOUT) > 5 and countdown_text or nil,
-                    spacing = dpi(6),
-                    layout = wibox.layout.fixed.horizontal,
+                    -- title column: dpi(180) minimum so the black body band
+                    -- starts at the same offset for the majority of
+                    -- notifications, expanding to fit the title on one line
+                    {
+                        {
+                            icon and wibox.widget {
+                                icon_widget,
+                                right = style.spacing.l,
+                                widget = wibox.container.margin,
+                            } or nil,
+                            title_widget,
+                            layout = wibox.layout.fixed.horizontal,
+                        },
+                        -- same top inset as the message's first line, so the
+                        -- band's vertical padding splits evenly instead of
+                        -- pooling below the text in one-line toasts
+                        top = msg_pad + dpi(1),
+                        widget = wibox.container.margin,
+                    },
+                    strategy = "exact",
+                    width = title_col_w,
+                    widget = wibox.container.constraint,
+                },
+                {
+                    {
+                        {
+                            -- message expands; countdown hugs the band's
+                            -- right edge, vertically centred
+                            nil,
+                            {
+                                message_widget,
+                                left = style.spacing.xl, right = style.spacing.xl,
+                                -- the band starts spacing.m above the inner row
+                                -- (its negative margin cancels the purple pad), so
+                                -- the first line needs that back on top to sit level
+                                -- with the title/meta and centre a single-line body;
+                                -- extra lines grow downward from that same offset.
+                                -- +1/-1 biases the text down inside its band: glyph
+                                -- ink sits high in the line box, so a geometrically
+                                -- centred line still reads high
+                                top = style.spacing.m + msg_pad + dpi(1),
+                                bottom = msg_pad - dpi(1),
+                                widget = wibox.container.margin,
+                            },
+                            show_cd and {
+                                countdown_text,
+                                right = style.spacing.s,
+                                widget = wibox.container.margin,
+                            } or nil,
+                            layout = wibox.layout.align.horizontal,
+                        },
+                        bg = COLOR_BLACK,
+                        widget = wibox.container.background,
+                    },
+                    -- negative vertical margins cancel the purple bar's
+                    -- padding so the black reaches the popup's top and
+                    -- bottom edges; horizontal margins leave purple
+                    -- strips beside the block
+                    left = style.spacing.l, right = style.spacing.l,
+                    top = -dpi(6), bottom = -dpi(6),
+                    widget = wibox.container.margin,
+                },
+                {
+                    -- fixed-width right section: measured once while the
+                    -- countdown is full so the purple box keeps its size as
+                    -- braille cells drain; the inner place keeps content
+                    -- right-aligned so the gap grows on its left
+                    {
+                        {
+                            {
+                                has_app and app_name_widget or nil,
+                                time_widget,
+                                spacing = style.spacing.m,
+                                layout = wibox.layout.fixed.horizontal,
+                            },
+                            halign = "right",
+                            valign = "top",
+                            widget = wibox.container.place,
+                        },
+                        -- same top inset as the message's first line (and the
+                        -- title column), so multiline bodies don't shift it
+                        top = msg_pad + dpi(1),
+                        widget = wibox.container.margin,
+                    },
+                    strategy = "exact",
+                    width = right_w,
+                    widget = wibox.container.constraint,
                 },
                 layout = wibox.layout.align.horizontal,
             },
-            left = dpi(10), right = dpi(10),
-            top = dpi(6), bottom = dpi(6),
+            left = style.spacing.xl, right = style.spacing.xl,
+            top = style.spacing.m, bottom = style.spacing.m,
             widget = wibox.container.margin,
         },
         bg = COLOR_PURPLE,
         fg = COLOR_WHITE,
         widget = wibox.container.background,
-    }
-
-    local message_widget = wibox.widget {
-        markup = n.message or n.text or "",
-        font = FONT,
-        align = "left",
-        valign = "center",
-        wrap = "word_char",
-        widget = wibox.widget.textbox,
     }
 
     local actions_widget
@@ -290,17 +505,18 @@ local function build_widget(n, s)
                 {
                     {
                         text = action.name,
+                        font = style.font.bold,
                         widget = wibox.widget.textbox,
                     },
                     halign = "center",
                     fill_horizontal = true,
                     widget = wibox.container.place,
                 },
-                forced_height = dpi(24),
+                forced_height = dpi(20),
                 widget = wibox.container.background,
-                bg = "#ffffff22",
+                bg = "#ffffff3d",
                 shape = function(cr, w, h)
-                    gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3))
+                    gears.shape.rounded_rect(cr, w, h, style.popup.radius)
                 end,
                 buttons = {
                     awful.button({}, 1, function()
@@ -310,7 +526,7 @@ local function build_widget(n, s)
             })
         end
         local actions_row = wibox.layout.flex.horizontal()
-        actions_row.spacing = dpi(4)
+        actions_row.spacing = style.spacing.xs
         for _, btn in ipairs(action_buttons) do
             actions_row:add(btn)
         end
@@ -324,8 +540,8 @@ local function build_widget(n, s)
                 },
                 {
                     actions_row,
-                    left = dpi(10), right = dpi(10),
-                    top = dpi(4), bottom = dpi(6),
+                    left = style.spacing.xs, right = style.spacing.xs,
+                    top = style.spacing.xs, bottom = style.spacing.xs,
                     widget = wibox.container.margin,
                 },
                 layout = wibox.layout.fixed.vertical,
@@ -336,45 +552,24 @@ local function build_widget(n, s)
         }
     end
 
-    -- body: icon left, message filling the remaining width
-    local body = wibox.widget {
-        {
-            {
-                {
-                    icon_widget,
-                    right = dpi(8),
-                    widget = wibox.container.margin,
-                },
-                message_widget,
-                nil,
-                layout = wibox.layout.align.horizontal,
-            },
-            left = dpi(10), right = dpi(10),
-            top = dpi(6), bottom = dpi(6),
-            widget = wibox.container.margin,
-        },
-        bg = COLOR_BLACK,
-        fg = COLOR_WHITE,
-        widget = wibox.container.background,
-    }
-
+    -- single-row layout: the header carries icon + title + message + meta;
+    -- actions still get their own black section under it when present
     local inner = wibox.widget {
         {
             title_bar,
-            body,
             actions_widget,
-            spacing = dpi(0),
+            spacing = style.spacing.none,
             layout = wibox.layout.fixed.vertical,
         },
         bg = COLOR_BLACK,
         widget = wibox.container.background,
     }
 
-    -- enforce 15% minimum screen width at the widget level so the popup
+    -- enforce the minimum screen-width fraction at the widget level so the popup
     -- is actually that wide (awful.popup sizes from its widget tree)
     local min_width = dpi(0)
     if s and s.valid then
-        min_width = math.floor(s.geometry.width * 0.15)
+        min_width = math.floor(s.geometry.width * CFG.min_width_frac)
     end
     local widget = wibox.widget {
         inner,
@@ -417,21 +612,30 @@ function M.display(n)
 
     local widget, countdown_text = build_widget(n, s)
 
+    -- border is drawn inside the widget tree, not on the drawin: somewm's
+    -- border scene buffers never accept input, so clicks on a drawin-level
+    -- border pass straight through. as a widget container the border pixels
+    -- are content, and the popup's button list dismisses on them
+    local bw = style.popup.border_width
     local popup = awful.popup {
-        widget = widget,
+        widget = wibox.widget {
+            widget,
+            border_width = bw,
+            border_color = COLOR_GOLD,
+            widget = wibox.container.background,
+        },
         screen = s,
         visible = false,
         ontop = true,
         type = "notification",
-        bg = "#000000",
-        fg = "#ffffff",
-        -- border_width = 0,
-        border_width = beautiful.bar_edge_width or beautiful.border_width or dpi(1),
+        bg = style.color.bg,
+        fg = style.color.fg,
+        border_width = 0,
         border_color = COLOR_GOLD,
         shape = function(cr, w, h)
-            gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3))
+            gears.shape.rounded_rect(cr, w, h, style.popup.radius)
         end,
-        maximum_width = MAX_NOTIF_WIDTH,
+        maximum_width = CFG.max_width,
     }
 
     -- set n.box so existing added-signal handler can access it
@@ -461,30 +665,26 @@ function M.display(n)
     local entry = { popup = popup, notification = n }
 
     -- timeout handling
-    local timeout = n.timeout or DEFAULT_TIMEOUT
+    local timeout = n.timeout or CFG.timeout
     local timeout_timer
     local countdown_timer
     if timeout > 0 then
-        -- countdown timer (updates the braille drain glyph + seconds text)
-        -- uses a tick counter instead of os.clock() (which measures CPU time,
+        -- countdown timer: one tick per second, each tick drops one dot.
+        -- a counter is used instead of os.clock() (which measures CPU time
         -- not wall time, and barely advances while awesome is idle)
-        local arc_duration = timeout
-        local arc_ticks = 0
-        local ARC_RATE = 15
+        local secs_left = math.ceil(timeout)
+        local function paint_countdown()
+            countdown_text:set_markup(string.format(
+                "<span foreground='%s'>%s</span>", COLOR_GOLD,
+                seconds_dots(secs_left)))
+        end
         countdown_timer = gtimer {
-            timeout = 1 / ARC_RATE,
+            timeout = 1,
             autostart = false,
             callback = guarded(function()
-                arc_ticks = arc_ticks + 1
-                local elapsed = arc_ticks / ARC_RATE
-                local remaining = math.max(0, 1 - elapsed / arc_duration)
-                -- TIMER_GLYPHS runs full→empty, so index by elapsed fraction:
-                -- remaining=1 -> ⣿, remaining=0 -> ⠀
-                local glyph = TIMER_GLYPHS[math.floor((1 - remaining) * (#TIMER_GLYPHS - 1) + 0.5) + 1]
-                local secs_left = math.ceil(remaining * arc_duration)
-                countdown_text:set_markup(string.format(
-                    "<span foreground='%s'>%s %ds</span>", COLOR_GOLD, glyph, secs_left))
-                if remaining <= 0 then countdown_timer:stop() end
+                secs_left = math.max(0, secs_left - 1)
+                paint_countdown()
+                if secs_left <= 0 then countdown_timer:stop() end
             end),
         }
 
@@ -500,6 +700,7 @@ function M.display(n)
         -- OSD plugins (volume, brightness) call n:reset_timeout() to extend
         -- the popup on each scroll; restart our own timeout_timer to match so
         -- the notification doesn't close on the original timer's schedule
+        -- and refill the dots to the new remaining count
         n:connect_signal("property::timeout", guarded(function(_, new_t)
             if timeout_timer and timeout_timer.started then
                 timeout_timer:stop()
@@ -507,6 +708,8 @@ function M.display(n)
             if new_t and new_t > 0 then
                 timeout_timer.timeout = new_t
                 timeout_timer:start()
+                secs_left = math.ceil(new_t)
+                paint_countdown()
             end
         end))
     end
@@ -521,19 +724,25 @@ function M.display(n)
         if countdown_timer then countdown_timer:start() end
     end))
 
-    -- cleanup on destroy
+    -- cleanup on destroy: fade out instead of vanishing. an unshown Popup
+    -- (destroyed during deferred setup) has nothing to fade — remove directly
     n:connect_signal("destroyed", guarded(function()
+        entry.destroyed = true
         if timeout_timer then timeout_timer:stop() end
         if countdown_timer then countdown_timer:stop() end
-        if popup and popup.valid then
-            popup.visible = false
+        if popup and popup.valid and popup.visible then
+            fade_out(entry, popup, s)
+        else
+            if popup and popup.valid then
+                popup.visible = false
+            end
+            remove_box(s, entry)
         end
-        remove_box(s, entry)
     end))
 
     -- defer geometry-dependent setup to next event loop (popup needs layout)
     gtimer.delayed_call(guarded(function()
-        if not popup.valid or not s.valid then return end
+        if not popup.valid or not s.valid or entry.destroyed then return end
 
         local ok, err = pcall(function()
             local screen_geo = s.geometry
@@ -549,13 +758,24 @@ function M.display(n)
             -- must include the screen's y offset for multi-screen layouts
             local wibar = s.mywibox
             local wibar_h = (wibar and wibar.valid and wibar:geometry().height) or 0
-            local target_y = screen_geo.y + wibar_h + NOTIF_TOP_MARGIN
+            local target_y = screen_geo.y + wibar_h + CFG.top_margin
+            -- newest entry sits at index 1 = bottom of the stack; land
+            -- below the existing popups with the same border overlap
+            -- reflow uses
+            local bw = style.popup.border_width
+            local boxes = screen_boxes[s]
+            for i = #boxes, 2, -1 do
+                local e = boxes[i]
+                if e.popup and e.popup.valid then
+                    target_y = target_y + e.popup:geometry().height + CFG.gap - bw
+                end
+            end
 
             -- start position: above the target screen so the popup slides
             -- down from the top edge of that specific screen
             -- set width explicitly so we can center perfectly before showing
             -- (somewm may not reposition an already-visible popup)
-            local min_w = math.floor(screen_geo.width * 0.15)
+            local min_w = math.floor(screen_geo.width * CFG.min_width_frac)
             local popup_x = screen_geo.x + math.floor((screen_geo.width - min_w) / 2)
             popup:geometry({ width = min_w, x = popup_x, y = screen_geo.y - dpi(400) })
             popup.visible = true
@@ -563,7 +783,7 @@ function M.display(n)
             -- defer to the next frame so the compositor has drawn the popup
             -- and geometry().height reflects the real height
             gtimer.delayed_call(guarded(function()
-                if not popup.valid or not s.valid then return end
+                if not popup.valid or not s.valid or entry.destroyed then return end
 
                 local popup_w = popup:geometry().width
                 local popup_h = popup:geometry().height
