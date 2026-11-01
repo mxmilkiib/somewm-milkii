@@ -601,9 +601,11 @@ local function make_map()
 
     -- wl_output transform -> the label's transform word; the raster knows
     -- the five plain ones, so flipped rotations draw at the same reading
-    -- direction without the mirror
-    local TRANSFORM_WORDS = { [1] = "90", "180", "270", "flipped",
-        "90", "flipped-180", "270" }
+    -- direction without the mirror. index 1 (normal) stays empty — plain
+    -- text. all-keyed, since positional entries number from 1 and
+    -- overwrite keyed fields rather than continuing from them
+    local TRANSFORM_WORDS = { [2] = "90", [3] = "180", [4] = "270",
+        [5] = "flipped", [6] = "90", [7] = "flipped-180", [8] = "270" }
 
     -- the label face: monospace at the old toy-font's pixel size, interned
     -- on first use
