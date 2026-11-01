@@ -21,23 +21,22 @@ local wibox = require("wibox")
 local gears = require("gears")
 local naughty = require("naughty")
 local guarded = require("error_guard")
+local style   = require("plugins.style")
 
 local M = {}
 
 local ICON_DIR = "/usr/share/icons/Adwaita/symbolic"
 
-local function get_xresources()
-    if beautiful.xresources then return beautiful.xresources end
-    local ok, xr = pcall(require, "beautiful.xresources")
-    if ok then return xr end
-    return nil
-end
+local dpi = style.dpi
 
-local dpi = (get_xresources() and get_xresources().apply_dpi) or function(v) return v end
+local COLOR_FG = style.color.fg
+-- module configuration; override via M.configure{...} before first use
+local CFG = {
+    icon_size = dpi(16),
+}
 
-local COLOR_FG = beautiful.fg_normal or "#ffffff"
-local COLOR_DIM = "#777777"
-local ICON_SIZE = dpi(16)
+function M.configure(opts) style.merge(CFG, opts) end
+
 
 
 -- MARK: ICON LOADING
@@ -58,8 +57,8 @@ local function make_icon_widget(symbolic_name, tooltip, onclick)
     local icon_surf = load_svg_icon(symbolic_name)
     local img = wibox.widget {
         image = icon_surf,
-        forced_width = ICON_SIZE,
-        forced_height = ICON_SIZE,
+        forced_width = CFG.icon_size,
+        forced_height = CFG.icon_size,
         resize = true,
         widget = wibox.widget.imagebox,
     }

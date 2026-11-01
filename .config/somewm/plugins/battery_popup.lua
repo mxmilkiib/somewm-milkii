@@ -18,8 +18,10 @@ local beautiful = require("beautiful")
 local gshape  = require("gears.shape")
 local guarded = require("error_guard")
 local popup_common = require("plugins.popup_common")
+local style   = require("plugins.style")
+local power   = require("plugins.power")
 
-local dpi = beautiful.xresources.apply_dpi
+local dpi = style.dpi
 
 local COLOR_PURPLE = popup_common.theme.PURPLE
 local COLOR_BLACK  = popup_common.theme.BLACK
@@ -28,9 +30,16 @@ local COLOR_GOLD   = popup_common.theme.GOLD
 local COLOR_GREY   = popup_common.theme.GREY
 local COLOR_HOVER  = popup_common.theme.HOVER
 local FONT       = popup_common.fonts.FONT
-local CONTENT_W  = dpi(240)   -- fixed popup content width (full-width rows)
+-- module configuration; override via M.configure{...} before first use
+local CFG = {
+    content_w = dpi(240),   -- fixed popup content width (full-width rows)
+}
+
+
 
 local M = {}
+
+function M.configure(opts) style.merge(CFG, opts) end
 
 local POWER_PROFILES = {
     { key = "performance", label = "Performance" },
@@ -44,6 +53,8 @@ local popup
 local popup_holder = {}
 local profile_buttons = {}
 local active_profile  = nil
+local lid_buttons     = {}
+local active_lid      = nil
 -- forward declarations: `hide` is referenced by the draggable_header
 -- controller before assignment; `ctrl` is built in build_content once the
 -- popup exists
@@ -188,7 +199,7 @@ local function make_profile_button(p)
             fill_horizontal = true,
             widget = wibox.container.place,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         bg = COLOR_BLACK,
         fg = COLOR_WHITE,
         widget = wibox.container.background,
@@ -221,8 +232,58 @@ local function make_profile_button(p)
     return bg
 end
 
+-- one full-width lid-action button; highlighted when it matches active_lid
+-- (mirrors make_profile_button, but the action lives in plugins/power.lua
+-- and persists via its state file)
+local function make_lid_button(p)
+    local txt = wibox.widget {
+        text  = p.label,
+        fg    = COLOR_WHITE,
+        font  = FONT,
+        widget = wibox.widget.textbox,
+    }
+    local bg = wibox.widget {
+        {
+            txt,
+            halign = "center",
+            valign = "center",
+            fill_horizontal = true,
+            widget = wibox.container.place,
+        },
+        forced_width = CFG.content_w,
+        bg = COLOR_BLACK,
+        fg = COLOR_WHITE,
+        widget = wibox.container.background,
+    }
+    bg._key = p.key
+    bg._inactive_bg = COLOR_BLACK
+    bg._active_bg   = COLOR_PURPLE
+
+    local function paint()
+        local active = (p.key == active_lid)
+        bg.bg = active and bg._active_bg or bg._inactive_bg
+        bg.fg = active and COLOR_GOLD or COLOR_WHITE
+        txt.fg = active and COLOR_GOLD or COLOR_WHITE
+    end
+    bg.paint = paint
+
+    bg:connect_signal("mouse::enter", guarded(function()
+        if p.key ~= active_lid then bg.bg = COLOR_HOVER end
+    end))
+    bg:connect_signal("mouse::leave", guarded(function()
+        if p.key ~= active_lid then bg.bg = bg._inactive_bg end
+    end))
+    bg:buttons(gears.table.join(awful.button({}, 1, guarded(function()
+        power.set_lid_action(p.key)
+        active_lid = p.key
+        for _, b in ipairs(lid_buttons) do b:paint() end
+    end))))
+    paint()
+    return bg
+end
+
 local function separator()
-    return popup_common.separator(CONTENT_W)
+    return popup_common.separator(CFG.content_w)
 end
 
 local function build_content()
@@ -242,9 +303,9 @@ local function build_content()
                 status_text,
                 ac_text,
                 layout = wibox.layout.fixed.vertical,
-                spacing = dpi(2),
+                spacing = style.spacing.xxs,
             },
-            spacing = dpi(8),
+            spacing = style.spacing.l,
             layout = wibox.layout.fixed.horizontal,
         },
         energy_text,
@@ -253,12 +314,12 @@ local function build_content()
         voltage_text,
         adaptive_text,
         layout = wibox.layout.fixed.vertical,
-        spacing = dpi(4),
+        spacing = style.spacing.s,
     }
 
     local profile_list = wibox.widget {
         layout = wibox.layout.fixed.vertical,
-        spacing = dpi(2),
+        spacing = style.spacing.xxs,
     }
     for _, p in ipairs(POWER_PROFILES) do
         local b = make_profile_button(p)
@@ -274,7 +335,7 @@ local function build_content()
         holder = popup_holder,
         name  = "battery_popup",
         title = "Battery",
-        width = CONTENT_W,
+        width = CFG.content_w,
         hide  = function() hide() end,
     }
 
@@ -282,18 +343,18 @@ local function build_content()
     local info_block = wibox.widget {
         {
             info_rows,
-            top = dpi(8), bottom = dpi(8),
-            left = dpi(10), right = dpi(10),
+            top = style.spacing.l, bottom = style.spacing.l,
+            left = style.spacing.xl, right = style.spacing.xl,
             widget = wibox.container.margin,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         bg = COLOR_BLACK,
         widget = wibox.container.background,
     }
 
     local profile_label = wibox.widget {
         make_text("Power Profile", COLOR_GREY),
-        left = dpi(10), top = dpi(8), bottom = dpi(4),
+        left = style.spacing.xl, top = style.spacing.l, bottom = style.spacing.s,
         widget = wibox.container.margin,
     }
 
@@ -312,22 +373,39 @@ local function build_content()
                 charge_mode_text,
                 charge_mode_hint_text,
                 layout = wibox.layout.fixed.vertical,
-                spacing = dpi(2),
+                spacing = style.spacing.xxs,
             },
-            left = dpi(10), right = dpi(10),
-            top = dpi(4), bottom = dpi(8),
+            left = style.spacing.xl, right = style.spacing.xl,
+            top = style.spacing.s, bottom = style.spacing.l,
             widget = wibox.container.margin,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         bg = COLOR_BLACK,
         widget = wibox.container.background,
     }
 
     local charge_mode_label_widget = wibox.widget {
         make_text("Charge Mode", COLOR_GREY),
-        left = dpi(10), top = dpi(8), bottom = dpi(4),
+        left = style.spacing.xl, top = style.spacing.l, bottom = style.spacing.s,
         widget = wibox.container.margin,
     }
+
+    -- lid-close action picker; the selection lives in plugins/power.lua and
+    -- persists via its state file across reloads/restarts
+    local lid_label = wibox.widget {
+        make_text("Lid Close", COLOR_GREY),
+        left = style.spacing.xl, top = style.spacing.l, bottom = style.spacing.s,
+        widget = wibox.container.margin,
+    }
+    local lid_list = wibox.widget {
+        layout = wibox.layout.fixed.vertical,
+        spacing = style.spacing.xxs,
+    }
+    for _, p in ipairs(power.lid_options) do
+        local b = make_lid_button(p)
+        lid_buttons[#lid_buttons + 1] = b
+        lid_list:add(b)
+    end
 
     return wibox.widget {
         header,
@@ -338,6 +416,9 @@ local function build_content()
         separator(),
         charge_mode_label_widget,
         charge_mode_btn,
+        separator(),
+        lid_label,
+        lid_list,
         layout = wibox.layout.fixed.vertical,
     }
 end
@@ -416,6 +497,10 @@ local function refresh_popup()
             charge_mode_hint_text.text = charge_mode_hint(mode)
         end
     end
+
+    -- refresh lid-action picker (source of truth: plugins/power.lua)
+    active_lid = power.lid_action
+    for _, b in ipairs(lid_buttons) do b:paint() end
 end
 
 
@@ -423,7 +508,7 @@ end
 
 local function ensure_popup()
     if popup then return end
-    local style = popup_common.popup_style()
+    local pstyle = popup_common.popup_style()
     -- build content first so the awful.popup constructor gets its required
     -- widget arg; draggable_header reads popup via popup_holder, assigned
     -- right after construction
@@ -431,22 +516,22 @@ local function ensure_popup()
     popup = awful.popup {
         -- awful.popup sizes the drawin by fitting the widget tree at
         -- unbounded width, but long info lines wrap once laid out at
-        -- CONTENT_W — the drawin ends up short by the wrapped-line growth
+        -- CFG.content_w — the drawin ends up short by the wrapped-line growth
         -- and the fixed.vertical clips the last row (Charge Mode) to a few
         -- px. Capping the fit width makes the popup height account for
         -- wrapped lines.
         widget   = wibox.widget {
             content,
             strategy = "max",
-            width    = CONTENT_W,
+            width    = CFG.content_w,
             widget   = wibox.container.constraint,
         },
         visible  = false,
         ontop    = true,
         bg       = COLOR_BLACK,
-        border_width = style.border_width,
+        border_width = pstyle.border_width,
         border_color = COLOR_GOLD,
-        shape = style.shape,
+        shape = pstyle.shape,
     }
     popup_holder.popup = popup
 end
@@ -482,7 +567,7 @@ function M.attach(widget)
         awful.button({}, 1, function()
             -- capture geometry at press time (see popup_common.attach comment)
             popup._anchor_geo    = mouse.current_widget_geometry
-            popup._anchor_screen = mouse.current_wibox and mouse.current_wibox.screen
+            popup._anchor_screen = (mouse.current_wibox and mouse.current_wibox.screen) or mouse.screen
             popup._anchor_wibox  = mouse.current_wibox
             -- widget_press arms the wibar handler's ignore flag and returns
             -- true if that handler already closed the popup on this press

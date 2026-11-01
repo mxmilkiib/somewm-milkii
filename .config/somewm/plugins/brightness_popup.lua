@@ -13,8 +13,9 @@ local beautiful = require("beautiful")
 local gshape  = require("gears.shape")
 local guarded = require("error_guard")
 local popup_common = require("plugins.popup_common")
+local style   = require("plugins.style")
 
-local dpi = beautiful.xresources.apply_dpi
+local dpi = style.dpi
 
 local COLOR_PURPLE = popup_common.theme.PURPLE
 local COLOR_BLACK  = popup_common.theme.BLACK
@@ -26,9 +27,16 @@ local COLOR_RED    = popup_common.theme.RED
 local COLOR_GREEN   = popup_common.theme.GREEN
 local FONT       = popup_common.fonts.FONT
 local FONT_HEAD  = popup_common.fonts.FONT_HEAD
-local CONTENT_W  = dpi(240)
+-- module configuration; override via M.configure{...} before first use
+local CFG = {
+    content_w = dpi(240),
+}
+
+
 
 local M = {}
+
+function M.configure(opts) style.merge(CFG, opts) end
 
 local popup
 -- holder table: draggable_header reads popup from here so build_content can
@@ -62,7 +70,7 @@ local BRIGHTNESSD_SOCK = get_sock_path()
 local make_text = popup_common.make_text
 
 local function separator()
-    return popup_common.separator(CONTENT_W)
+    return popup_common.separator(CFG.content_w)
 end
 
 local function make_refresh_button()
@@ -80,7 +88,7 @@ local function make_refresh_button()
             fill_horizontal = true,
             widget = wibox.container.place,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         bg = COLOR_BLACK,
         fg = COLOR_WHITE,
         widget = wibox.container.background,
@@ -122,7 +130,7 @@ local function make_inhibit_button()
             fill_horizontal = true,
             widget = wibox.container.place,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         bg = COLOR_BLACK,
         fg = COLOR_WHITE,
         widget = wibox.container.background,
@@ -155,7 +163,7 @@ local function make_saver_button()
             fill_horizontal = true,
             widget = wibox.container.place,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         bg = COLOR_BLACK,
         fg = COLOR_WHITE,
         widget = wibox.container.background,
@@ -167,6 +175,75 @@ local function make_saver_button()
         require("plugins.screensaver").preview()
     end)))
     return bg
+end
+
+-- saver delay presets: runtime re-registration of the "screensaver" idle
+-- timeout (nil disables the saver stage; DPMS is unaffected)
+local SAVER_PRESETS = {
+    { label = "5m",  secs = 300 },
+    { label = "15m", secs = 900 },
+    { label = "30m", secs = 1800 },
+    { label = "1h",  secs = 3600 },
+    { label = "off", secs = nil },
+}
+
+local function make_saver_timeout_row()
+    local saver = require("plugins.screensaver")
+    local entries = {}
+    local function refresh_labels()
+        for _, e in ipairs(entries) do
+            e.txt.fg = (e.secs == saver.saver_timeout) and COLOR_GREEN or COLOR_GREY
+        end
+    end
+    local row = wibox.widget {
+        layout  = wibox.layout.flex.horizontal,
+        spacing = style.spacing.xxs,
+    }
+    for _, p in ipairs(SAVER_PRESETS) do
+        local txt = wibox.widget {
+            text   = p.label,
+            fg     = COLOR_GREY,
+            font   = FONT,
+            widget = wibox.widget.textbox,
+        }
+        local bg = wibox.widget {
+            {
+                txt,
+                halign = "center",
+                valign = "center",
+                fill_horizontal = true,
+                widget = wibox.container.place,
+            },
+            bg = COLOR_BLACK,
+            fg = COLOR_WHITE,
+            widget = wibox.container.background,
+        }
+        bg:connect_signal("mouse::enter", function() bg.bg = COLOR_HOVER end)
+        bg:connect_signal("mouse::leave", function() bg.bg = COLOR_BLACK end)
+        bg:buttons(gears.table.join(awful.button({}, 1, function()
+            saver.set_saver_timeout(p.secs)
+            refresh_labels()
+        end)))
+        entries[#entries + 1] = { secs = p.secs, txt = txt }
+        row:add(bg)
+    end
+    refresh_labels()
+    return wibox.widget {
+        {
+            {
+                make_text("Screensaver Delay", COLOR_WHITE, FONT_HEAD),
+                row,
+                layout = wibox.layout.fixed.vertical,
+                spacing = style.spacing.xs,
+            },
+            left = style.spacing.m, right = style.spacing.m,
+            top = style.spacing.s, bottom = style.spacing.s,
+            widget = wibox.container.margin,
+        },
+        forced_width = CFG.content_w,
+        bg = COLOR_BLACK,
+        widget = wibox.container.background,
+    }
 end
 
 
@@ -181,25 +258,26 @@ local function build_content()
         holder = popup_holder,
         name  = "brightness_popup",
         title = "Displays",
-        width = CONTENT_W,
+        width = CFG.content_w,
         hide  = function() hide() end,
     }
 
     local rows_container = wibox.widget {
         layout = wibox.layout.fixed.vertical,
-        spacing = dpi(2),
+        spacing = style.spacing.xxs,
     }
 
     local refresh_btn = make_refresh_button()
     local inhibit_btn = make_inhibit_button()
     local saver_btn   = make_saver_button()
+    local saver_row   = make_saver_timeout_row()
 
     return wibox.widget {
         header,
         {
             rows_container,
-            top = dpi(8), bottom = dpi(8),
-            left = dpi(10), right = dpi(10),
+            top = style.spacing.l, bottom = style.spacing.l,
+            left = style.spacing.xl, right = style.spacing.xl,
             widget = wibox.container.margin,
         },
         separator(),
@@ -208,6 +286,8 @@ local function build_content()
         inhibit_btn,
         separator(),
         saver_btn,
+        separator(),
+        saver_row,
         layout = wibox.layout.fixed.vertical,
     }, rows_container, refresh_btn
 end
@@ -377,7 +457,7 @@ function refresh_popup(on_done)
                         source_text,
                         status_text,
                         layout = wibox.layout.fixed.horizontal,
-                        spacing = dpi(4),
+                        spacing = style.spacing.s,
                     },
                     forced_width = dpi(120),
                     widget = wibox.container.background,
@@ -394,14 +474,14 @@ function refresh_popup(on_done)
                 handle_width        = dpi(12),
                 handle_height       = dpi(12),
                 handle_color        = COLOR_WHITE,
-                handle_border_width = dpi(1),
+                handle_border_width = style.popup.border_width,
                 handle_border_color = COLOR_PURPLE,
                 min   = 1,
                 max   = 100,
                 value = d.brightness,
                 -- slider:fit() returns the full available height, so without a
                 -- forced height the popup would grow to the whole workarea
-                forced_width  = CONTENT_W - dpi(20),
+                forced_width  = CFG.content_w - 2 * style.popup.margin_x,
                 forced_height = dpi(14),
                 widget = wibox.widget.slider,
             }
@@ -443,17 +523,17 @@ function refresh_popup(on_done)
                 header,
                 slider,
                 layout = wibox.layout.fixed.vertical,
-                spacing = dpi(4),
+                spacing = style.spacing.s,
             }
 
             local row_bg = wibox.widget {
                 {
                     row,
-                    left = dpi(6), right = dpi(6),
-                    top = dpi(4), bottom = dpi(4),
+                    left = style.spacing.m, right = style.spacing.m,
+                    top = style.spacing.s, bottom = style.spacing.s,
                     widget = wibox.container.margin,
                 },
-                forced_width = CONTENT_W,
+                forced_width = CFG.content_w,
                 bg = COLOR_BLACK,
                 widget = wibox.container.background,
             }
@@ -493,11 +573,11 @@ function refresh_popup(on_done)
             handle_width        = dpi(12),
             handle_height       = dpi(12),
             handle_color        = COLOR_WHITE,
-            handle_border_width = dpi(1),
+            handle_border_width = style.popup.border_width,
             handle_border_color = COLOR_PURPLE,
             min   = 1,
             max   = 100,
-            forced_width  = CONTENT_W - dpi(20),
+            forced_width  = CFG.content_w - 2 * style.popup.margin_x,
             forced_height = dpi(14),
             widget = wibox.widget.slider,
         }
@@ -528,16 +608,16 @@ function refresh_popup(on_done)
             all_header,
             all_slider,
             layout = wibox.layout.fixed.vertical,
-            spacing = dpi(4),
+            spacing = style.spacing.s,
         }
         local all_row_bg = wibox.widget {
             {
                 all_row,
-                left = dpi(6), right = dpi(6),
-                top = dpi(4), bottom = dpi(4),
+                left = style.spacing.m, right = style.spacing.m,
+                top = style.spacing.s, bottom = style.spacing.s,
                 widget = wibox.container.margin,
             },
-            forced_width = CONTENT_W,
+            forced_width = CFG.content_w,
             bg = COLOR_BLACK,
             widget = wibox.container.background,
         }
@@ -557,7 +637,7 @@ end
 
 local function ensure_popup()
     if popup then return end
-    local style = popup_common.popup_style()
+    local pstyle = popup_common.popup_style()
     -- build content first so the awful.popup constructor gets its required
     -- widget arg; draggable_header reads popup via popup_holder, assigned
     -- right after construction
@@ -569,9 +649,9 @@ local function ensure_popup()
         visible  = false,
         ontop    = true,
         bg       = COLOR_BLACK,
-        border_width = style.border_width,
+        border_width = pstyle.border_width,
         border_color = COLOR_GOLD,
-        shape = style.shape,
+        shape = pstyle.shape,
     }
     popup_holder.popup = popup
 end

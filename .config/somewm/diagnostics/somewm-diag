@@ -1,0 +1,71 @@
+#!/bin/sh
+# somewm-diag - opt-in memory diagnostics for the running compositor.
+# Usage: somewm-diag start|stop|status|report|census|fds [PID]
+# See README.md in this directory. Nothing here runs unless started by hand.
+dir=$(dirname "$(readlink -f "$0")")
+data="$HOME/.local/share/somewm-diag"
+samples="$data/samples.tsv"
+mkdir -p "$data"
+
+compositor_pid() { pgrep -ox somewm; }
+
+# columns: epoch rss_kb anon_kb swap_kb lua_kb fds threads pid dmabuf_mb
+sample_loop() {
+    while :; do
+        p=$(compositor_pid)
+        if [ -n "$p" ]; then
+            r=$(awk '/^Rss:/{r=$2}/^Anonymous:/{a=$2}/^Swap:/{s=$2}END{print r"\t"a"\t"s}' /proc/$p/smaps_rollup 2>/dev/null)
+            l=$(timeout 5 somewm-client eval 'return collectgarbage("count")' 2>&1 | awk 'NR==2')
+            d=$("$dir/somewm-diag" fds "$p" | awk '/^dmabuf total:/{print $3}')
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$r" "${l:-NA}" \
+                "$(ls /proc/$p/fd 2>/dev/null | wc -l)" "$(ls /proc/$p/task 2>/dev/null | wc -l)" "$p" "${d:-NA}" >> "$samples"
+        fi
+        sleep 30
+    done
+}
+
+fds() {
+    p=${1:-$(compositor_pid)}
+    for f in /proc/$p/fd/*; do readlink "$f" 2>/dev/null; done | sed -E 's/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -10
+    t=0
+    for f in /proc/$p/fdinfo/*; do
+        case "$(readlink /proc/$p/fd/${f##*/} 2>/dev/null)" in
+            /dmabuf:*) s=$(awk '/^size:/{print $2}' "$f"); t=$((t + ${s:-0}));;
+        esac
+    done
+    echo "dmabuf total: $((t / 1048576)) MB"
+}
+
+# per compositor pid: anon at first and last sample, growth over the whole run
+# and over the final hour (MB/h). Flat is a slope near zero after warm-up.
+report() {
+    awk -F'\t' '
+        { p = $8; if (!(p in n)) order[++k] = p; i = ++n[p]; t[p, i] = $1; a[p, i] = $3 / 1024 }
+        END {
+            for (j = 1; j <= k; j++) {
+                p = order[j]; m = n[p]; if (m < 10) continue
+                hrs = (t[p, m] - t[p, 1]) / 3600
+                s = m; while (s > 1 && t[p, m] - t[p, s] < 3600) s--
+                h2 = (t[p, m] - t[p, s]) / 3600
+                printf "pid %s: %d samples, %.1f h, anon %.0f -> %.0f MB, whole-run %.1f MB/h, last-hour %.1f MB/h\n",
+                    p, m, hrs, a[p, 1], a[p, m], hrs > 0 ? (a[p, m] - a[p, 1]) / hrs : 0, h2 > 0.1 ? (a[p, m] - a[p, s]) / h2 : 0
+            }
+        }' "$samples" 2>/dev/null
+}
+
+case "$1" in
+    sample) sample_loop ;;
+    start)
+        systemd-run --user --collect --unit=somewm-diag-sample "$dir/somewm-diag" sample
+        systemd-run --user --collect --unit=somewm-diag-census --on-active=10min --on-unit-active=1h "$dir/somewm-diag" census
+        ;;
+    stop) systemctl --user stop somewm-diag-sample.service somewm-diag-census.timer somewm-diag-census.service 2>/dev/null ;;
+    status)
+        systemctl --user is-active somewm-diag-sample.service somewm-diag-census.timer
+        tail -3 "$samples" 2>/dev/null
+        ;;
+    report) report ;;
+    census) somewm-client eval "collectgarbage('collect'); return dofile('$dir/census.lua')" ;;
+    fds) shift; fds "$@" ;;
+    *) echo "usage: somewm-diag start|stop|status|report|census|fds [PID]" >&2; exit 2 ;;
+esac

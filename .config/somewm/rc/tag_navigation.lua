@@ -6,6 +6,7 @@
 
 local awful = require("awful")
 local gears = require("gears")
+local naughty = require("naughty")
 
 local M = {}
 
@@ -59,6 +60,56 @@ function M.move_to_next_tag_and_follow()
             c:move_to_tag(next_tag)
             next_tag:view_only()
         end
+    end
+end
+
+
+-- // MARK: -- spread tag clients to empty tags
+
+-- Spread a crowded Tag: every Client except the focused one is moved to
+-- its own empty Tag on the same Screen. When the free Tags run out the
+-- remaining Clients stay put and a Notification reports the count.
+function M.spread_tag_clients()
+    local s = awful.screen.focused()
+    local t = s and s.selected_tag
+    if not t then return end
+
+    local cls = t:clients()
+    if #cls < 2 then return end
+
+    -- Focused Client keeps the Tag; fall back to the first Client
+    local keep = client.focus
+    if not keep or not gears.table.hasitem(cls, keep) then
+        keep = cls[1]
+    end
+
+    -- Empty, unselected Tags on this Screen, in order
+    local free_tags = {}
+    for _, tag in ipairs(s.tags) do
+        if tag ~= t and #tag:clients() == 0 then
+            table.insert(free_tags, tag)
+        end
+    end
+
+    local moved, leftover = 0, 0
+    for _, c in ipairs(cls) do
+        if c ~= keep then
+            local target = free_tags[moved + 1]
+            if target then
+                c:move_to_tag(target)
+                moved = moved + 1
+            else
+                leftover = leftover + 1
+            end
+        end
+    end
+
+    if leftover > 0 then
+        naughty.notify {
+            title = "spread windows",
+            text = string.format("%d moved, %d left on the tag: no free tags", moved, leftover),
+            timeout = 2,
+        }
     end
 end
 

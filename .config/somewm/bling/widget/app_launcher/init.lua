@@ -22,6 +22,7 @@ local app_launcher  = { mt = {} }
 
 local terminal_commands_lookup =
 {
+    kitty = "kitty",
     alacritty = "alacritty -e",
     termite = "termite -e",
     rxvt = "rxvt -e",

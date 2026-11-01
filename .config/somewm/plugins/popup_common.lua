@@ -14,56 +14,50 @@ local beautiful = require("beautiful")
 local gfilesystem = require("gears.filesystem")
 local gshape  = require("gears.shape")
 local guarded = require("error_guard")
-local font_utils = require("rc.font_utils")
+local style   = require("plugins.style")
 
 local client = client  -- capi global, captured for outside-click detection
 local root = root
 local mouse = mouse    -- capi global, for widget geometry capture at press time
 local capi_mousegrabber = mousegrabber  -- capi global, drives the header drag
 
-local function get_xresources()
-    if beautiful.xresources then return beautiful.xresources end
-    local ok, xr = pcall(require, "beautiful.xresources")
-    if ok then return xr end
-    return nil
-end
-local dpi = (get_xresources() and get_xresources().apply_dpi) or function(v) return v end
+local dpi = style.dpi
 
 local M = {}
 
--- shared theme colours and scaled fonts. the popup family previously
--- redefined these in every file; they now live here so the values track
--- beautiful and rc.font_utils in one place.
-local COLOR_GOLD  = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
-local COLOR_GREY  = "#AAAAAA"
-local COLOR_PURPLE = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
+-- shared theme colours and fonts, sourced from plugins.style (which resolves
+-- beautiful keys with fallbacks). the M.theme/M.fonts names are kept for the
+-- popup family, which reads them as popup_common.theme.X / .fonts.Y
+local COLOR_GOLD   = style.color.accent
+local COLOR_GREY   = style.color.fg_dim
+local COLOR_PURPLE = style.color.accent2
 
 M.theme = {
     GOLD   = COLOR_GOLD,
     GREY   = COLOR_GREY,
     PURPLE = COLOR_PURPLE,
-    BLACK  = "#000000",
-    WHITE  = "#FFFFFF",
-    RED    = "#FF6B6B",
-    GREEN  = "#69D665",
-    HOVER  = "#ffffff33",
+    BLACK  = style.color.bg,
+    WHITE  = style.color.fg,
+    RED    = style.color.err,
+    GREEN  = style.color.ok,
+    HOVER  = style.color.hover,
 }
 
 M.fonts = {
-    FONT       = font_utils.FONT,
-    FONT_BOLD  = font_utils.FONT_BOLD,
-    FONT_HEAD  = font_utils.FONT_HEAD,
-    FONT_MONO  = font_utils.FONT_MONO,
-    FONT_SMALL = font_utils.FONT_SMALL,
-    FONT_INFO  = font_utils.FONT_INFO,
-    FONT_VALUE = font_utils.FONT_VALUE,
-    FONT_HUGE  = font_utils.FONT_HUGE,
-    FONT_STAR  = font_utils.FONT_STAR,
-    FONT_CLEAR = font_utils.FONT_CLEAR,
+    FONT       = style.font.normal,
+    FONT_BOLD  = style.font.bold,
+    FONT_HEAD  = style.font.head,
+    FONT_MONO  = style.font.mono,
+    FONT_SMALL = style.font.small,
+    FONT_INFO  = style.font.info,
+    FONT_VALUE = style.font.value,
+    FONT_HUGE  = style.font.huge,
+    FONT_STAR  = style.font.star,
+    FONT_CLEAR = style.font.clear,
 }
 
 -- keep FONT_HEAD alias for the pin widget below
-local FONT_HEAD = font_utils.FONT_HEAD
+local FONT_HEAD = style.font.head
 
 
 -- MARK: PREF
@@ -259,9 +253,9 @@ end
 -- standard popup border width + rounded-rect shape, shared by every popup
 function M.popup_style()
     return {
-        border_width = beautiful.bar_edge_width or beautiful.border_width or dpi(1),
+        border_width = style.popup.border_width,
         shape = function(cr, w, h)
-            gshape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3))
+            gshape.rounded_rect(cr, w, h, style.popup.radius)
         end,
     }
 end
@@ -311,22 +305,40 @@ function M.abs_anchor_rect(widget_geo)
     }
 end
 
+-- the compositor attachment (what awful.placement.next_to does for an
+-- awful.popup) honours positions[1] verbatim with no fit-based fallback, so
+-- place_next_to's "prefer above, flip below" has to be resolved up front.
+-- an anchor in the workarea's top half can only ever land below (the space
+-- above it holds no real popup) and one in the bottom half only above -
+-- exact for edge-bar widgets, which is where every anchor lives
+local function resolve_side(rect, wa, pos)
+    if not rect or not wa then return pos end
+    local above = rect.y - wa.y
+    if pos == "top" and above <= wa.height / 2 then return "bottom" end
+    if pos == "bottom" and above > wa.height / 2 then return "top" end
+    return pos
+end
+
 -- place `popup` next to an anchor widget whose absolute rectangle is `rect`
 -- (screen coords). prefers above + right-aligned (back), flipping below when
 -- above won't fit, and clamps to the screen workarea. opts mirror the
 -- awful.placement.next_to names so callers can override. returns false when
--- rect is missing so the caller can fall back to awful.placement.next_to
+-- rect is missing or the popup has no solved size yet, so the caller can
+-- fall back to awful.placement.next_to
 function M.place_next_to(popup, rect, opts)
     opts = opts or {}
     if not rect or rect.width == 0 then return false end
     local s = popup.screen
     local wa = s and s.workarea
-    -- read the popup's actual rendered size from its width/height properties
-    -- (set by awful.popup's internal _apply_size_now), not popup:geometry()
-    -- which can return stale/zero values before the first layout flush
+    -- read the popup's rendered size from its width/height properties. a
+    -- never-shown popup still carries the drawin's construction 1x1:
+    -- _apply_size_now only marks the drawable's compile and the compositor
+    -- publishes the content size after the first visible frame. bail so the
+    -- caller uses the attachment path, which solves size and anchored
+    -- position in the same frame
     local pw = popup.width or 0
     local ph = popup.height or 0
-    if pw == 0 or ph == 0 then return false end
+    if pw <= 1 or ph <= 1 then return false end
     local pref_pos   = opts.preferred_positions or "top"
     local pref_anchor = opts.preferred_anchors or "back"
     local x, y
@@ -348,6 +360,10 @@ function M.place_next_to(popup, rect, opts)
         if y < wa.y then y = wa.y end
         if y + ph > wa.y + wa.height then y = wa.y + wa.height - ph end
     end
+    -- an attachment left by the first-show fallback re-asserts the anchor
+    -- position at every declare and would override this authored geometry;
+    -- drop it so the manual placement sticks
+    if popup.drawin.attachment then popup.drawin.attachment = nil end
     -- set position and size atomically via :geometry() (like awful.placement
     -- does internally). callers invoke this while the popup is still
     -- invisible so the drawin never maps at the screen origin (see
@@ -372,6 +388,7 @@ function M.show_placement(popup, anchor, opts)
     -- current mouse state for callers that didn't capture (e.g. programmatic)
     local widget_geo   = popup._anchor_geo or mouse.current_widget_geometry
     local anchor_screen = popup._anchor_screen or (mouse.current_wibox and mouse.current_wibox.screen)
+        or mouse.screen
     popup:_apply_size_now(false)
     local is_detached = opts.detached and opts.detached()
     if not is_detached then
@@ -395,7 +412,9 @@ function M.show_placement(popup, anchor, opts)
             if not rect or not M.place_next_to(popup, rect, opts) then
                 awful.placement.next_to(popup, {
                     geometry = widget_geo,
-                    preferred_positions = opts.preferred_positions or "top",
+                    preferred_positions = resolve_side(rect,
+                        popup.screen and popup.screen.workarea,
+                        opts.preferred_positions or "top"),
                     preferred_anchors = opts.preferred_anchors or "back",
                     honor_workarea = true,
                 })
@@ -411,7 +430,7 @@ function M.show_placement(popup, anchor, opts)
     if root._append_key then root._append_key(popup._escape_key) end
 end
 
--- keep a widget's hover_border outline drawn while the popup is visible.
+-- keep a widget's hover tint drawn while the popup is visible.
 -- wrappers that don't implement set_sticky_hover are ignored, so this is
 -- safe to call with any attach target
 function M.sticky_border(popup, widget)
@@ -424,7 +443,7 @@ end
 -- on a wibar widget. on_left(widget) is the toggle callback. opts:
 --   right_hide     function  called on right-click (default: opts.hide)
 --   swallow_scroll bool      swallow wibar click while scrolling (volume_popup)
---   highlight      widget    hover_border wrapper to outline while the popup
+--   highlight      widget    hover wrapper to tint while the popup
 --                            is open (default: the attached widget itself)
 function M.attach(popup, widget, on_left, opts)
     opts = opts or {}
@@ -436,7 +455,7 @@ function M.attach(popup, widget, on_left, opts)
             -- ignores the widget= arg and reads mouse.current_widget_geometry,
             -- which can be nil by the time the async callback fires
             popup._anchor_geo    = mouse.current_widget_geometry
-            popup._anchor_screen = mouse.current_wibox and mouse.current_wibox.screen
+            popup._anchor_screen = (mouse.current_wibox and mouse.current_wibox.screen) or mouse.screen
             popup._anchor_wibox  = mouse.current_wibox
             if not M.widget_press(popup) then on_left(widget) end
         elseif pressed == 3 and opts.right_hide then
@@ -575,13 +594,13 @@ function M.draggable_header(opts)
                 drag_area,
                 {
                     pin_btn,
-                    spacing = dpi(6),
+                    spacing = style.popup.spacing,
                     layout = wibox.layout.fixed.horizontal,
                 },
                 layout = wibox.layout.align.horizontal,
             },
-            left = dpi(10), right = dpi(10),
-            top = dpi(6), bottom = dpi(6),
+            left = style.popup.margin_x, right = style.popup.margin_x,
+            top = style.popup.margin_y, bottom = style.popup.margin_y,
             widget = wibox.container.margin,
         },
         bg = M.theme.PURPLE,
@@ -619,7 +638,7 @@ function M.draggable_header(opts)
         local shape_fn = p._apply_shape
         if shape_fn then p:disconnect_signal("property::geometry", shape_fn) end
         local safety
-        local function end_drag()
+        local function end_drag(reason)
             if safety then safety:stop() end
             local pp = popup()
             if pp then
@@ -638,14 +657,17 @@ function M.draggable_header(opts)
                 end
                 -- grabber killed externally: the callback never runs again,
                 -- so drag_end must be emitted from here too
-                end_drag()
+                end_drag("watchdog")
             end),
         }
+        -- gears.timer{} does not autostart — without this a missed release
+        -- leaves the grabber intercepting all mouse input indefinitely
+        safety:start()
         capi_mousegrabber.run(function(m)
-            if gen ~= drag_gen then end_drag() return false end
-            if not (m.buttons and m.buttons[1]) then end_drag() return false end
+            if gen ~= drag_gen then end_drag("stale-gen") return false end
+            if not (m.buttons and m.buttons[1]) then end_drag("release") return false end
             local pp = popup()
-            if not pp or not pp.visible then end_drag() return false end
+            if not pp or not pp.visible then end_drag("popup-gone") return false end
             if not off_x then
                 local g = pp:geometry()
                 off_x = m.x - g.x
@@ -663,6 +685,15 @@ function M.draggable_header(opts)
     local function set_detached(on)
         if detached == on then return end
         detached = on
+        -- a detached popup is geometry-driven: drop any compositor
+        -- attachment left by a first-show fallback, which would re-assert
+        -- the anchor position at every declare and fight the drag
+        if on then
+            local p = popup()
+            if p and p.drawin and p.drawin.attachment then
+                p.drawin.attachment = nil
+            end
+        end
         -- detached implies sticky: while floating free the popup also ignores
         -- outside clicks so it stays open until explicitly re-anchored. the pin
         -- icon is driven to gold to reflect this; the pin's persisted state is
@@ -688,7 +719,8 @@ function M.draggable_header(opts)
         }) then
             awful.placement.next_to(p, {
                 geometry = p._anchor_geo or mouse.current_widget_geometry,
-                preferred_positions = "top",
+                preferred_positions = resolve_side(rect,
+                    p.screen and p.screen.workarea, "top"),
                 preferred_anchors = "back",
                 honor_workarea = true,
             })

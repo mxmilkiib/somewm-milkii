@@ -177,6 +177,24 @@ function M.start_custom_drag(c, opts)
         awesome.emit_signal("dnd_to_tag::start", c)
     end
 
+    -- safety watchdog, mirrors tag_pager's: a missed button release (e.g. the
+    -- compositor consuming the event) must never leave the grabber swallowing
+    -- all pointer input. created once at module level and re-armed per drag;
+    -- gears.timer{} does not autostart, so :again() is what engages it
+    if not M._timer then
+        M._timer = gears.timer {
+            timeout = 10,
+            single_shot = true,
+            callback = function()
+                if mousegrabber.isrunning and mousegrabber.isrunning() then
+                    mousegrabber.stop()
+                end
+                pcall(M.finish_custom_drag)
+            end,
+        }
+    end
+    M._timer:again()
+
     -- use mousegrabber to capture pointer and set cursor during drag
     mousegrabber.run(function(m)
         if not c.valid then
@@ -209,6 +227,9 @@ function M.start_custom_drag(c, opts)
 end
 
 function M.finish_custom_drag()
+    -- disarm the safety watchdog on every normal exit path
+    if M._timer then M._timer:stop() end
+
     -- ensure any overlay/keygrabber are gone (legacy cleanup)
     if M._overlay and M._overlay.valid then
         M._overlay.visible = false

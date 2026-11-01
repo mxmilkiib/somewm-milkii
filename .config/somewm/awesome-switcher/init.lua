@@ -68,58 +68,27 @@ function _M.tableLength(T)
 end
 
 -- this function returns the list of clients to be shown.
+-- somewm port: all clients across every tag and screen, MRU-ordered via the
+-- raw focus history — focus.history.get() is screen-scoped and only returns
+-- visible clients, so clients on other tags never made the list
 function _M.getClients()
 	local clients = {}
-
-	-- Get focus history for current tag
-	local s = mouse.screen;
-	local idx = 0
-	local c = awful.client.focus.history.get(s, idx)
-
-	while c do
-		table.insert(clients, c)
-
-		idx = idx + 1
-		c = awful.client.focus.history.get(s, idx)
+	local seen = {}
+	local function add(c)
+		if c and not seen[c] then
+			seen[c] = true
+			table.insert(clients, c)
+		end
 	end
 
-	-- Minimized clients will not appear in the focus history
-	-- Find them by cycling through all clients, and adding them to the list
-	-- if not already there.
-	-- This will preserve the history AND enable you to focus on minimized clients
+	-- global MRU: focus.history.list holds every focused client, all screens
+	for _, c in ipairs(awful.client.focus.history.list) do
+		add(c)
+	end
 
-	local t = s.selected_tag
-	local all = client.get(s)
-
-	for i = 1, #all do
-		local c = all[i]
-		local ctags = c:tags();
-
-		-- check if the client is on the current tag
-		local isCurrentTag = false
-		for j = 1, #ctags do
-			if t == ctags[j] then
-				isCurrentTag = true
-				break
-			end
-		end
-
-		if isCurrentTag then
-			-- check if client is already in the history
-			-- if not, add it
-			local addToTable = true
-			for k = 1, #clients do
-				if clients[k] == c then
-					addToTable = false
-					break
-				end
-			end
-
-
-			if addToTable then
-				table.insert(clients, c)
-			end
-		end
+	-- never-focused and minimized clients are absent from history
+	for _, c in ipairs(client.get()) do
+		add(c)
 	end
 
 	return clients
@@ -211,6 +180,17 @@ function _M.updatePreview()
 	end
 end
 
+-- focus also jumps to the client's tag: plain client.focus does not switch
+-- tags, and the switcher now spans every tag and screen
+local function focus_client(c)
+	local t = c.first_tag
+	if t and not t.selected then
+		t:view_only()
+	end
+	c:raise()
+	client.focus = c
+end
+
 function _M.cycle(dir)
 	-- Switch to next client
 	_M.altTabIndex = _M.altTabIndex + dir
@@ -225,7 +205,7 @@ function _M.cycle(dir)
 	_M.altTabTable[_M.altTabIndex].client.minimized = false
 
 	if not _M.settings.preview_box and not _M.settings.client_opacity then
-		client.focus = _M.altTabTable[_M.altTabIndex].client
+		focus_client(_M.altTabTable[_M.altTabIndex].client)
 	end
 
 	if _M.settings.client_opacity and _M.preview_wbox.visible then
@@ -469,56 +449,60 @@ function _M.switch(dir, mod_key1, release_key, mod_key2, key_switch)
 	-- as long as the user is alt-tabbing:
 	keygrabber.run(
 		function (mod, key, event)
-			-- Stop alt-tabbing when the alt-key is released
-			if gears.table.hasitem(mod, mod_key1) then
-				if (key == release_key or key == "Escape") and event == "release" then
-					if _M.preview_wbox.visible == true then
-						_M.preview_wbox.visible = false
-						_M.preview_live_timer:stop()
-					else
-						_M.previewDelayTimer:stop()
+			-- somewm: commit on release of the modifier itself (release_key is
+			-- "Alt_L"), regardless of the modifier table — effective mods may
+			-- already be cleared when the release dispatches, so nesting this
+			-- inside hasitem(mod, mod_key1) could strand the grabber forever.
+			-- Escape release cancels and restores the original stacking.
+			if (key == release_key or key == "Escape") and event == "release" then
+				if _M.preview_wbox.visible == true then
+					_M.preview_wbox.visible = false
+					_M.preview_live_timer:stop()
+				else
+					_M.previewDelayTimer:stop()
+				end
+
+				if key == "Escape" then
+					for i = 1, #_M.altTabTable do
+						_M.altTabTable[i].client.opacity = _M.altTabTable[i].opacity
+						_M.altTabTable[i].client.minimized = _M.altTabTable[i].minimized
 					end
-
-					if key == "Escape" then
-						for i = 1, #_M.altTabTable do
-							_M.altTabTable[i].client.opacity = _M.altTabTable[i].opacity
-							_M.altTabTable[i].client.minimized = _M.altTabTable[i].minimized
-						end
-					else
-						-- Raise clients in order to restore history
-						local c
-						for i = 1, _M.altTabIndex - 1 do
-							c = _M.altTabTable[_M.altTabIndex - i].client
-							if not _M.altTabTable[i].minimized then
-								c:raise()
-								client.focus = c
-							end
-						end
-
-						-- raise chosen client on top of all
-						c = _M.altTabTable[_M.altTabIndex].client
-						c:raise()
-						client.focus = c
-
-						-- restore minimized clients
-						for i = 1, #_M.altTabTable do
-							if i ~= _M.altTabIndex and _M.altTabTable[i].minimized then
-								_M.altTabTable[i].client.minimized = true
-							end
-							_M.altTabTable[i].client.opacity = _M.altTabTable[i].opacity
+				else
+					-- Raise clients in order to restore history
+					local c
+					for i = 1, _M.altTabIndex - 1 do
+						c = _M.altTabTable[_M.altTabIndex - i].client
+						if not _M.altTabTable[i].minimized then
+							c:raise()
+							client.focus = c
 						end
 					end
 
-					keygrabber.stop()
-				
-				elseif key == key_switch and event == "press" then
-					if gears.table.hasitem(mod, mod_key2) then
-						-- Move to previous client on Shift-Tab
-						_M.cycle(-1)
-					else
-						-- Move to next client on each Tab-press
-						_M.cycle( 1)
+					-- raise chosen client on top of all, jumping to its tag
+					c = _M.altTabTable[_M.altTabIndex].client
+					focus_client(c)
+
+					-- restore minimized clients
+					for i = 1, #_M.altTabTable do
+						if i ~= _M.altTabIndex and _M.altTabTable[i].minimized then
+							_M.altTabTable[i].client.minimized = true
+						end
+						_M.altTabTable[i].client.opacity = _M.altTabTable[i].opacity
 					end
+				end
+
+				keygrabber.stop()
+
+			elseif (key == key_switch or key == "ISO_Left_Tab")
+			   and event == "press" and gears.table.hasitem(mod, mod_key1) then
+				-- somewm: Shift+Tab yields the ISO_Left_Tab keysym, and cycling
+				-- only counts while the modifier is still held
+				if gears.table.hasitem(mod, mod_key2) then
+					-- Move to previous client on Shift-Tab
+					_M.cycle(-1)
+				else
+					-- Move to next client on each Tab-press
+					_M.cycle( 1)
 				end
 			end
 		end

@@ -4,7 +4,13 @@
 --
 -- Saves and restores:
 --   - selected tag per screen
+--   - per-tag layout selection + tuning params (mwfact, master/column
+--     count, gap) so tiled splits keep their proportions
 --   - per-client tag+screen assignments
+--   - per-client floating/maximized/fullscreen/minimized state and
+--     floating geometry, so windows reappear where they were rather than
+--     at layout defaults
+--   - per-tag client order (tiling position), via global client list order
 --
 -- Multiple windows sharing a PID (multi-window apps like Firefox, GIMP) are
 -- saved as separate entries and matched on restore by name, role, then
@@ -23,6 +29,9 @@
 
 
 local gears = require("gears")
+local alayout = require("awful.layout")
+local atag = require("awful.tag")
+local aplacement = require("awful.placement")
 local guarded = require("error_guard")
 
 local M = {}
@@ -35,6 +44,7 @@ function M.init()
     gears.filesystem.make_directories(session_dir)
     local session_tags_file = session_dir .. "/selected-tags"
     local session_state_file = session_dir .. "/client-placements"
+    local session_layouts_file = session_dir .. "/tag-layouts"
 
     -- // MARK -- save
 
@@ -54,12 +64,39 @@ function M.init()
             os.rename(tags_tmp, session_tags_file)
         end
 
+        -- save per-tag layout state so tiled windows regain their split
+        -- proportions instead of rc.lua defaults.
+        -- format (tab-separated):
+        --   screen_index:tag_index \t layout_name \t mwfact \t mcount \t ncol \t gap
+        local layouts_tmp = session_layouts_file .. ".tmp"
+        local lf = io.open(layouts_tmp, 'w+')
+        if lf then
+            for s in screen do
+                for _, t in ipairs(s.tags) do
+                    if t and t.valid then
+                        local l = t.layout
+                        lf:write(s.index .. ":" .. t.index, '\t',
+                                  l and alayout.getname(l) or "", '\t',
+                                  tostring(t.master_width_factor or ""), '\t',
+                                  tostring(t.master_count or ""), '\t',
+                                  tostring(t.column_count or ""), '\t',
+                                  tostring(t.gap or ""), '\n')
+                    end
+                end
+            end
+            lf:close()
+            os.rename(layouts_tmp, session_layouts_file)
+        end
+
         -- save per-client tag+screen assignments.
         -- one line per client so multiple windows sharing a PID are all
         -- preserved (previously keyed by PID alone, which collapsed them).
         -- format (tab-separated):
-        --   pid \t screen \t tags \t class \t instance \t role \t name
-        -- tags is a comma-separated list of screen_index:tag_index.
+        --   pid \t screen \t tags \t class \t instance \t role \t name \t geometry \t flags
+        -- tags is a comma-separated list of screen_index:tag_index:position
+        -- (position is the client's index in the tag's client list, used to
+        -- restore tiling order). geometry is "x,y,width,height". flags is a
+        -- comma-separated list of client states (floating, maximized, ...).
         -- atomic: write to .tmp then rename so a crash mid-write leaves
         -- the previous good state intact.
         local state_tmp = session_state_file .. ".tmp"
@@ -71,8 +108,13 @@ function M.init()
                 local tag_indices = {}
                 for _, t in ipairs(ctags) do
                     if t and t.valid and t.screen and t.screen.valid then
-                        -- encode as screen_index:tag_index so multi-screen is preserved
-                        table.insert(tag_indices, t.screen.index .. ":" .. t.index)
+                        -- encode as screen:tag:position so multi-screen
+                        -- placement and tiling order are preserved
+                        local pos = 0
+                        for i, tc in ipairs(t:clients()) do
+                            if tc == c then pos = i break end
+                        end
+                        table.insert(tag_indices, t.screen.index .. ":" .. t.index .. ":" .. pos)
                     end
                 end
                 if #tag_indices > 0 then
@@ -82,8 +124,19 @@ function M.init()
                     local role = c.role or ""
                     -- strip tabs/newlines from name so it stays on one line
                     local name = (c.name or ""):gsub("[\t\n]", " ")
+                    local g = c:geometry()
+                    local flags = {}
+                    for _, f in ipairs({
+                        "floating", "maximized", "maximized_horizontal",
+                        "maximized_vertical", "fullscreen", "minimized",
+                        "ontop", "sticky", "above", "below",
+                    }) do
+                        if c[f] then table.insert(flags, f) end
+                    end
                     sf:write(c.pid, '\t', sidx, '\t', table.concat(tag_indices, ','),
-                              '\t', class, '\t', instance, '\t', role, '\t', name, '\n')
+                              '\t', class, '\t', instance, '\t', role, '\t', name,
+                              '\t', g.x .. ',' .. g.y .. ',' .. g.width .. ',' .. g.height,
+                              '\t', table.concat(flags, ','), '\n')
                 end
             end
         end
@@ -118,6 +171,55 @@ function M.init()
             file:close()
         end
 
+        -- tab-split that preserves empty fields; a plain gmatch('[^\t]+')
+        -- would collapse them and shift the remaining columns left.
+        local function split_tabs(line)
+            local parts = {}
+            local pos = 1
+            while true do
+                local s, e = line:find('\t', pos, true)
+                if not s then
+                    table.insert(parts, line:sub(pos))
+                    break
+                end
+                table.insert(parts, line:sub(pos, s - 1))
+                pos = e + 1
+            end
+            return parts
+        end
+
+        -- restore per-tag layout selection and tuning params before clients
+        -- are placed, so tiled windows get their saved split proportions.
+        local lf = io.open(session_layouts_file, 'r')
+        if lf then
+            for line in lf:lines() do
+                local parts = split_tabs(line)
+                local si, ti = (parts[1] or ""):match('^(%d+):(%d+)$')
+                local sc = si and screen[tonumber(si)]
+                local t = sc and sc.valid and sc.tags[tonumber(ti)]
+                if t and t.valid then
+                    local lname = parts[2] or ""
+                    -- find the saved layout in the tag's own list first,
+                    -- falling back to the global list for layouts the tag
+                    -- no longer cycles through.
+                    local function find_layout(list)
+                        for _, l in ipairs(list or {}) do
+                            if alayout.getname(l) == lname then return l end
+                        end
+                    end
+                    local saved_layout = find_layout(t.layouts) or find_layout(alayout.layouts)
+                    if saved_layout and t.layout ~= saved_layout then
+                        t.layout = saved_layout
+                    end
+                    local mw = tonumber(parts[3]); if mw then t.master_width_factor = mw end
+                    local mc = tonumber(parts[4]); if mc then t.master_count = mc end
+                    local nc = tonumber(parts[5]); if nc then t.column_count = nc end
+                    local gp = tonumber(parts[6]); if gp then t.gap = gp end
+                end
+            end
+            lf:close()
+        end
+
         -- parse saved client placements into lists grouped by PID.
         -- each PID maps to a list of saved entries so multi-window apps
         -- don't collapse onto one tag.
@@ -125,18 +227,33 @@ function M.init()
         local sf = io.open(session_state_file, 'r')
         if sf then
             for line in sf:lines() do
-                local parts = {}
-                for field in line:gmatch('[^\t]+') do
-                    table.insert(parts, field)
-                end
+                local parts = split_tabs(line)
                 if #parts >= 3 then
                     local pid = tonumber(parts[1])
                     local sidx = tonumber(parts[2])
                     local tag_specs = {}
-                    for spec in parts[3]:gmatch('[^,]+') do
-                        local si, ti = spec:match('^(%d+):(%d+)$')
+                    for spec in (parts[3] or ""):gmatch('[^,]+') do
+                        -- screen:tag or screen:tag:position (old files lack pos)
+                        local si, ti, pos = spec:match('^(%d+):(%d+):?(%d*)$')
                         if si and ti then
-                            table.insert(tag_specs, { screen = tonumber(si), tag = tonumber(ti) })
+                            -- pos 0/absent means "unknown": leave unordered
+                            -- rather than letting it sort ahead of pos 1.
+                            local pnum = tonumber(pos)
+                            table.insert(tag_specs, {
+                                screen = tonumber(si),
+                                tag = tonumber(ti),
+                                pos = (pnum and pnum > 0) and pnum or nil,
+                            })
+                        end
+                    end
+                    local gx, gy, gw, gh = (parts[8] or ""):match('^(%-?%d+),(%-?%d+),(%-?%d+),(%-?%d+)$')
+                    -- nil (not empty) flags means an old-format line with no
+                    -- saved state at all; restore then skips attributes.
+                    local flags = nil
+                    if parts[9] ~= nil then
+                        flags = {}
+                        for fl in parts[9]:gmatch('[^,]+') do
+                            flags[fl] = true
                         end
                     end
                     saved_by_pid[pid] = saved_by_pid[pid] or {}
@@ -147,6 +264,11 @@ function M.init()
                         instance = parts[5] or "",
                         role = parts[6] or "",
                         name = parts[7] or "",
+                        geometry = gx and {
+                            x = tonumber(gx), y = tonumber(gy),
+                            width = tonumber(gw), height = tonumber(gh),
+                        } or nil,
+                        flags = flags,
                         used = false,
                     })
                 end
@@ -159,6 +281,108 @@ function M.init()
         -- track clients we've already placed so re-runnable batch passes and
         -- the manage handler don't re-match them to a different saved entry.
         local placed = {}
+
+        -- apply a saved entry's window-state attributes to a client.
+        -- deferred callers run this after manage-time placement rules so
+        -- e.g. awful.placement.centered can't overwrite restored geometry.
+        local function apply_attrs(c, entry)
+            if not c or not c.valid or not entry.flags then return end
+            local f = entry.flags
+            -- restore floating first so the layout lets the geometry stick
+            c.floating = f.floating == true
+            if entry.geometry then
+                -- only floating clients (or clients on a floating-layout
+                -- tag) own their geometry; tiling layouts recompute it on
+                -- the next arrange, so don't bother setting it there.
+                local owns_geom = c.floating
+                if not owns_geom then
+                    for _, t in ipairs(c:tags()) do
+                        if t.valid and atag.object.get_layout(t) == alayout.suit.floating then
+                            owns_geom = true
+                            break
+                        end
+                    end
+                end
+                if owns_geom then
+                    c:geometry(entry.geometry)
+                    -- pull the window back into view if its saved position
+                    -- is now fully offscreen (e.g. an output disappeared)
+                    local g = c:geometry()
+                    local visible = false
+                    for s in screen do
+                        local sg = s.geometry
+                        if g.x < sg.x + sg.width and g.x + g.width > sg.x
+                           and g.y < sg.y + sg.height and g.y + g.height > sg.y then
+                            visible = true
+                            break
+                        end
+                    end
+                    if not visible then
+                        aplacement.no_offscreen(c)
+                    end
+                end
+            end
+            c.maximized = f.maximized == true
+            c.maximized_horizontal = f.maximized_horizontal == true
+            c.maximized_vertical = f.maximized_vertical == true
+            c.fullscreen = f.fullscreen == true
+            c.ontop = f.ontop == true
+            c.sticky = f.sticky == true
+            c.above = f.above == true
+            c.below = f.below == true
+            c.minimized = f.minimized == true
+        end
+
+        -- reorder the global client list so each tag's tiled windows land
+        -- in their saved positions. tiling order follows globalconf order,
+        -- and client:swap() is the only primitive that mutates it, so this
+        -- is a selection pass of swaps over client.get().
+        local function restore_order()
+            -- desired order: tags by index per screen, clients by saved
+            -- position within each tag; anything unmatched keeps its
+            -- current relative order at the end.
+            local desired = {}
+            local seen = {}
+            for s in screen do
+                for _, t in ipairs(s.tags) do
+                    if t and t.valid then
+                        local saved = {}
+                        for _, entries in pairs(saved_by_pid) do
+                            for _, e in ipairs(entries) do
+                                if e.client then
+                                    for _, spec in ipairs(e.tags) do
+                                        if spec.pos and spec.screen == s.index
+                                           and spec.tag == t.index then
+                                            table.insert(saved, { pos = spec.pos, c = e.client })
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        table.sort(saved, function(a, b) return a.pos < b.pos end)
+                        for _, it in ipairs(saved) do
+                            if it.c.valid and not seen[it.c] then
+                                seen[it.c] = true
+                                table.insert(desired, it.c)
+                            end
+                        end
+                    end
+                end
+            end
+            for _, c in ipairs(client.get()) do
+                if c.valid and not seen[c] then
+                    seen[c] = true
+                    table.insert(desired, c)
+                end
+            end
+            if #desired == 0 then return end
+            for i = 1, #desired do
+                local cur = client.get()
+                if cur[i] and cur[i] ~= desired[i] and cur[i].valid and desired[i].valid then
+                    cur[i]:swap(desired[i])
+                end
+            end
+        end
 
         -- apply a saved entry's screen+tags to a client and mark both consumed.
         local function apply_entry(c, entry)
@@ -179,6 +403,13 @@ function M.init()
             if #target_tags > 0 then
                 c:tags(target_tags)
             end
+            entry.client = c
+            -- apply geometry/state on the next tick so it lands after
+            -- manage-time placement rules and layout arranges.
+            gears.timer.start_new(0, guarded(function()
+                apply_attrs(c, entry)
+                return false
+            end))
             placed[c] = true
             entry.used = true
         end
@@ -273,6 +504,8 @@ function M.init()
                     end
                 end
             end
+
+            restore_order()
         end
 
         -- synchronous first pass: pre-existing Wayland clients are already
@@ -290,7 +523,8 @@ function M.init()
         gears.timer.start_new(0.15, guarded(function() run_batch() return false end))
 
         -- late arrivals: clients that appear after the batch window (slow
-        -- app startup, D-Bus activation). listen on "manage" and restore
+        -- app startup, D-Bus activation). listen on "request::manage"
+        -- (somewm 2.0 removed the plain "manage" signal) and restore
         -- any matching unused saved entry. the apply is deferred to the
         -- next tick so ruled.client rules apply first.
         local function on_manage(c)
@@ -344,17 +578,18 @@ function M.init()
                 end
                 if best_si then
                     apply_entry(c, saved_entries[best_si])
+                    restore_order()
                 end
                 return false  -- one-shot
             end))
         end
 
-        client.connect_signal('manage', on_manage)
+        client.connect_signal('request::manage', on_manage)
 
         -- stop listening after 30s; any later client is treated as new
         -- rather than a session restore.
         gears.timer.start_new(30, guarded(function()
-            client.disconnect_signal('manage', on_manage)
+            client.disconnect_signal('request::manage', on_manage)
             saved_by_pid = nil
             return false
         end))

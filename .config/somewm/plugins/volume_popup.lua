@@ -14,8 +14,9 @@ local gshape  = require("gears.shape")
 local gtable  = require("gears.table")
 local guarded = require("error_guard")
 local popup_common = require("plugins.popup_common")
+local style   = require("plugins.style")
 
-local dpi = beautiful.xresources.apply_dpi
+local dpi = style.dpi
 
 local COLOR_PURPLE = popup_common.theme.PURPLE
 local COLOR_BLACK  = popup_common.theme.BLACK
@@ -25,9 +26,16 @@ local COLOR_GREY   = popup_common.theme.GREY
 local COLOR_RED    = popup_common.theme.RED
 local FONT       = popup_common.fonts.FONT
 local FONT_HEAD  = popup_common.fonts.FONT_HEAD
-local CONTENT_W  = dpi(440)
+-- module configuration; override via M.configure{...} before first use
+local CFG = {
+    content_w = dpi(440),
+}
+
+
 
 local M = {}
+
+function M.configure(opts) style.merge(CFG, opts) end
 
 local popup
 -- holder table: draggable_header reads popup from here so build_content can
@@ -53,18 +61,18 @@ local default_sink_view
 local make_text = popup_common.make_text
 
 local function separator()
-    return popup_common.separator(CONTENT_W)
+    return popup_common.separator(CFG.content_w)
 end
 
 local function section_label(text)
     return wibox.widget {
         {
             make_text(text, COLOR_GREY, FONT_HEAD),
-            left = dpi(6), right = dpi(6),
-            top = dpi(4), bottom = dpi(2),
+            left = style.spacing.m, right = style.spacing.m,
+            top = style.spacing.s, bottom = style.spacing.xxs,
             widget = wibox.container.margin,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         widget = wibox.container.background,
     }
 end
@@ -178,7 +186,7 @@ local function make_slider_row(device, device_type)
             mute_btn,
             pct,
             star,
-            spacing = dpi(6),
+            spacing = style.spacing.m,
             layout = wibox.layout.fixed.horizontal,
         },
         layout = wibox.layout.align.horizontal,
@@ -192,12 +200,12 @@ local function make_slider_row(device, device_type)
         handle_width        = dpi(12),
         handle_height       = dpi(12),
         handle_color        = COLOR_WHITE,
-        handle_border_width = dpi(1),
+        handle_border_width = style.popup.border_width,
         handle_border_color = COLOR_PURPLE,
         min   = 0,
         max   = 150,
         value = math.min(150, math.floor(device.vol * 100 + 0.5)),
-        forced_width  = CONTENT_W - dpi(20),
+        forced_width  = CFG.content_w - 2 * style.popup.margin_x,
         forced_height = dpi(14),
         widget = wibox.widget.slider,
     }
@@ -263,17 +271,17 @@ local function make_slider_row(device, device_type)
         header,
         slider,
         layout = wibox.layout.fixed.vertical,
-        spacing = dpi(4),
+        spacing = style.spacing.s,
     }
 
     local row_container = wibox.widget {
         {
             row,
-            left = dpi(6), right = dpi(6),
-            top = dpi(4), bottom = dpi(4),
+            left = style.spacing.m, right = style.spacing.m,
+            top = style.spacing.s, bottom = style.spacing.s,
             widget = wibox.container.margin,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         bg = COLOR_BLACK,
         widget = wibox.container.background,
     }
@@ -334,22 +342,22 @@ local function build_content()
         holder = popup_holder,
         name  = "volume_popup",
         title = "Volume",
-        width = CONTENT_W,
+        width = CFG.content_w,
         hide  = function() hide() end,
         also_release = true,
     }
 
     local rows_container = wibox.widget {
         layout = wibox.layout.fixed.vertical,
-        spacing = dpi(2),
+        spacing = style.spacing.xxs,
     }
 
     return wibox.widget {
         header,
         {
             rows_container,
-            top = dpi(8), bottom = dpi(8),
-            left = dpi(10), right = dpi(10),
+            top = style.spacing.l, bottom = style.spacing.l,
+            left = style.spacing.xl, right = style.spacing.xl,
             widget = wibox.container.margin,
         },
         layout = wibox.layout.fixed.vertical,
@@ -358,7 +366,7 @@ end
 
 local function ensure_popup()
     if popup then return end
-    local style = popup_common.popup_style()
+    local pstyle = popup_common.popup_style()
     -- build content first so the awful.popup constructor gets its required
     -- widget arg; draggable_header reads popup via popup_holder, assigned
     -- right after construction
@@ -369,9 +377,9 @@ local function ensure_popup()
         visible  = false,
         ontop    = true,
         bg       = COLOR_BLACK,
-        border_width = style.border_width,
+        border_width = pstyle.border_width,
         border_color = COLOR_GOLD,
-        shape = style.shape,
+        shape = pstyle.shape,
     }
     popup_holder.popup = popup
 end

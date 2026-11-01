@@ -88,24 +88,11 @@ local gstring = require("gears.string")
 local gshape = require("gears.shape")
 local guarded = require("error_guard")
 local popup_common = require("plugins.popup_common")
+local style   = require("plugins.style")
 
 local M = {}
 
-local function get_xresources()
-    if beautiful.xresources then
-        return beautiful.xresources
-    end
-
-    local ok, xresources = pcall(require, "beautiful.xresources")
-    if ok then
-        return xresources
-    end
-
-    return nil
-end
-
-local xresources = get_xresources()
-local dpi = xresources and xresources.apply_dpi or function(value) return value end
+local dpi = style.dpi
 
 -- Color Constants
 local COLOR_PURPLE = popup_common.theme.PURPLE
@@ -124,13 +111,17 @@ local FONT_CLEAR = popup_common.fonts.FONT_CLEAR
 local FONT       = popup_common.fonts.FONT
 local FONT_VALUE = popup_common.fonts.FONT_BOLD
 
--- Button Size Constants
-local BUTTON_HEIGHT_CLOSE = dpi(15)
-local BUTTON_WIDTH_CLOSE = dpi(16)
-local BUTTON_WIDTH_TEST = dpi(42)
-local BUTTON_WIDTH_COMPACT = dpi(62)
-local BUTTON_WIDTH_NORMAL = dpi(68)
-local BUTTON_HEIGHT_NORMAL = dpi(24)
+-- module configuration; override via M.configure{...} before first use
+local CFG = {
+    btn_close_h   = dpi(15),
+    btn_close_w   = dpi(16),
+    btn_test_w    = dpi(42),
+    btn_compact_w = dpi(62),
+    btn_w         = dpi(68),
+    btn_h         = dpi(24),
+}
+
+function M.configure(opts) style.merge(CFG, opts) end
 
 local history_limit = beautiful.notification_history_limit or 50
 -- local popup_width = beautiful.notification_center_width or dpi(600)
@@ -183,7 +174,7 @@ local osd_app_names = {
 }
 
 local history_list = wibox.layout.fixed.vertical()
-history_list.spacing = dpi(0)
+history_list.spacing = style.spacing.none
 -- no max_widget_size limit - allow text to wrap fully without truncation
 
 local header_count = wibox.widget {
@@ -354,7 +345,7 @@ end
 
 local function apply_shape(shape, cr, w, h, radius)
     if not shape then
-        gshape.rounded_rect(cr, w, h, radius or beautiful.border_radius or dpi(3))
+        gshape.rounded_rect(cr, w, h, radius or style.popup.radius)
         return
     end
 
@@ -367,7 +358,7 @@ local function apply_shape(shape, cr, w, h, radius)
 
     local ok = pcall(shape, cr, w, h)
     if not ok then
-        gshape.rounded_rect(cr, w, h, radius or beautiful.border_radius or dpi(3))
+        gshape.rounded_rect(cr, w, h, radius or style.popup.radius)
     end
 end
 
@@ -525,15 +516,15 @@ end
 --     local column = wibox.widget {
 --         {
 --             title_widget,
---             top = dpi(1),
+--             top = style.spacing.hair,
 --             widget = wibox.container.margin,
 --         },
 --         {
 --             message_widget,
---             top = dpi(0),
+--             top = style.spacing.none,
 --             widget = wibox.container.margin,
 --         },
---         spacing = dpi(0),
+--         spacing = style.spacing.none,
 --         layout = wibox.layout.fixed.vertical,
 --     }
 --
@@ -572,7 +563,7 @@ end
 --     -- local time_date_stack = wibox.widget {
 --     --     time_label,
 --     --     date_label,
---     --     spacing = dpi(0),
+--     --     spacing = style.spacing.none,
 --     --     layout = wibox.layout.fixed.vertical,
 --     -- }
 --
@@ -590,7 +581,7 @@ end
 --     return wibox.widget {
 --         footer_app,
 --         datetime_label,
---         spacing = dpi(0),
+--         spacing = style.spacing.none,
 --         layout = wibox.layout.fixed.vertical,
 --     }
 -- end
@@ -607,17 +598,17 @@ local function create_small_button(label, callback, compact, font, full_height)
         widget = wibox.widget.textbox,
     }
 
-    -- local button_height = (label == "X" and BUTTON_HEIGHT_CLOSE) or BUTTON_HEIGHT_NORMAL
+    -- local button_height = (label == "X" and CFG.btn_close_h) or CFG.btn_h
     local button_height = not full_height
-        and ((label == "X" and BUTTON_HEIGHT_CLOSE) or BUTTON_HEIGHT_NORMAL)
+        and ((label == "X" and CFG.btn_close_h) or CFG.btn_h)
         or nil
     local button_width
     if label == "X" then
-        button_width = BUTTON_WIDTH_CLOSE
+        button_width = CFG.btn_close_w
     elseif label == "test" then
-        button_width = BUTTON_WIDTH_TEST
+        button_width = CFG.btn_test_w
     else
-        button_width = compact and BUTTON_WIDTH_COMPACT or BUTTON_WIDTH_NORMAL
+        button_width = compact and CFG.btn_compact_w or CFG.btn_w
     end
 
     local inner_widget
@@ -630,7 +621,7 @@ local function create_small_button(label, callback, compact, font, full_height)
                 valign = "center",
                 widget = wibox.container.place,
             },
-            right = dpi(1),
+            right = style.spacing.hair,
             widget = wibox.container.margin,
         }
     else
@@ -641,8 +632,8 @@ local function create_small_button(label, callback, compact, font, full_height)
                 valign = "center",
                 widget = wibox.container.place,
             },
-            top = dpi(2),
-            bottom = dpi(2),
+            top = style.spacing.xxs,
+            bottom = style.spacing.xxs,
             widget = wibox.container.margin,
         }
     end
@@ -654,7 +645,7 @@ local function create_small_button(label, callback, compact, font, full_height)
         bg = (label == "X") and COLOR_PURPLE or COLOR_BLACK,
         fg = (label == "X") and COLOR_BLACK or button_fg,
         shape = function(cr, w, h)
-            apply_shape(popup_shape, cr, w, h, beautiful.border_radius or dpi(3))
+            apply_shape(popup_shape, cr, w, h, style.popup.radius)
         end,
         border_width = 1,
         border_color = (label == "X") and COLOR_BLACK or COLOR_PURPLE,
@@ -735,31 +726,31 @@ end
 --     local left_content = wibox.widget {
 --         {
 --             icon_placed,
---             left = dpi(4),
---             right = dpi(4),
---             top = dpi(4),
---             bottom = dpi(4),
+--             left = style.spacing.s,
+--             right = style.spacing.s,
+--             top = style.spacing.s,
+--             bottom = style.spacing.s,
 --             widget = wibox.container.margin,
 --         },
 --         {
 --             text_column,
---             left = dpi(0),
---             top = dpi(4),
---             bottom = dpi(4),
+--             left = style.spacing.none,
+--             top = style.spacing.s,
+--             bottom = style.spacing.s,
 --             widget = wibox.container.margin,
 --         },
---         spacing = dpi(0),
+--         spacing = style.spacing.none,
 --         layout = wibox.layout.fixed.horizontal,
 --     }
 --
 --     local date_and_actions = wibox.widget {
 --         {
 --             footer_widget,
---             right = dpi(2),
+--             right = style.spacing.xxs,
 --             widget = wibox.container.margin,
 --         },
 --         button_row,
---         spacing = dpi(2),
+--         spacing = style.spacing.xxs,
 --         layout = wibox.layout.fixed.horizontal,
 --     }
 --
@@ -808,10 +799,14 @@ local function create_history_row(entry)
     }
 
     -- fg only exists on wibox.container.background in somewm, so the Gold
-    -- Value is coloured via Pango Markup instead
+    -- Value is coloured via Pango Markup instead. the app name keeps the
+    -- bold FONT_VALUE base; the datetime drops to normal weight, matching
+    -- the popup header's app/time split
     local value_label = wibox.widget {
-        markup = "<span foreground='" .. COLOR_GOLD .. "'>"
-            .. gstring.xml_escape(app_text .. "  ·  " .. datetime_str) .. "</span>",
+        markup = "<b><span foreground='" .. COLOR_GOLD .. "'>"
+            .. gstring.xml_escape(app_text) .. "</span></b>"
+            .. "<span foreground='" .. COLOR_GOLD .. "' font_weight='normal'>  ·  "
+            .. datetime_str .. "</span>",
         font = FONT_VALUE,
         align = "right",
         valign = "center",
@@ -830,7 +825,7 @@ local function create_history_row(entry)
 
     local right_side = wibox.widget {
         value_label,
-        spacing = dpi(6),
+        spacing = style.spacing.m,
         layout = wibox.layout.fixed.horizontal,
     }
 
@@ -862,7 +857,7 @@ local function create_history_row(entry)
             layout = wibox.layout.align.horizontal,
         },
         message_label,
-        spacing = dpi(2),
+        spacing = style.spacing.xxs,
         layout = wibox.layout.fixed.vertical,
     }
 
@@ -882,7 +877,7 @@ local function create_history_row(entry)
     -- local content = wibox.widget {
     --     {
     --         icon_placed,
-    --         right = dpi(8),
+    --         right = style.spacing.l,
     --         widget = wibox.container.margin,
     --     },
     --     {
@@ -895,7 +890,7 @@ local function create_history_row(entry)
     -- local content = wibox.widget {
     --     {
     --         icon_placed,
-    --         right = dpi(8),
+    --         right = style.spacing.l,
     --         widget = wibox.container.margin,
     --     },
     --     text_column,
@@ -906,8 +901,8 @@ local function create_history_row(entry)
     -- return wibox.widget {
     --     {
     --         content,
-    --         left = dpi(10), right = dpi(10),
-    --         top = dpi(6), bottom = dpi(6),
+    --         left = style.spacing.xl, right = style.spacing.xl,
+    --         top = style.spacing.m, bottom = style.spacing.m,
     --         widget = wibox.container.margin,
     --     },
     --     bg = COLOR_BLACK,
@@ -920,14 +915,14 @@ local function create_history_row(entry)
     local row_content = wibox.widget {
         {
             icon_placed,
-            left = dpi(10), right = dpi(8),
-            top = dpi(6), bottom = dpi(6),
+            left = style.spacing.xl, right = style.spacing.l,
+            top = style.spacing.m, bottom = style.spacing.m,
             widget = wibox.container.margin,
         },
         {
             text_column,
-            right = dpi(10),
-            top = dpi(6), bottom = dpi(6),
+            right = style.spacing.xl,
+            top = style.spacing.m, bottom = style.spacing.m,
             widget = wibox.container.margin,
         },
         forget_button,
@@ -1101,21 +1096,21 @@ local function create_popup_header()
     local controls = wibox.widget {
         {
             pin_btn,
-            top = dpi(0),
-            right = dpi(2),
-            bottom = dpi(0),
+            top = style.spacing.none,
+            right = style.spacing.xxs,
+            bottom = style.spacing.none,
             widget = wibox.container.margin,
         },
         {
             M._clear_button,
-            -- top = dpi(2),
-            top = dpi(0),
-            right = dpi(2),
-            -- bottom = dpi(2),
-            bottom = dpi(0),
+            -- top = style.spacing.xxs,
+            top = style.spacing.none,
+            right = style.spacing.xxs,
+            -- bottom = style.spacing.xxs,
+            bottom = style.spacing.none,
             widget = wibox.container.margin,
         },
-        spacing = dpi(4),
+        spacing = style.spacing.s,
         layout = wibox.layout.fixed.horizontal,
     }
 
@@ -1132,14 +1127,14 @@ local function create_popup_header()
                     -- },
                     header_count,
                     controls,
-                    spacing = dpi(4),
+                    spacing = style.spacing.s,
                     layout = wibox.layout.fixed.horizontal,
                 },
                 layout = wibox.layout.align.horizontal,
             },
-            left = dpi(10), right = dpi(10),
-            -- top = dpi(6), bottom = dpi(6),
-            top = dpi(2), bottom = dpi(2),
+            left = style.spacing.xl, right = style.spacing.xl,
+            -- top = style.spacing.m, bottom = style.spacing.m,
+            top = style.spacing.xxs, bottom = style.spacing.xxs,
             widget = wibox.container.margin,
         },
         bg = header_bg,
@@ -1197,7 +1192,7 @@ local function ensure_popup()
         visible = false,
         placement = false,
         shape = function(cr, w, h)
-            apply_shape(popup_shape, cr, w, h, beautiful.border_radius or dpi(3))
+            apply_shape(popup_shape, cr, w, h, style.popup.radius)
         end,
         border_width = beautiful.notification_center_border_width or 2,
         border_color = beautiful.notification_center_border_color or COLOR_GOLD,
@@ -1209,7 +1204,7 @@ local function ensure_popup()
     return popup_instance
 end
 
-function M.show(anchor)
+function M.show(anchor, opt_screen)
     local popup = ensure_popup()
 
     -- avoid redundant work if already visible
@@ -1219,7 +1214,7 @@ function M.show(anchor)
 
     awesome.emit_signal("popup::opening")
 
-    local s = awful.screen.focused()
+    local s = opt_screen or awful.screen.focused()
     popup.screen = s
 
     if s and s.workarea and s.workarea.height then
@@ -1235,10 +1230,13 @@ function M.show(anchor)
     popup:_apply_size_now(false)
 
     if anchor then
-        -- anchored to a wibar widget: place above it like the other popups
+        -- anchored to a wibar widget: hang it below like the other popups.
+        -- geometry= is the positional target awful.placement.next_to passes
+        -- to the compositor attachment; widget= is ignored there. "bottom"
+        -- because attachments can't flip sides: a top bar has no room above
         awful.placement.next_to(popup, {
-            widget = anchor,
-            preferred_positions = "top",
+            geometry = anchor,
+            preferred_positions = "bottom",
             preferred_anchors = "back",
             honor_workarea = true,
         })
@@ -1303,13 +1301,13 @@ function M.hide()
     popup_instance.visible = false
 end
 
-function M.toggle(anchor)
+function M.toggle(anchor, opt_screen)
     local popup = ensure_popup()
 
     if popup.visible then
         M.hide()
     else
-        M.show(anchor)
+        M.show(anchor, opt_screen)
     end
 end
 
@@ -1353,14 +1351,14 @@ function ToggleIndicator:new()
     local container = wibox.widget {
         {
             inner_content,
-            left = dpi(1),
+            left = style.spacing.hair,
             widget = wibox.container.margin,
         },
         bg = button_bg,
         fg = button_fg,
-        forced_height = dpi(32),
-        forced_width = dpi(40),
-        border_width = beautiful.bar_edge_width or dpi(3),
+        forced_height = dpi(24),
+        forced_width = dpi(28),
+        border_width = beautiful.bar_edge_width or dpi(0),
         border_color = COLOR_BLACK,
         widget = wibox.container.background,
     }
@@ -1370,8 +1368,8 @@ function ToggleIndicator:new()
     -- on the inner container propagate up to it
     local outer = wibox.widget {
         container,
-        left = dpi(6),
-        right = dpi(2),
+        left = style.spacing.none,
+        right = style.spacing.none,
         widget = wibox.container.margin,
     }
 
@@ -1383,10 +1381,13 @@ function ToggleIndicator:new()
 
     outer:buttons(gtable.join(
         awful.button({}, 1, function()
+            -- capture the pressed widget's screen so the popup opens there,
+            -- not on the focused screen
+            local press_screen = (mouse.current_wibox and mouse.current_wibox.screen) or mouse.screen
             -- widget_press arms the wibar handler's ignore flag and returns
             -- true if that handler already closed the popup on this press
             if not popup_common.widget_press(ensure_popup()) then
-                M.toggle(container)
+                M.toggle(container, press_screen)
             end
         end),
         awful.button({}, 2, function()
@@ -1415,7 +1416,7 @@ function ToggleIndicator:set_count(value)
     local count_markup = count > 0
         and ("<span foreground='" .. COLOR_GOLD .. "'>" .. tostring(count) .. "</span>")
         or tostring(count)
-    self._label.markup = icon .. "\226\128\137" .. count_markup
+    self._label.markup = icon .. count_markup
     
     -- adjust width based on count
     -- if count >= 100 then

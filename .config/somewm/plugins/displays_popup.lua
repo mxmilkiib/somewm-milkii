@@ -1,12 +1,15 @@
 -- plugins/displays_popup.lua
 -- Monitor management popup, opened by middle-clicking the wibar brightness
 -- widget. Lists every output the compositor reports with enable/primary
--- toggles and mode/scale/transform/adaptive-sync cyclers, topped by a
+-- toggles and mode/scale/transform/adaptive-sync/hdr controls, topped by a
 -- draggable mini-map of the output layout (drag a rectangle to set
 -- output.position; edges snap to neighbouring monitors).
 --
 -- all state comes straight from the `output` capi object — no spawned tools.
--- HDR is not exposed by somewm's output object, so there is no control for it.
+-- the hdr chip toggles BT.2020/PQ on outputs that advertise it
+-- (output.hdr_supported); it renders inert otherwise, and stays inert unless
+-- SOMEWM_HDR_UNSAFE=1 is in the environment — the atomic commit hard-hung
+-- amdgpu's display core on kernel 7.3.0-rc6 (no panic, no coredump).
 -- one shared popup is re-anchored to whichever widget was middle-clicked,
 -- same pattern as the rest of the wibar popup family.
 
@@ -17,9 +20,14 @@ local beautiful = require("beautiful")
 local gshape  = require("gears.shape")
 local guarded = require("error_guard")
 local popup_common = require("plugins.popup_common")
+local style   = require("plugins.style")
 local base    = require("wibox.widget.base")
+local wclay   = require("wibox.clay")
+local lgi     = require("lgi")
+local Pango   = lgi.Pango
+local PangoCairo = lgi.PangoCairo
 
-local dpi = beautiful.xresources.apply_dpi
+local dpi = style.dpi
 
 local mouse = mouse
 local capi_screen = screen
@@ -37,10 +45,21 @@ local COLOR_HOVER  = popup_common.theme.HOVER
 local FONT       = popup_common.fonts.FONT
 local FONT_HEAD  = popup_common.fonts.FONT_HEAD
 local FONT_SMALL = popup_common.fonts.FONT_SMALL
-local CONTENT_W  = dpi(320)
-local MAP_H      = dpi(110)
+-- recomputed per refresh: sized so no refresh-rate chip row wraps
+-- module configuration; override via M.configure{...} before first use
+local CFG = {
+    content_w = dpi(320),
+    res_w = dpi(56),  -- resolution label column in the mode rows
+    chip_pad = dpi(3),   -- horizontal padding inside a chip
+    chip_gap = dpi(2),   -- spacing between refresh-rate chips
+    map_h = dpi(110),
+}
+
+
 
 local M = {}
+
+function M.configure(opts) style.merge(CFG, opts) end
 
 local popup
 local popup_holder = {}
@@ -69,8 +88,13 @@ local SCALE_STEPS = { 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3 }
 
 local make_text = popup_common.make_text
 
+-- opt-in for the hdr commit: setting BT.2020/PQ image description on eDP
+-- hard-hung this box's amdgpu display core (kernel 7.3.0-rc6). re-test on a
+-- fixed kernel by exporting SOMEWM_HDR_UNSAFE=1 before somewm starts
+local HDR_ARMED = os.getenv("SOMEWM_HDR_UNSAFE") == "1"
+
 local function separator()
-    return popup_common.separator(CONTENT_W)
+    return popup_common.separator(CFG.content_w)
 end
 
 
@@ -78,7 +102,7 @@ end
 
 -- internal panels carry embedded connector prefixes (eDP/LVDS/DSI); HDMI and
 -- DP outputs — including the ones exposed through a thunderbolt hub — are
--- external. listing internals first keeps the laptop panel on top
+-- external
 local INTERNAL_PREFIXES = { "eDP", "LVDS", "DSI" }
 local function is_internal(o)
     local n = tostring(o.name)
@@ -88,26 +112,47 @@ local function is_internal(o)
     return false
 end
 
--- listing order: internal panels first, then HDMI, then DP, then anything
--- else — alphabetical inside each rank
-local function conn_rank(o)
-    local n = tostring(o.name)
-    if is_internal(o) then return 0
-    elseif n:match("^HDMI") then return 1
-    elseif n:match("^DP") then return 2
-    end
-    return 3
+-- committed (not staged) effective rect of an enabled output — ordering
+-- follows the live layout so a pending drag doesn't reshuffle the list
+local function committed_rect(o)
+    local m = o.current_mode
+    if not m or not o.enabled then return nil end
+    local w, h = m.width, m.height
+    if (o.transform or 0) % 2 == 1 then w, h = h, w end
+    local s = o.scale or 1
+    local p = o.position or { x = 0, y = 0 }
+    return { x = p.x, y = p.y, w = w / s, h = h / s }
 end
 
+-- list order follows the physical layout: top edge first, then closeness
+-- of the output's horizontal centre to the internal panel's centre —
+-- monitors stacked above the laptop panel list ahead of it. disabled
+-- outputs have no rect and sort last, alphabetical
 local function all_outputs()
     local list = {}
     for i = 1, capi_output.count() do
         local o = capi_output[i]
         if o and o.valid then list[#list + 1] = o end
     end
+    local icx
+    for _, o in ipairs(list) do
+        if is_internal(o) then
+            local r = committed_rect(o)
+            if r then icx = r.x + r.w / 2 break end
+        end
+    end
     table.sort(list, function(a, b)
-        local ra, rb = conn_rank(a), conn_rank(b)
-        if ra ~= rb then return ra < rb end
+        local ra, rb = committed_rect(a), committed_rect(b)
+        if ra and rb then
+            if ra.y ~= rb.y then return ra.y < rb.y end
+            if icx then
+                local da = math.abs(ra.x + ra.w / 2 - icx)
+                local db = math.abs(rb.x + rb.w / 2 - icx)
+                if da ~= db then return da < db end
+            end
+        elseif ra or rb then
+            return ra ~= nil
+        end
         return tostring(a.name) < tostring(b.name)
     end)
     return list
@@ -124,12 +169,6 @@ local function layout_rect(o)
     local s = pending_scale[o] or o.scale or 1
     local p = pending[o] or o.position or { x = 0, y = 0 }
     return { x = p.x, y = p.y, w = w / s, h = h / s }
-end
-
-local function mode_label(m)
-    if not m then return "no mode" end
-    return string.format("%dx%d@%d", m.width, m.height,
-        math.floor((m.refresh or 0) / 1000 + 0.5))
 end
 
 local function scale_label(s)
@@ -204,16 +243,16 @@ local function chip(text, fg, onclick, border)
     local bg = wibox.widget {
         {
             txt,
-            left = dpi(6), right = dpi(6),
-            top = dpi(2), bottom = dpi(2),
+            left = CFG.chip_pad, right = CFG.chip_pad,
+            top = style.spacing.xxs, bottom = style.spacing.xxs,
             widget = wibox.container.margin,
         },
         bg = COLOR_BLACK,
         fg = fg or COLOR_WHITE,
-        border_width = dpi(1),
+        border_width = style.popup.border_width,
         border_color = border or COLOR_PURPLE,
         shape = function(cr, w, h)
-            gshape.rounded_rect(cr, w, h, dpi(3))
+            gshape.rounded_rect(cr, w, h, style.popup.radius)
         end,
         widget = wibox.container.background,
     }
@@ -240,13 +279,13 @@ local function cycler(get_label, on_step, border_color)
         lbl_widget = wibox.widget {
             {
                 lbl,
-                left = dpi(4), right = dpi(4),
+                left = style.spacing.s, right = style.spacing.s,
                 widget = wibox.container.margin,
             },
-            border_width = dpi(1),
+            border_width = style.popup.border_width,
             border_color = border_color,
             shape = function(cr, w, h)
-                gshape.rounded_rect(cr, w, h, dpi(3))
+                gshape.rounded_rect(cr, w, h, style.popup.radius)
             end,
             widget = wibox.container.background,
         }
@@ -311,6 +350,7 @@ local function output_section(o)
     local power_chip
     power_chip = chip(enabled and "●" or "○",
         enabled and COLOR_GOLD or COLOR_GREY, function()
+            gears.debug.print_error("displays_popup: power chip " .. o.name)
             -- dropping the output that hosts this popup orphans it; close
             -- first so the teardown happens while its screen still exists
             if enabled and o.screen and popup and popup.screen == o.screen then
@@ -330,7 +370,7 @@ local function output_section(o)
     local primary_bg = wibox.widget {
         {
             primary_txt,
-            left = dpi(4), right = dpi(4),
+            left = style.spacing.s, right = style.spacing.s,
             widget = wibox.container.margin,
         },
         bg = COLOR_BLACK,
@@ -344,26 +384,32 @@ local function output_section(o)
         end))))
     end
 
+    -- title centred in the row: the primary star stays pinned left and the
+    -- power chip right; both are single-glyph chips of similar footprint so
+    -- the middle slot's centre is close enough to the row's true centre.
+    -- the cap keeps a long make/model wrapping instead of pushing the chip
     local line1 = wibox.widget {
         {
-            -- cap the left group's width so a long make/model ellipsizes
-            -- instead of pushing the power chip off the row
+            primary_bg,
+            halign = "center",
+            valign = "center",
+            widget = wibox.container.place,
+        },
+        {
             {
                 {
-                    primary_bg,
-                    halign = "center",
-                    valign = "center",
-                    widget = wibox.container.place,
+                    name_lbl,
+                    desc_lbl,
+                    layout = wibox.layout.fixed.horizontal,
                 },
-                name_lbl,
-                desc_lbl,
-                layout = wibox.layout.fixed.horizontal,
+                strategy = "max",
+                width = CFG.content_w - dpi(60),
+                widget = wibox.container.constraint,
             },
-            strategy = "max",
-            width = CONTENT_W - dpi(40),
-            widget = wibox.container.constraint,
+            halign = "center",
+            fill_horizontal = true,
+            widget = wibox.container.place,
         },
-        nil,
         power_chip,
         layout = wibox.layout.align.horizontal,
         expand = "inside",
@@ -372,57 +418,74 @@ local function output_section(o)
     local col = wibox.widget {
         line1,
         layout = wibox.layout.fixed.vertical,
-        spacing = dpi(3),
+        spacing = style.spacing.xs,
     }
 
     if enabled then
-        -- mode cycler: step through the driver-reported mode list
+        -- full mode list: one row per resolution, refresh rates as chips.
+        -- gold text = live mode, green border = staged pick; clicking a
+        -- chip stages it for apply, clicking the staged/live chip unstages
         local modes = o.modes or {}
         local cur = o.current_mode
-        local cur_idx = 0
-        for i, m in ipairs(modes) do
-            if cur and m.width == cur.width and m.height == cur.height
-                and m.refresh == cur.refresh then
-                cur_idx = i
-                break
+        local pend = pending_mode[o]
+        local groups, order = {}, {}
+        for _, m in ipairs(modes) do
+            local key = m.width .. "x" .. m.height
+            local g = groups[key]
+            if not g then
+                g = { w = m.width, h = m.height, modes = {} }
+                groups[key] = g
+                order[#order + 1] = g
             end
+            g.modes[#g.modes + 1] = m
         end
-        if #modes > 0 then
-            -- mode cycling is staged: the label shows the pending pick (with a
-            -- '*' marker) and nothing commits until apply layout is clicked.
-            -- cycling back onto the live mode unstages it
-            col:add(cycler(
-                function()
-                    local m = pending_mode[o] or o.current_mode
-                    local s = mode_label(m)
-                    if m and m.preferred then s = s .. " ★" end
-                    if pending_mode[o] then s = s .. " *" end
-                    return s
-                end,
-                function(step)
-                    local m = pending_mode[o] or o.current_mode
-                    local idx = 0
-                    for i, mm in ipairs(modes) do
-                        if m and mm.width == m.width and mm.height == m.height
-                            and mm.refresh == m.refresh then
-                            idx = i
-                            break
+        table.sort(order, function(a, b)
+            if a.w * a.h ~= b.w * b.h then return a.w * a.h > b.w * b.h end
+            return a.w > b.w
+        end)
+        -- resolution labels get a fixed column so chip columns align across
+        -- rows; CFG.content_w is sized so a row never wraps
+        for _, g in ipairs(order) do
+            table.sort(g.modes, function(a, b)
+                return (a.refresh or 0) > (b.refresh or 0) end)
+            local line = wibox.widget {
+                spacing = CFG.chip_gap,
+                layout = wibox.layout.fixed.horizontal,
+            }
+            for _, m in ipairs(g.modes) do
+                local is_live = cur and m.width == cur.width
+                    and m.height == cur.height and m.refresh == cur.refresh
+                local is_pend = pend and m.width == pend.width
+                    and m.height == pend.height and m.refresh == pend.refresh
+                local lbl = string.format("%g", (m.refresh or 0) / 1000)
+                if m.preferred then lbl = lbl .. "★" end
+                -- chip() returns (bg, txt); parens truncate to the button
+                -- otherwise :add() would insert the bare label as a sibling
+                line:add((chip(lbl,
+                    is_live and COLOR_GOLD or COLOR_GREY,
+                    function()
+                        if is_pend or is_live then
+                            pending_mode[o] = nil
+                        else
+                            pending_mode[o] = { width = m.width,
+                                height = m.height, refresh = m.refresh }
                         end
-                    end
-                    local next_m = modes[((idx - 1 + step) % #modes) + 1]
-                    local cur = o.current_mode
-                    if next_m and cur and next_m.width == cur.width
-                        and next_m.height == cur.height
-                        and next_m.refresh == cur.refresh then
-                        pending_mode[o] = nil
-                    else
-                        pending_mode[o] = next_m
-                    end
-                    update_pending_bar()
-                    -- rebuild the row so the staged label gains/loses its
-                    -- green border
-                    schedule_refresh()
-                end, pending_mode[o] and COLOR_GREEN))
+                        update_pending_bar()
+                        schedule_refresh()
+                    end,
+                    is_pend and COLOR_GREEN or nil)))
+            end
+            col:add(wibox.widget {
+                {
+                    make_text(g.w .. "x" .. g.h, COLOR_WHITE, FONT_SMALL),
+                    strategy = "exact",
+                    width = CFG.res_w,
+                    widget = wibox.container.constraint,
+                },
+                line,
+                spacing = style.spacing.s,
+                layout = wibox.layout.fixed.horizontal,
+            })
         end
 
         -- scale + transform cyclers on one row, adaptive-sync chip at the end
@@ -463,11 +526,31 @@ local function output_section(o)
                 o.adaptive_sync = not o.adaptive_sync
                 schedule_refresh()
             end)
+        -- hdr commits instantly like vrr; no onclick when the output
+        -- doesn't advertise BT.2020/PQ or HDR_ARMED is unset, leaving the
+        -- chip inert
+        local hdr_chip
+        hdr_chip = chip("hdr",
+            o.hdr and COLOR_GOLD or COLOR_GREY,
+            (o.hdr_supported and HDR_ARMED) and function()
+                gears.debug.print_error("displays_popup: hdr chip " .. o.name)
+                local ok, err = pcall(function() o.hdr = not o.hdr end)
+                if not ok then
+                    gears.debug.print_error("displays_popup: hdr: "
+                        .. tostring(err))
+                end
+                schedule_refresh()
+            end or nil)
         col:add(wibox.widget {
             scale_cyc,
             tr_cyc,
             {
-                vrr_chip,
+                {
+                    hdr_chip,
+                    vrr_chip,
+                    spacing = CFG.chip_gap,
+                    layout = wibox.layout.fixed.horizontal,
+                },
                 halign = "right",
                 valign = "center",
                 widget = wibox.container.place,
@@ -482,11 +565,11 @@ local function output_section(o)
     return wibox.widget {
         {
             col,
-            left = dpi(6), right = dpi(6),
-            top = dpi(4), bottom = dpi(4),
+            left = style.spacing.m, right = style.spacing.m,
+            top = style.spacing.s, bottom = style.spacing.s,
             widget = wibox.container.margin,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         bg = COLOR_BLACK,
         widget = wibox.container.background,
     }
@@ -495,17 +578,37 @@ end
 
 -- MARK: LAYOUT MAP
 
--- canvas of monitor rectangles at effective size, scaled to fit CONTENT_W.
+-- shared scratch layout for pixel text measurement; the textbox fit calls
+-- this replaces resolved point sizes at the context dpi the same way
+local measure_ctx = PangoCairo.font_map_get_default():create_context()
+local measure_layout = Pango.Layout.new(measure_ctx)
+local function measure_text(s, desc)
+    measure_layout:set_font_description(desc)
+    measure_layout:set_text(s)
+    return measure_layout:get_pixel_size()
+end
+
+-- canvas of monitor rectangles at effective size, scaled to fit CFG.content_w.
 -- dragging a rect shows a snapped ghost; release commits output.position
 local function make_map()
     local w = base.make_widget(nil, nil, { enable_properties = true })
     w._rects = {}    -- { o, x, y, w, h } in map coords (o = output)
     w._k, w._ox, w._oy = 1, 0, 0
     w._drag = nil    -- { o, offx, offy, gx, gy, ax, ay } while a drag runs
+    local width_cap = CFG.content_w - 2 * style.popup.margin_x
 
-    function w:fit(_, avail_w)
-        return math.min(avail_w, CONTENT_W - dpi(20)), MAP_H
-    end
+    -- wl_output transform -> the label's transform word; the raster knows
+    -- the five plain ones, so flipped rotations draw at the same reading
+    -- direction without the mirror
+    local TRANSFORM_WORDS = { [1] = "90", "180", "270", "flipped",
+        "90", "flipped-180", "270" }
+
+    -- the label face: monospace at the old toy-font's pixel size, interned
+    -- on first use
+    local label_desc = Pango.FontDescription.new()
+    label_desc:set_family("monospace")
+    label_desc:set_absolute_size(dpi(9) * Pango.SCALE)
+    local label_font
 
     -- (re)compute the layout->map transform and each rect's map coords
     function w:relayout(avail_w)
@@ -532,8 +635,8 @@ local function make_map()
         local bw = math.max(1, bbox.r - bbox.x)
         local bh = math.max(1, bbox.b - bbox.y)
         local pad = dpi(4)
-        local mw = (avail_w or CONTENT_W - dpi(20)) - 2 * pad
-        local mh = MAP_H - 2 * pad
+        local mw = (avail_w or CFG.content_w - 2 * style.popup.margin_x) - 2 * pad
+        local mh = CFG.map_h - 2 * pad
         local k = math.min(mw / bw, mh / bh)
         self._k = k
         self._ox = pad + (mw - bw * k) / 2
@@ -555,38 +658,32 @@ local function make_map()
 
     local GAP = dpi(2)  -- visual inset between adjacent monitor rectangles
 
-    function w:draw(_, cr, width, height)
-        if not self._bbox then self:relayout(width) end
-        cr:set_source_rgb(0.04, 0.04, 0.04)
-        cr:rectangle(0, 0, width, height)
-        cr:fill()
-        cr:select_font_face("monospace")
-        cr:set_font_size(dpi(9))
-        for _, e in ipairs(self._rects) do
+    -- Clay describer: each rect is a floated child of the map's own node,
+    -- which keeps the box the drag hit-testing below works against.
+    -- the staged dashes of the cairo version have no border form, so a
+    -- staged rect draws a solid green border
+    local function describe_map(w, _, _, _, offer)
+        local width = math.min(offer.w or width_cap, width_cap)
+        if not w._bbox then w:relayout(width) end
+        local specs = {}
+        for _, e in ipairs(w._rects) do
             local x, y = rect_xy(e)
             local primary = e.o.screen and e.o.screen == capi_screen.primary
-            local ghost = self._drag and self._drag.o == e.o
+            local ghost = w._drag and w._drag.o == e.o
             local staged = pending[e.o] ~= nil or pending_mode[e.o] ~= nil
                 or pending_scale[e.o] ~= nil
             -- inset so edge-snapped monitors still read as separate panels
             local rx, ry = x + GAP, y + GAP
             local rw, rh = math.max(1, e.w - 2 * GAP), math.max(1, e.h - 2 * GAP)
-            cr:set_source_rgba(0.38, 0.22, 0.59, ghost and 0.25 or 0.45)
-            cr:rectangle(rx, ry, rw, rh)
-            cr:fill()
-            if staged then
-                -- any staged change: dashed green border until applied
-                cr:set_source_rgba(0.41, 0.84, 0.40, 0.9)
-                cr:set_dash({ dpi(4), dpi(3) }, 0)
-            else
-                cr:set_source_rgba(1, 0.84, 0, primary and 1 or 0.35)
-            end
-            cr:set_line_width(primary and dpi(1.5) or dpi(1))
-            cr:rectangle(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
-            cr:stroke()
-            cr:set_dash({}, 0)
+            local bw = wclay.pixels(w, "border", dpi(primary and 1.5 or 1))
+            local rect = { float = true, x = rx, y = ry, w = rw, h = rh,
+                bg = { 0.38, 0.22, 0.59, ghost and 0.25 or 0.45 },
+                border = staged and { 0.41, 0.84, 0.40, 0.9 }
+                    or { 1, 0.84, 0, primary and 1 or 0.35 },
+                bw = { bw, bw, bw, bw },
+                align = { x = "center", y = "center" } }
             local label = tostring(e.o.name)
-            local te = cr:text_extents(label)
+            local lw, lh = measure_text(label, label_desc)
             -- rotate the name by the output's transform so the map reads
             -- like the physical panel: 90/270 run vertically, 180 upside
             -- down, flipped variants mirrored. sideways text fits when its
@@ -594,21 +691,23 @@ local function make_map()
             local t = e.o.transform or 0
             local sideways = t % 2 == 1
             local fits = sideways
-                and (te.width < rh - 4 and te.height < rw - 4)
-                or (te.width < rw - 4)
-            if fits then
-                cr:save()
-                cr:translate(rx + rw / 2, ry + rh / 2)
-                cr:rotate(-(t % 4) * math.pi / 2)
-                if t >= 4 then cr:scale(-1, 1) end
-                cr:set_source_rgba(1, 1, 1, ghost and 0.6 or 0.9)
-                cr:move_to(-te.width / 2 - te.x_bearing,
-                           -te.height / 2 - te.y_bearing)
-                cr:show_text(label)
-                cr:restore()
+                and (lw < rh - 4 and lh < rw - 4)
+                or (lw < rw - 4)
+            if fits and label_font == nil then
+                label_font = awesome._clay_font(label_desc:to_string()) or false
             end
+            if fits and label_font then
+                rect.children = { { text = label, font = label_font, name = "text",
+                    color = { 1, 1, 1, ghost and 0.6 or 0.9 },
+                    wrap = "none", halign = "center",
+                    transform = TRANSFORM_WORDS[t + 1] } }
+            end
+            specs[#specs + 1] = rect
         end
+        return { w = width, h = CFG.map_h, bg = { 0.04, 0.04, 0.04, 1 },
+            specs = specs }
     end
+    wclay.describe_widget(w, describe_map, "displays_popup.map")
 
     -- snap a layout-space rect to the edges of the other rects; returns the
     -- corrected x,y. SNAP is in layout px (a few map px at typical scale)
@@ -677,6 +776,9 @@ local function make_map()
                 w:emit_signal("widget::redraw_needed")
             end),
         }
+        -- gears.timer{} does not autostart - without this a missed release
+        -- leaves the grabber intercepting all mouse input indefinitely
+        safety:start()
         capi_mousegrabber.run(function(m)
             if not w._drag then return false end
             if not (m.buttons and m.buttons[1]) then
@@ -860,6 +962,7 @@ local function wire_output(o)
     for _, sig in ipairs {
         "property::enabled", "property::mode", "property::scale",
         "property::transform", "property::position", "property::adaptive_sync",
+        "property::hdr",
     } do
         o:connect_signal(sig, function() schedule_refresh() end)
     end
@@ -871,7 +974,7 @@ local function build_content()
         holder = popup_holder,
         name  = "displays_popup",
         title = "Displays",
-        width = CONTENT_W,
+        width = CFG.content_w,
         hide  = function() hide() end,
     }
 
@@ -883,28 +986,28 @@ local function build_content()
 
     local rows_container = wibox.widget {
         layout = wibox.layout.fixed.vertical,
-        spacing = dpi(6),
+        spacing = style.spacing.m,
     }
 
     return wibox.widget {
         header,
         {
             map_widget,
-            top = dpi(6), bottom = dpi(2),
-            left = dpi(10), right = dpi(10),
+            top = style.spacing.m, bottom = style.spacing.xxs,
+            left = style.spacing.xl, right = style.spacing.xl,
             widget = wibox.container.margin,
         },
         {
             pending_bar,
-            bottom = dpi(4),
-            left = dpi(10), right = dpi(10),
+            bottom = style.spacing.s,
+            left = style.spacing.xl, right = style.spacing.xl,
             widget = wibox.container.margin,
         },
         separator(),
         {
             rows_container,
-            top = dpi(6), bottom = dpi(8),
-            left = dpi(10), right = dpi(10),
+            top = style.spacing.m, bottom = style.spacing.l,
+            left = style.spacing.xl, right = style.spacing.xl,
             widget = wibox.container.margin,
         },
         separator(),
@@ -930,8 +1033,8 @@ local function build_content()
                 valign = "center",
                 widget = wibox.container.place,
             },
-            top = dpi(4), bottom = dpi(6),
-            left = dpi(10), right = dpi(10),
+            top = style.spacing.s, bottom = style.spacing.m,
+            left = style.spacing.xl, right = style.spacing.xl,
             widget = wibox.container.margin,
         },
         layout = wibox.layout.fixed.vertical,
@@ -1025,7 +1128,7 @@ update_pending_bar = function()
         {
             apply,
             cancel,
-            spacing = dpi(6),
+            spacing = style.spacing.m,
             layout = wibox.layout.fixed.horizontal,
         },
         halign = "center",
@@ -1034,8 +1137,57 @@ update_pending_bar = function()
     }
 end
 
+-- real text width via the shared layout at the screen's dpi; the textbox
+-- fit this replaces resolved the same font description the same way
+local function fit_text(s)
+    local scr = capi_screen.primary or capi_screen[1]
+    measure_ctx:set_resolution(scr and scr.dpi or 96)
+    return (measure_text(s, beautiful.get_font(FONT_SMALL)))
+end
+
+-- widest mode row across outputs: res label column + one chip per refresh
+-- (chip = text + side padding + ~2px border), so the popup can grow wide
+-- enough that no chip row wraps. also updates CFG.res_w to fit the longest
+-- resolution label actually present
+local function compute_content_w()
+    local max_row, max_res = 0, 0
+    for _, o in ipairs(all_outputs()) do
+        if o.enabled then
+            local groups = {}
+            for _, m in ipairs(o.modes or {}) do
+                local k = m.width .. "x" .. m.height
+                groups[k] = groups[k] or {}
+                table.insert(groups[k], m)
+            end
+            for k, g in pairs(groups) do
+                max_res = math.max(max_res, fit_text(k))
+                local wsum = 0
+                for _, m in ipairs(g) do
+                    local lbl = string.format("%g", (m.refresh or 0) / 1000)
+                    if m.preferred then lbl = lbl .. "★" end
+                    wsum = wsum + fit_text(lbl) + CFG.chip_pad * 2 + dpi(2)
+                end
+                wsum = wsum + CFG.chip_gap * (#g - 1)
+                if wsum > max_row then max_row = wsum end
+            end
+        end
+    end
+    CFG.res_w = math.max(dpi(44), max_res + dpi(6))
+    -- row = res column + gap + chips; section margins (6+6) sit around it
+    return math.max(dpi(320), max_row + CFG.res_w + dpi(4) + dpi(12) + dpi(2))
+end
+
 refresh_popup = function()
     if not rows_container_ref then return end
+    local need = compute_content_w()
+    if need ~= CFG.content_w then
+        CFG.content_w = need
+        if popup then
+            local content, rc = build_content()
+            rows_container_ref = rc
+            popup.widget = content
+        end
+    end
     rows_container_ref:reset()
     local outs = all_outputs()
     if #outs == 0 then
@@ -1055,7 +1207,7 @@ end
 
 local function ensure_popup()
     if popup then return end
-    local style = popup_common.popup_style()
+    local pstyle = popup_common.popup_style()
     local content, rc = build_content()
     rows_container_ref = rc
     popup = awful.popup {
@@ -1063,14 +1215,20 @@ local function ensure_popup()
         visible  = false,
         ontop    = true,
         bg       = COLOR_BLACK,
-        border_width = style.border_width,
+        border_width = pstyle.border_width,
         border_color = COLOR_GOLD,
-        shape = style.shape,
+        shape = pstyle.shape,
     }
     popup_holder.popup = popup
 end
 
 hide = function()
+    -- drop staged drags and picks so a missed apply can't fire alongside
+    -- a later one
+    pending = {}
+    pending_mode = {}
+    pending_scale = {}
+    update_pending_bar()
     if not popup then return end
     popup_common.hide(popup)
 end
@@ -1105,7 +1263,7 @@ function M.attach(widget)
     widget:connect_signal("button::press", guarded(function(_, _, _, pressed)
         if pressed ~= 2 then return end
         popup._anchor_geo    = mouse.current_widget_geometry
-        popup._anchor_screen = mouse.current_wibox and mouse.current_wibox.screen
+        popup._anchor_screen = (mouse.current_wibox and mouse.current_wibox.screen) or mouse.screen
         popup._anchor_wibox  = mouse.current_wibox
         if not popup_common.widget_press(popup) then toggle(widget) end
     end))

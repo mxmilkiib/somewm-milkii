@@ -1,0 +1,76 @@
+#!/bin/sh
+# notify-samples — fire a spread of notification shapes at the custom
+# renderer (plugins/notifications.lua) to compare styles side by side.
+# Runs against the live session; each sample is labelled by its number.
+# Usage: notify-samples [pause_seconds]   (default pause: 1)
+
+PAUSE=${1:-1}
+
+# 1. baseline: title + body, no app name, no icon, default timeout
+notify-send "1 baseline" "plain notify-send, no extras"
+
+sleep "$PAUSE"
+
+# 2. app name only -> bold gold sender label in the meta slot
+notify-send -a "Test App" "2 app name" "sender renders bold gold left of the timestamp"
+
+sleep "$PAUSE"
+
+# 3. icon -> 15px glyph inline with the title
+notify-send -a "Test App" -i battery "3 icon" "stock icon inline with the title"
+
+sleep "$PAUSE"
+
+# 4a-4c. urgency: low / normal / critical — check all three render identically
+# (the custom builder ignores n.urgency; flag if that should change)
+notify-send -u low "4a urgency low" "should look the same as baseline"
+sleep "$PAUSE"
+notify-send -u normal "4b urgency normal" "should look the same as baseline"
+sleep "$PAUSE"
+notify-send -u critical "4c urgency critical" "should look the same as baseline"
+sleep "$PAUSE"
+
+# 5. actions -> black button row under the header (the HA look)
+# (-A implies --wait: backgrounded so the script doesn't block on dismissal)
+notify-send -a "Test App" -i dialog-question "5 actions" "button row under the header" \
+    -A "default=Update" -A "later=Later" -A "skip=Skip" &
+
+sleep "$PAUSE"
+
+# 6. persistent: timeout 0 -> no countdown glyph, stays until dismissed
+notify-send -a "Test App" "6 persistent" "timeout 0: no countdown, needs dismiss" -t 0
+
+sleep "$PAUSE"
+
+# 7. short timeout: <=5s -> countdown suppressed, expires fast
+notify-send "7 short timeout" "3 seconds, no countdown glyph" -t 3000
+
+sleep "$PAUSE"
+
+# 8. long body -> word_char wrap, toast grows taller, title stays top-aligned
+notify-send -a "Test App" "8 long body" "a much longer body that should wrap across two or three lines inside the black band while the title and meta stay pinned to their columns" 
+
+sleep "$PAUSE"
+
+# 9. markup body -> pango markup is rendered, not escaped
+notify-send -a "Test App" "9 markup" "body with <b>bold</b>, <i>italic</i> and <span foreground='#E8934A'>colour</span>"
+
+sleep "$PAUSE"
+
+# 10. replace-id: three updates overwrite one toast (volume-OSD style)
+notify-send -r 4242 -a "Test App" "10 replace-id" "first value"
+sleep 1
+notify-send -r 4242 -a "Test App" "10 replace-id" "replaced once"
+sleep 1
+notify-send -r 4242 -a "Test App" "10 replace-id" "replaced twice — same slot"
+sleep "$PAUSE"
+
+# 11. transient -> not stored in the notification centre history
+notify-send -a "Test App" -h boolean:transient:true "11 transient" "not kept in history"
+
+sleep "$PAUSE"
+
+# 12. kitchen sink: HA-update style — app + icon + actions + no expiry
+notify-send -a "Home Assistant" -i system-software-update "12 HA-style" \
+    "Server update available: core 2026.9.4" \
+    -t 0 -A "update=Update now" -A "notes=Release notes" -A "dismiss=Dismiss" &

@@ -1,0 +1,66 @@
+#!/bin/sh
+# Run a hotkey command, pointing Qt programs at the matching qtNct platform
+# theme so they pick up the configured dark palette. The WM environment has
+# no QT_QPA_PLATFORMTHEME at all, and the shell profile's qt6ct only reaches
+# apps launched from a terminal - so the correct theme is chosen per binary:
+# Qt5 -> qt5ct, Qt6 -> qt6ct. Non-Qt commands pass through unchanged.
+#
+# Arg: the whole command line as a single string; run via `sh -c` exactly as
+# awful.spawn.with_shell would, so pipelines and quoting are preserved.
+
+cmd=$1
+[ -n "$cmd" ] || exit 0
+
+# An explicit platform theme in the command wins
+case $cmd in
+    *QT_QPA_PLATFORMTHEME=*) exec sh -c "$cmd" ;;
+esac
+
+# First word of the command, skipping a leading `env`, VAR=value prefixes,
+# and unwrapping one level of `sh -c '...'`
+s=$cmd
+while :; do
+    s=${s#"${s%%[![:space:]]*}"}
+    [ -n "$s" ] || break
+    word=${s%%[[:space:]]*}
+    case $word in
+        env | *=*)
+            s=${s#"$word"} ;;
+        sh | bash | zsh | dash)
+            rest=${s#"$word"}
+            rest=${rest#"${rest%%[![:space:]]*}"}
+            case $rest in
+                -c[[:space:]]*)
+                    s=${rest#-c}
+                    s=${s#"${s%%[![:space:]]*}"}
+                    s=${s#\"} ; s=${s%\"}
+                    s=${s#\'} ; s=${s%\'}
+                    ;;
+                *) break ;;
+            esac
+            ;;
+        *) break ;;
+    esac
+done
+
+# Resolve to a real file; builtins and keywords yield bare names, skip them
+bin=$(command -v "$word" 2>/dev/null)
+case $bin in
+    /*)
+        if [ "$(head -c 2 "$bin" 2>/dev/null)" = '#!' ]; then
+            # Script: detect the Qt binding it uses (e.g. PyQt launchers)
+            if grep -qE 'PyQt5|PySide2' "$bin" 2>/dev/null; then
+                export QT_QPA_PLATFORMTHEME=qt5ct
+            elif grep -qE 'PyQt6|PySide6' "$bin" 2>/dev/null; then
+                export QT_QPA_PLATFORMTHEME=qt6ct
+            fi
+        else
+            case $(ldd "$bin" 2>/dev/null) in
+                *libQt5Core*) export QT_QPA_PLATFORMTHEME=qt5ct ;;
+                *libQt6Core*) export QT_QPA_PLATFORMTHEME=qt6ct ;;
+            esac
+        fi
+        ;;
+esac
+
+exec sh -c "$cmd"

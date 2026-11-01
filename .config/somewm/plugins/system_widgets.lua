@@ -8,12 +8,12 @@ local gears = require("gears")
 local beautiful = require("beautiful")
 local keyboardlayout = require("awful.widget.keyboardlayout")
 local guarded = require("error_guard")
+local style   = require("plugins.style")
 
-local font_utils = require("rc.font_utils")
 local ai_popup = require("plugins.ai_popup")
-local dpi = beautiful.xresources.apply_dpi
+local dpi = style.dpi
 local icon_dir = "/usr/share/icons/Adwaita/symbolic/"
-local WIDGET_FONT = font_utils.FONT_MONO
+local WIDGET_FONT = style.font.mono
 local M = {}
 local volume_views = {}
 local volume_timer
@@ -24,7 +24,7 @@ local ai_views = {}
 local ai_timer
 local previous_cpu_total, previous_cpu_idle
 local stat_glyphs = { cpu = "󰍛", gpu = "󰢮", ram = "󰘚", temp = "󰔏" }
-local STAT_GAP = dpi(2)  -- px between stat glyph and value
+local STAT_GAP = style.spacing.xxs  -- between stat glyph and value
 -- guard against duplicate signal connections on hot-reload (P11)
 local signals_connected = false
 
@@ -37,10 +37,7 @@ local function apply_volume(pct, muted)
         or pct < 34 and "audio-volume-low-symbolic.svg"
         or pct < 67 and "audio-volume-medium-symbolic.svg"
         or "audio-volume-high-symbolic.svg"
-    local color = muted and "#777777"
-        or pct < 34 and "#C5E89A"  -- pale lime green
-        or pct < 67 and "#9FD64A"  -- medium lime green
-        or "#6FA820"               -- strong lime green
+    local color = muted and "#777777" or "#CBA6F7"  -- mauve
     -- skip the SVG reload+retint and the text write when nothing changed;
     -- the poll ticks far more often than the volume actually moves
     if icon == last_volume_icon and color == last_volume_color
@@ -120,8 +117,8 @@ function M.volume(args)
     local text = wibox.widget { text = "--%", font = WIDGET_FONT, valign = "center", widget = wibox.widget.textbox }
     local content = wibox.widget {
         icon,
-        { text, left = dpi(2), widget = wibox.container.margin },
-        spacing = dpi(2),
+        { text, left = style.spacing.xxs, widget = wibox.container.margin },
+        spacing = style.spacing.xxs,
         layout = wibox.layout.fixed.horizontal,
     }
     local widget = centered(content)
@@ -129,6 +126,7 @@ function M.volume(args)
     widget:buttons(gears.table.join(
         awful.button({}, 1, args.open or function() awful.spawn("pavucontrol") end),
         awful.button({}, 2, args.mute or function() awful.spawn({ "wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle" }) end),
+        awful.button({}, 3, args.right or function() awful.spawn("pavucontrol") end),
         awful.button({}, 4, args.up),
         awful.button({}, 5, args.down)
     ))
@@ -210,7 +208,9 @@ end
 M.read_cpu_temp = read_cpu_temp
 
 -- stepped colour ramp for the stat glyphs (same bands as the popup's sensor
--- figures): low = lime, mid = gold, high = orange, very high = red
+-- figures): low = lime, mid = gold, high = orange, very high = red.
+-- cpu and ram pin to silver instead
+local SILVER = "#C0C0C0"
 local function stat_glyph_colour(v)
     if v < 55 then return "#9FD64A"
     elseif v < 75 then return "#FFD700"
@@ -221,41 +221,34 @@ end
 -- glyph tinted by value via pango markup (textbox fg is a no-op in somewm);
 -- the value sits in its own textbox so the glyph–value gap is a real pixel
 -- spacing, not a space glyph of whatever width the font gives it
-local function set_stat(view, glyph, fmt, v)
+local function set_stat(view, glyph, fmt, v, colour)
     -- the display only ever shows whole units; skip the markup+text write
     -- (and the redraw it triggers) when the rounded value didn't move
     local shown = math.floor(v + 0.5)
     if view.last_shown == shown then return end
     view.last_shown = shown
     view.glyph.markup = string.format('<span foreground="%s">%s</span>',
-        stat_glyph_colour(v), glyph)
+        colour or stat_glyph_colour(v), glyph)
     view.value.text = string.format(fmt, shown)
 end
 
 local function update_resources()
     local cpu = read_cpu()
-    local ram, used, total = read_ram()
+    local ram = read_ram()
     local gpu = read_gpu()
     local ctemp = read_cpu_temp()
     for _, view in ipairs(resource_views) do
-        if cpu then set_stat(view.cpu, stat_glyphs.cpu, "%d%%", cpu) end
+        if cpu then set_stat(view.cpu, stat_glyphs.cpu, "%d%%", cpu, SILVER) end
         if gpu then set_stat(view.gpu, stat_glyphs.gpu, "%d%%", gpu) end
-        if ram then set_stat(view.ram, stat_glyphs.ram, "%d%%", ram) end
+        if ram then set_stat(view.ram, stat_glyphs.ram, "%d%%", ram, SILVER) end
         if ctemp and view.temp then set_stat(view.temp, stat_glyphs.temp, "%d°C", ctemp) end
-        if used and total then
-            local tip = string.format("Memory: %.1f / %.1f GiB", used, total)
-            if tip ~= view.last_tip then
-                view.last_tip = tip
-                view.ram_tip:set_text(tip)
-            end
-        end
     end
 end
 
 local function stat_label(glyph, init, glyph_size)
     local glyph_w = wibox.widget {
         markup = glyph,
-        font = font_utils.mono_size(glyph_size or 12),
+        font = style.font_size(glyph_size or 12),
         valign = "center",
         widget = wibox.widget.textbox,
     }
@@ -284,11 +277,7 @@ function M.resources()
         gpu = { glyph = gpu_g, value = gpu_v },
         ram = { glyph = ram_g, value = ram_v },
         temp = { glyph = temp_g, value = temp_v },
-        ram_tip = awful.tooltip { objects = { ram }, text = "Memory" },
     }
-    awful.tooltip { objects = { cpu }, text = "Total CPU usage" }
-    awful.tooltip { objects = { gpu }, text = "GPU busy" }
-    awful.tooltip { objects = { temp }, text = "CPU temperature (Tctl)" }
     resource_views[#resource_views + 1] = view
     if not resource_timer then
         resource_timer = gears.timer { timeout = 2, autostart = true, call_now = true, callback = guarded(update_resources) }
@@ -301,11 +290,35 @@ function M.keyboard()
     local label = keyboardlayout.new()
     local widget = centered(wibox.widget {
         label,
-        left = dpi(4), right = dpi(4),
+        left = style.spacing.s, right = style.spacing.s,
         widget = wibox.container.margin,
     })
-    awful.tooltip { objects = { widget }, text = "Keyboard layout" }
     return widget
+end
+
+-- show-desktop state is per screen and lives at module level so the
+-- toggle can be bound to other widgets (e.g. launcher right-click)
+local desktop_state = setmetatable({}, { __mode = "k" })
+
+function M.toggle_desktop(s)
+    local st = desktop_state[s]
+    if not st then
+        st = { hidden = setmetatable({}, { __mode = "k" }), showing = false }
+        desktop_state[s] = st
+    end
+    if st.showing then
+        for c in pairs(st.hidden) do if c.valid then c.minimized = false end end
+        st.hidden = setmetatable({}, { __mode = "k" })
+        st.showing = false
+        return
+    end
+    for _, c in ipairs(client.get(s)) do
+        if c.valid and not c.minimized and c:isvisible() then
+            st.hidden[c] = true
+            c.minimized = true
+        end
+    end
+    st.showing = true
 end
 
 function M.show_desktop(s)
@@ -327,22 +340,8 @@ function M.show_desktop(s)
     widget:connect_signal("mouse::leave", function()
         icon.image = gears.color.recolor_image(icon_dir .. "devices/video-display-symbolic.svg", "#777777")
     end)
-    local hidden = setmetatable({}, { __mode = "k" })
-    local showing = false
     widget:buttons(gears.table.join(awful.button({}, 1, function()
-        if showing then
-            for c in pairs(hidden) do if c.valid then c.minimized = false end end
-            hidden = setmetatable({}, { __mode = "k" })
-            showing = false
-            return
-        end
-        for _, c in ipairs(client.get(s)) do
-            if c.valid and not c.minimized and c:isvisible() then
-                hidden[c] = true
-                c.minimized = true
-            end
-        end
-        showing = true
+        M.toggle_desktop(s)
     end)))
     awful.tooltip { objects = { widget }, text = "Show desktop" }
     return widget
@@ -353,20 +352,70 @@ end
 
 -- Two bar icons on a purple badge: a robot for the main LLM server
 -- (llama-server) and a microphone for dictation (whisper-dictate). The
--- robot is green while llama-server runs, the mic green only while
--- dictation is actually recording — an idle whisper-server shows grey.
--- Both glyphs brighten to gold on hover. Left-click opens the AI popup
--- (attached in rc.lua). Polls every 15s and also refreshes on the
--- "ai::status_changed" signal emitted by the popup after a toggle.
+-- robot is green while llama-server runs; the mic is grey while the
+-- whisper-server is off, gold while it runs, and pulses green while
+-- dictation is actually recording. Both glyphs brighten to gold on hover.
+-- Left-click opens the AI popup (attached in rc.lua). Polls every 15s
+-- and also refreshes on the "ai::status_changed" signal emitted by the
+-- popup after a toggle.
+-- old: black badge — "#000000"
 local AI_BG = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
 local AI_GLYPH_SERVER = "\u{F06A9}"  -- nf-md-robot
 local AI_GLYPH_VOICE  = "\u{F036C}"  -- nf-md-microphone
 local AI_COLOR_ACTIVE = "#69D665"
 local AI_COLOR_IDLE   = "#CCCCCC"
 local AI_COLOR_HOVER  = "#FFD700"
+local AI_PULSE_LO     = "#2E7D32"  -- Trough of the recording pulse
+local AI_PULSE_PERIOD = 1.4        -- Seconds per full breathe cycle
+local ai_recording = false
+local ai_pulse_timer, ai_pulse_phase = nil, 0
 
 local function set_ai_glyph(w, glyph, color)
     w.markup = string.format('<span foreground="%s">%s</span>', color, glyph)
+end
+
+local function lerp_hex(a, b, t)
+    local ar, ag, ab = a:match("#(..)(..)(..)")
+    local br, bg, bb = b:match("#(..)(..)(..)")
+    ar, ag, ab = tonumber(ar, 16), tonumber(ag, 16), tonumber(ab, 16)
+    br, bg, bb = tonumber(br, 16), tonumber(bg, 16), tonumber(bb, 16)
+    return string.format("#%02X%02X%02X",
+        math.floor(ar + (br - ar) * t + 0.5),
+        math.floor(ag + (bg - ag) * t + 0.5),
+        math.floor(ab + (bb - ab) * t + 0.5))
+end
+
+-- The mic "breathes" between the dim trough and the active green; a smooth
+-- cosine ramp reads as a pulse rather than an on/off blink. Hovering views
+-- keep their gold and are skipped until the pointer leaves.
+local function ai_pulse_tick()
+    ai_pulse_phase = (ai_pulse_phase + ai_pulse_timer.timeout / AI_PULSE_PERIOD) % 1
+    local t = (1 - math.cos(2 * math.pi * ai_pulse_phase)) / 2
+    local color = lerp_hex(AI_PULSE_LO, AI_COLOR_ACTIVE, t)
+    for _, view in ipairs(ai_views) do
+        view.voice_color = color
+        if not view.hovering then
+            set_ai_glyph(view.glyph_voice, AI_GLYPH_VOICE, color)
+        end
+    end
+end
+
+local function ai_set_recording(on)
+    if on == ai_recording then return end
+    ai_recording = on
+    if on then
+        if not ai_pulse_timer then
+            ai_pulse_timer = gears.timer { timeout = 0.08, autostart = false,
+                callback = guarded(ai_pulse_tick) }
+            awesome.connect_signal("exit", guarded(function()
+                if ai_pulse_timer then ai_pulse_timer:stop() end
+            end))
+        end
+        ai_pulse_phase = 0
+        ai_pulse_timer:again()
+    elseif ai_pulse_timer then
+        ai_pulse_timer:stop()
+    end
 end
 
 -- old: single glyph coloured by overall status (green for llama, gold for
@@ -387,23 +436,23 @@ end
 local function update_ai_status()
     ai_popup.query_status(guarded(function(status)
         local llama = status.llama == "active"
-        -- the mic is a recording indicator, not a service indicator: green
-        -- only while whisper-dictate is capturing, not for an idle
-        -- whisper-server
+        local whisper = status.whisper == "active"
+        -- the mic shows the whole dictation pipeline: grey while the
+        -- whisper-server is off, gold while it runs, and pulsing green
+        -- only while whisper-dictate is actually capturing
         local voice = status.dictate == "active"
+        ai_set_recording(voice)
         local server_color = llama and AI_COLOR_ACTIVE or AI_COLOR_IDLE
-        local voice_color  = voice  and AI_COLOR_ACTIVE or AI_COLOR_IDLE
+        -- old: recording indicator only — voice and AI_COLOR_ACTIVE or AI_COLOR_IDLE
+        local voice_color  = voice and AI_COLOR_ACTIVE
+                             or whisper and AI_COLOR_HOVER
+                             or AI_COLOR_IDLE
         for _, view in ipairs(ai_views) do
             view.server_color = server_color
             view.voice_color  = voice_color
             if not view.hovering then
                 set_ai_glyph(view.glyph_server, AI_GLYPH_SERVER, server_color)
                 set_ai_glyph(view.glyph_voice,  AI_GLYPH_VOICE,  voice_color)
-            end
-            if view.tooltip then
-                view.tooltip.text = string.format("Local AI: %s | %s",
-                    llama and "server running" or "server idle",
-                    voice and "recording" or "not recording")
             end
         end
     end))
@@ -413,30 +462,30 @@ function M.ai_status(args)
     args = args or {}
     local glyph_server = wibox.widget {
         markup = string.format('<span foreground="%s">%s</span>', AI_COLOR_IDLE, AI_GLYPH_SERVER),
-        font = font_utils.mono_size(13),
+        font = style.font_size(13),
         valign = "center",
         widget = wibox.widget.textbox,
     }
     local glyph_voice = wibox.widget {
         markup = string.format('<span foreground="%s">%s</span>', AI_COLOR_IDLE, AI_GLYPH_VOICE),
-        font = font_utils.mono_size(13),
+        font = style.font_size(13),
         valign = "center",
         widget = wibox.widget.textbox,
     }
     -- distinctive purple badge: the AI widget is the only bar icon with a
-    -- permanent coloured background, set flush so the purple band spans the
+    -- permanent coloured background, set flush so the band spans the
     -- full height of the bar, setting it apart from the outline-only hover
     -- borders on the other info widgets. No place wrapper and no rounded
     -- shape: anything that shrink-wraps the badge vertically turns the
-    -- purple back into a floating pill.
-    -- old: rounded pill — top/bottom = dpi(1) margins + rounded_rect shape,
+    -- badge back into a floating pill.
+    -- old: rounded pill — top/bottom = style.spacing.hair margins + rounded_rect shape,
     --      returned via centered(badge)
     local badge = wibox.widget {
         {
             {
                 glyph_server,
                 glyph_voice,
-                spacing = dpi(4),
+                spacing = style.spacing.s,
                 layout = wibox.layout.fixed.horizontal,
             },
             left = dpi(5), right = dpi(5),
@@ -476,8 +525,6 @@ function M.ai_status(args)
         awesome.connect_signal("exit", guarded(function() ai_timer:stop() end))
         awesome.connect_signal("ai::status_changed", guarded(update_ai_status))
     end
-    local tip = awful.tooltip { objects = { widget }, text = "Local AI services" }
-    view.tooltip = tip
     return widget
 end
 
@@ -495,18 +542,9 @@ local SHIMMER_GLYPH = "\u{F0E02}"  -- Nerd Font "format-color" / palette swatch
 local function update_shimmer_status()
     if not shimmer_mod then shimmer_mod = require("plugins.shimmer") end
     local running = shimmer_mod.is_running and shimmer_mod.is_running()
-    local preset  = shimmer_mod.get_current_preset and shimmer_mod.get_current_preset() or ""
     for _, view in ipairs(shimmer_views) do
         view.glyph.markup = string.format('<span foreground="%s">%s</span>',
             running and "#E6B84D" or "#777777", SHIMMER_GLYPH)
-    end
-    -- tooltip carries the live preset so the bar hints at the active effect
-    -- without opening the popup
-    for _, view in ipairs(shimmer_views) do
-        if view.tooltip then
-            view.tooltip.text = string.format("Shimmer: %s%s",
-                running and "running " or "stopped ", preset)
-        end
     end
 end
 
@@ -514,13 +552,12 @@ function M.shimmer(args)
     args = args or {}
     local glyph = wibox.widget {
         markup = string.format('<span foreground="#777777">%s</span>', SHIMMER_GLYPH),
-        font = font_utils.mono_size(13),
+        font = style.font_size(13),
         valign = "center",
         widget = wibox.widget.textbox,
     }
     local widget = centered(glyph)
-    local tip = awful.tooltip { objects = { widget }, text = "Shimmer" }
-    shimmer_views[#shimmer_views + 1] = { glyph = glyph, tooltip = tip }
+    shimmer_views[#shimmer_views + 1] = { glyph = glyph }
     widget:buttons(gears.table.join(
         awful.button({}, 1, args.open or function() end)
     ))

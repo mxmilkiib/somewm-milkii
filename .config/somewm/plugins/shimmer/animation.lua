@@ -640,7 +640,11 @@ local function makeGoldShinePalette(length, opts)
 end
 
 
--- preset cycling state - ordered by energy level (low to high activity)
+-- preset cycling state - displayed order is graded by palette brightness;
+-- the list is sorted lazily on first access (ensure_preset_order) so the
+-- palette warm-up cost only lands when the shimmer UI is actually used
+local preset_order_dirty = true
+
 local preset_list = {
     -- minimal energy - static/very low activity
     "static_gold",
@@ -1309,6 +1313,7 @@ local function register_preset(name, preset)
         if n == name then return end
     end
     preset_list[#preset_list + 1] = name
+    preset_order_dirty = true
 end
 
 do
@@ -1800,6 +1805,42 @@ local function ensure_palette(mode_name)
     end
     
     return color_palettes[mode_name]
+end
+
+-- perceived brightness (Rec.601 luma) of a "#rrggbb" colour, 0-1
+local function hex_luma(hex)
+    local n = tonumber((hex:gsub("#", "")), 16) or 0
+    local r = math_floor(n / 65536) % 256
+    local g = math_floor(n / 256) % 256
+    local b = n % 256
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255
+end
+
+-- the popup tints each preset row with the sample near the bright end of the
+-- palette; grade on that same sample so the list reads as a real gradient
+local function preset_brightness(name)
+    local pal = ensure_palette(name)
+    local c = pal[math_max(1, math_floor(#pal * 0.8))]
+    return hex_luma(c or "#000000")
+end
+
+local function ensure_preset_order()
+    if not preset_order_dirty then return end
+    preset_order_dirty = false
+    table.sort(preset_list, function(a, b)
+        -- debug is a development aid rather than a theme; keep it last
+        if a == "debug" then return false end
+        if b == "debug" then return true end
+        local la, lb = preset_brightness(a), preset_brightness(b)
+        return la < lb or (la == lb and a < b)
+    end)
+    -- keep the cycling index pointed at the active preset after reordering
+    for i, name in ipairs(preset_list) do
+        if name == shimmer_mode then
+            current_preset_index = i
+            break
+        end
+    end
 end
 
 -- // MARK: CLIENT STATUS HELPERS
@@ -2758,7 +2799,9 @@ function M.set_gradient_params(mode_name, params)
     end
     -- clear cached palette so the new gradient takes effect immediately
     color_palettes[mode_name] = nil
-    
+    -- palette changed, so the brightness-graded preset order may have too
+    preset_order_dirty = true
+
     return true
 end
 
@@ -2902,10 +2945,12 @@ function M.add_preset(preset_config)
     end
     if not found then
         table.insert(preset_list, name)
+        preset_order_dirty = true
     end
 end
 
 function M.get_preset_list()
+    ensure_preset_order()
     return preset_list
 end
 
@@ -2933,7 +2978,9 @@ end
 
 function M.cycle_preset(direction)
     direction = direction or 1  -- default to forward
-    
+
+    ensure_preset_order()
+
     if direction > 0 then
         current_preset_index = current_preset_index + 1
         if current_preset_index > #preset_list then

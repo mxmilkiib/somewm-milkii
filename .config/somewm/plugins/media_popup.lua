@@ -11,8 +11,9 @@ local beautiful = require("beautiful")
 local gears = require("gears")
 local guarded = require("error_guard")
 local popup_common = require("plugins.popup_common")
+local style   = require("plugins.style")
 
-local dpi = beautiful.xresources.apply_dpi
+local dpi = style.dpi
 local gold = popup_common.theme.GOLD
 local purple = popup_common.theme.PURPLE
 local FONT = popup_common.fonts.FONT_CLEAR
@@ -37,7 +38,7 @@ local ctrl
 local refresh_timer
 local players = {}
 local rows = wibox.layout.fixed.vertical()
-rows.spacing = dpi(6)
+rows.spacing = style.spacing.m
 
 local empty = wibox.widget {
     text = "No media players",
@@ -75,11 +76,11 @@ local function ensure_popup()
                 {
                     empty,
                     rows,
-                    spacing = dpi(6),
+                    spacing = style.spacing.m,
                     layout = wibox.layout.fixed.vertical,
                 },
-                top = dpi(8), bottom = dpi(2),
-                left = dpi(10), right = dpi(10),
+                top = style.spacing.l, bottom = style.spacing.xxs,
+                left = style.spacing.xl, right = style.spacing.xl,
                 widget = wibox.container.margin,
             },
             layout = wibox.layout.fixed.vertical,
@@ -135,9 +136,9 @@ local function control_button(glyph, instance, command)
         forced_width = dpi(34),
         forced_height = dpi(34),
         bg = beautiful.bg_normal,
-        border_width = dpi(1),
+        border_width = style.popup.border_width,
         border_color = purple,
-        shape = function(cr, w, h) gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3)) end,
+        shape = function(cr, w, h) gears.shape.rounded_rect(cr, w, h, style.popup.radius) end,
         widget = wibox.container.background,
     }
     button:connect_signal("button::press", guarded(function(_, _, _, pressed)
@@ -171,7 +172,7 @@ local function create_row(instance)
             widget = wibox.container.constraint,
         },
         forced_width = dpi(82),
-        right = dpi(10),
+        right = style.spacing.xl,
         widget = wibox.container.margin,
     }
     local source = wibox.widget { markup = "<b>" .. gears.string.xml_escape(instance) .. "</b>", font = FONT, widget = wibox.widget.textbox }
@@ -191,8 +192,8 @@ local function create_row(instance)
                 {
                     title,
                     artist,
-                    top = dpi(4),
-                    bottom = dpi(4),
+                    top = style.spacing.s,
+                    bottom = style.spacing.s,
                     widget = wibox.container.margin,
                 },
                 {
@@ -200,14 +201,14 @@ local function create_row(instance)
                         control_button("⏮", instance, "previous"),
                         control_button("⏯", instance, "play-pause"),
                         control_button("⏭", instance, "next"),
-                        spacing = dpi(6),
+                        spacing = style.spacing.m,
                         forced_height = dpi(34),
                         layout = wibox.layout.fixed.horizontal,
                     },
                     halign = "right",
                     widget = wibox.container.place,
                 },
-                spacing = dpi(4),
+                spacing = style.spacing.s,
                 layout = wibox.layout.fixed.vertical,
             },
             expand = "inside",
@@ -226,16 +227,16 @@ local function create_row(instance)
     local bg = wibox.widget {
         {
             row,
-            top = dpi(10),
-            left = dpi(10),
-            right = dpi(10),
-            bottom = dpi(4),
+            top = style.spacing.xl,
+            left = style.spacing.xl,
+            right = style.spacing.xl,
+            bottom = style.spacing.s,
             widget = wibox.container.margin,
         },
         bg = beautiful.bg_normal,
         border_color = purple,
-        border_width = dpi(1),
-        shape = function(cr, w, h) gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or dpi(3)) end,
+        border_width = style.popup.border_width,
+        shape = function(cr, w, h) gears.shape.rounded_rect(cr, w, h, style.popup.radius) end,
         widget = wibox.container.background,
     }
     -- scroll wheel adjusts this player's volume only (5% per notch)

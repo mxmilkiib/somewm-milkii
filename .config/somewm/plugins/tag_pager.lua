@@ -28,7 +28,15 @@
 --   wibar pager widget  created via M.create_pager_widget(s), added in rc.lua
 --   left-click a cell    switch to that tag (view_only)
 --   drag a client rect   move the client to whichever cell the pointer is
---                        over (mid-drag); release views the landing tag
+--                        over (mid-drag); release views the landing tag.
+--                        a cell on another screen's bar transfers the client
+--                        to that tag and screen; a drop on a screen's desktop
+--                        (no cell under the pointer) lands the client on that
+--                        screen's selected tag
+--   mod4+drag a client   swap the contents of the source tag and the landing
+--                        tag (detected at press time — Mod4 must be held when
+--                        the drag starts; cross-screen swaps reparent each
+--                        client's screen to its destination tag's screen)
 --   right-click a cell   toggle that tag's view
 --   middle-click a cell  open detail popup for that tag
 --   Escape / click outside  close the popup
@@ -47,7 +55,9 @@ local gstring = require("gears.string")
 local gsurface = require("gears.surface")
 local cairo = require("lgi").cairo
 local menubar = require("menubar")
+local icon_theme_mod = require("menubar.icon_theme")
 local guarded = require("error_guard")
+local style   = require("plugins.style")
 
 local root = root
 local client = client
@@ -61,37 +71,46 @@ local M = {}
 -- // MARK --dpi
 
 
-local function get_xresources()
-    if beautiful.xresources then return beautiful.xresources end
-    local ok, xr = pcall(require, "beautiful.xresources")
-    if ok then return xr end
-    return nil
-end
-
-local xresources = get_xresources()
-local dpi = xresources and xresources.apply_dpi or function(v) return v end
+local dpi = style.dpi
 
 -- colors: prefer theme, fall back to constants matching the rest of the config
-local COLOR_GOLD   = (beautiful.main_gold and beautiful.main_gold.base) or beautiful.taglist_fg_focus or "#FFD700"
-local COLOR_PURPLE = (beautiful.main_purple and beautiful.main_purple.base) or "#623997"
-local BORDER_WIDTH = beautiful.bar_edge_width or dpi(3)
-local PAGER_EDGE_WIDTH = math.max(1, BORDER_WIDTH - dpi(1))
+local COLOR_GOLD   = style.color.accent
+local COLOR_PURPLE = style.color.accent2
+local BORDER_WIDTH = style.popup.border_width
+local PAGER_EDGE_WIDTH = math.max(1, BORDER_WIDTH - style.spacing.hair)
 local COLOR_FG     = beautiful.taglist_fg_normal or "#ffffff"
 local COLOR_BG     = beautiful.taglist_bg_normal or "#000000"
 local COLOR_OCC    = beautiful.taglist_fg_occupied or "#cccccc"
 local COLOR_DIM    = "#333333"
+-- hover wash for inactive cells: same faint purple the bar widgets tint with
+local COLOR_HOVER  = beautiful.taglist_bg_hover
+    or (beautiful.main_purple and beautiful.main_purple.focusstart)
+    or "#62399788"
+
+-- module configuration; override via M.configure{...} before first use
+local CFG = {
+    drag_threshold = 5,
+    refresh_delay = 1 / 60,  -- one frame; fast enough to feel immediate
+}
+
+function M.configure(opts) style.merge(CFG, opts) end
 
 
 -- MARK: COLOR HELPERS
 
 
 local function hex_to_rgba(hex, alpha)
-    alpha = alpha or 1
-    if not hex then return 0.5, 0.5, 0.5, alpha end
+    if not hex then return 0.5, 0.5, 0.5, alpha or 1 end
     hex = hex:gsub("#", "")
     if #hex == 3 then
         hex = hex:sub(1,1):rep(2) .. hex:sub(2,2):rep(2) .. hex:sub(3,3):rep(2)
     end
+    -- an 8-digit hex carries its own alpha; it wins only when none is passed
+    if alpha == nil and #hex == 8 then
+        alpha = (tonumber(hex:sub(7, 8), 16) or 255) / 255
+        hex = hex:sub(1, 6)
+    end
+    alpha = alpha or 1
     local r = tonumber(hex:sub(1,2), 16) or 128
     local g = tonumber(hex:sub(3,4), 16) or 128
     local b = tonumber(hex:sub(5,6), 16) or 128
@@ -167,11 +186,14 @@ local cells = {}
 
 -- forward declarations: refresh is defined later but used by start_drag;
 -- drag_client/drag_source_tag are assigned in start_drag but read by
--- render_cell_surface for the mid-drag size preview
+-- render_cell_surface for the mid-drag size preview. drag_swap_hover is the
+-- tag under the pointer during a Mod4 (swap-mode) drag, for the cell highlight
 local refresh
 local debounced_refresh
 local drag_client
 local drag_source_tag
+local drag_swap_hover
+local hover_tag
 
 
 -- // MARK --landscape-rotation
@@ -228,38 +250,114 @@ end
 -- fall back to menubar.utils.lookup_icon for terminal/generic icons
 local icon_cache = {}
 
-local function resolve_icon_surface(c)
-    if not c then return nil end
-    local key = tostring(c.class or c.instance or c)
-    if icon_cache[key] ~= nil then return icon_cache[key] end
-
-    -- try c.icon directly (may be string path or raw surface userdata)
-    local icon = c.icon
-    if icon then
-        local ok, surf = pcall(gsurface.load, icon)
-        if ok and surf then icon_cache[key] = surf; return surf end
+-- freedesktop icon-theme lookup: parses index.theme and follows Inherits
+-- so breeze-style <theme>/<context>/<size> layouts resolve too —
+-- menubar.utils.lookup_icon only probes hicolor-style <theme>/<size>/apps
+local icon_theme_inst = nil
+local function themed_icon_path(name)
+    if icon_theme_inst == nil then
+        local ok, t = pcall(icon_theme_mod.new)
+        icon_theme_inst = ok and t or false
     end
+    if icon_theme_inst then
+        local ok, p = pcall(icon_theme_inst.find_icon_path, icon_theme_inst, name, 48)
+        if ok and p then return p end
+    end
+    local utils = menubar and menubar.utils
+    if utils and utils.lookup_icon then return utils.lookup_icon(name) end
+    return nil
+end
 
-    -- fallback: look up by class name via menubar
+-- resolve a client icon to a filesystem path via the icon theme or the
+-- client's desktop file, nil when nothing themed resolves. exported so the
+-- manage handler can upgrade c.icon at the source: the tasklist reassigns
+-- c.icon to icon_role on every refresh, so per-widget image overrides get
+-- stomped - fixing the client property fixes every consumer at once
+local function resolve_icon_path(c)
+    -- fallback: look up by class name via menubar; dotted app-ids like
+    -- org.kde.quassel resolve on their last component
     local cls = tostring(c.class or ""):lower()
-    local is_term = cls:find("term") ~= nil or cls == "urxvt" or cls == "xterm" or cls == "alacritty" or cls == "wezterm"
+    local is_term = cls:find("term") ~= nil or cls == "urxvt" or cls == "xterm" or cls == "alacritty" or cls == "wezterm" or cls == "kitty"
 
     local names = {}
     if is_term then
         names = { "utilities-terminal", "org.gnome.Terminal", "terminal", "xterm" }
     end
-    table.insert(names, c.class or "")
-    table.insert(names, "application-x-executable")
-    table.insert(names, "applications-system")
+    if c.class then
+        table.insert(names, c.class)
+        local last = tostring(c.class):match("[^.]+$")
+        if last ~= c.class then
+            table.insert(names, last)
+            if last:lower() ~= last then table.insert(names, last:lower()) end
+        end
+        if cls ~= tostring(c.class) then table.insert(names, cls) end
+    end
+    table.insert(names, c.instance or "")
 
+    for _, n in ipairs(names) do
+        local p = themed_icon_path(n)
+        if p and gears.filesystem.file_readable(p) then return p end
+    end
+
+    -- some apps declare their icon under a different name than their class
+    -- (pavucontrol.desktop -> Icon=multimedia-volume-control): probe the
+    -- xdg applications dirs for <name>.desktop and look up its Icon field
     local utils = menubar and menubar.utils
-    if utils and utils.lookup_icon then
+    if utils and utils.parse_desktop_file then
         for _, n in ipairs(names) do
-            local p = utils.lookup_icon(n)
-            if p and gears.filesystem.file_readable(p) then
-                local ok, surf = pcall(gsurface.load, p)
-                if ok and surf then icon_cache[key] = surf; return surf end
+            if n ~= "" then
+                for _, dir in ipairs(gears.filesystem.get_xdg_data_dirs()) do
+                    local dpath = dir .. "applications/" .. n .. ".desktop"
+                    if gears.filesystem.file_readable(dpath) then
+                        local ok, prog = pcall(utils.parse_desktop_file, dpath)
+                        if ok and prog and prog.Icon then
+                            local p = prog.Icon:sub(1, 1) == "/"
+                                and prog.Icon or themed_icon_path(prog.Icon)
+                            if p and gears.filesystem.file_readable(p) then return p end
+                        end
+                    end
+                end
             end
+        end
+    end
+
+    return nil
+end
+
+
+local function resolve_icon_surface(c)
+    if not c then return nil end
+    local key = tostring(c.class or c.instance or c)
+    if icon_cache[key] ~= nil then return icon_cache[key] end
+
+    -- try c.icon directly (may be string path or raw surface userdata), but
+    -- a tiny surface is usually the compositor's generic fallback — prefer a
+    -- themed icon when one resolves, else keep the tiny icon as last resort
+    local tiny_icon
+    local icon = c.icon
+    if icon then
+        local ok, surf = pcall(gsurface.load, icon)
+        if ok and surf then
+            local w = surf.width or (surf.get_width and surf:get_width()) or 0
+            if w >= 24 then icon_cache[key] = surf; return surf end
+            tiny_icon = surf
+        end
+    end
+
+    local p = resolve_icon_path(c)
+    if p then
+        local ok, surf = pcall(gsurface.load, p)
+        if ok and surf then icon_cache[key] = surf; return surf end
+    end
+
+    -- no theme hit: even a tiny client icon beats a generic placeholder
+    if tiny_icon then icon_cache[key] = tiny_icon; return tiny_icon end
+
+    for _, n in ipairs({ "application-x-executable", "applications-system" }) do
+        local p = themed_icon_path(n)
+        if p and gears.filesystem.file_readable(p) then
+            local ok, surf = pcall(gsurface.load, p)
+            if ok and surf then icon_cache[key] = surf; return surf end
         end
     end
 
@@ -421,6 +519,24 @@ local function render_cell_surface(width, height, t)
     cr:move_to(3, 10)
     cr:show_text(first)
 
+    -- hover wash: an inactive cell under the pointer gets the same faint
+    -- purple tint the bar widgets use, drawn over the cell contents but
+    -- under the swap-mode frame
+    if t == hover_tag and not is_viewed then
+        cr:set_source_rgba(hex_to_rgba(COLOR_HOVER))
+        cr:rectangle(0, 0, width, height)
+        cr:fill()
+    end
+
+    -- Swap-mode Hover: the Tag under the pointer gets a gold inner Frame so
+    -- the Release Target reads before the Drop
+    if t == drag_swap_hover and t ~= drag_source_tag then
+        cr:set_source_rgba(hex_to_rgba(COLOR_GOLD, 1))
+        cr:set_line_width(2)
+        cr:rectangle(1.5, 1.5, width - 3, height - 3)
+        cr:stroke()
+    end
+
     return surf
 end
 
@@ -461,7 +577,9 @@ end
 local drag_gen = 0
 drag_client = nil
 drag_source_tag = nil
-local DRAG_THRESHOLD = 5
+drag_swap_hover = nil
+hover_tag = nil
+
 
 
 -- find which cell the mouse is over by checking each cell's screen geometry
@@ -495,11 +613,98 @@ function M.tag_at_coords(x, y)
 end
 
 
-local function start_drag(c, source_tag, start_x, start_y)
+-- hit-test: which Screen's Geometry contains the point. Drop-target fallback
+-- when the pointer is over a Screen's Desktop (or a Bar Region without Cells)
+-- instead of a Pager Cell — the Client then lands on that Screen's selected Tag
+local function find_screen_at_coords(mx, my)
+    for s in screen do
+        local g = s.geometry
+        if g and mx >= g.x and mx < g.x + g.width
+            and my >= g.y and my < g.y + g.height
+        then
+            return s
+        end
+    end
+    return nil
+end
+
+
+-- resolve the Drop Target under the pointer: a Pager Cell's Tag, else the
+-- selected Tag of whatever Screen the pointer is over. Cells on other
+-- Screens already resolve via find_cell_under_mouse; move_to_tag transfers
+-- the Client across Screens itself
+local function hovered_tag_at(x, y)
+    local hover = find_cell_under_mouse(x, y)
+    if not hover then
+        local s = find_screen_at_coords(x, y)
+        if s and s.valid then
+            hover = s.selected_tag
+        end
+    end
+    return hover
+end
+
+
+-- modifier tables arrive as an Array of Names (e.g. { "Mod4", "Shift" })
+local function mods_contain(mods, name)
+    for _, m in ipairs(mods or {}) do
+        if m == name then return true end
+    end
+    return false
+end
+
+
+-- true if Client c is tagged with t
+local function client_has_tag(c, t)
+    for _, ct in ipairs(c:tags() or {}) do
+        if ct == t then return true end
+    end
+    return false
+end
+
+
+-- move Client c from Tag `from` to Tag `to`, preserving any other Tags the
+-- Client carries. cross-screen swaps reparent c.screen so the Client is
+-- positioned on the destination Screen
+local function retag_preserving(c, from, to)
+    local ts = {}
+    for _, t in ipairs(c:tags() or {}) do
+        ts[#ts + 1] = (t == from) and to or t
+    end
+    if from.screen ~= to.screen then
+        c.screen = to.screen
+    end
+    c:tags(ts)
+end
+
+
+-- swap the Contents of two Tags: every Client tagged with `a` (but not also
+-- `b`) moves to `b` and vice versa. Clients on both Tags stay put — they are
+-- already on both sides of the swap. both Client lists are snapshotted before
+-- mutating so freshly-swapped Clients are not reprocessed by the second pass
+local function swap_tag_contents(a, b)
+    local a_clients = a:clients() or {}
+    local b_clients = b:clients() or {}
+    for _, c in ipairs(a_clients) do
+        if c.valid and not client_has_tag(c, b) then
+            retag_preserving(c, a, b)
+        end
+    end
+    for _, c in ipairs(b_clients) do
+        if c.valid and not client_has_tag(c, a) then
+            retag_preserving(c, b, a)
+        end
+    end
+    debounced_refresh()
+end
+
+
+local function start_drag(c, source_tag, start_x, start_y, swap_mode)
     drag_gen = drag_gen + 1
     local gen = drag_gen
     drag_client = c
     drag_source_tag = source_tag
+    drag_swap_hover = nil
 
     -- stop any grabber left over from a previous drag before starting a
     -- new one. somewm's mousegrabber does not reliably replace a running
@@ -520,6 +725,7 @@ local function start_drag(c, source_tag, start_x, start_y)
             if gen == drag_gen then
                 drag_client = nil
                 drag_source_tag = nil
+                drag_swap_hover = nil
             end
             if capi.mousegrabber.isrunning and capi.mousegrabber.isrunning() then
                 capi.mousegrabber.stop()
@@ -527,7 +733,7 @@ local function start_drag(c, source_tag, start_x, start_y)
         end),
     }
 
-    -- Live-move state: once the drag passes DRAG_THRESHOLD the client hops to
+    -- Live-move state: once the drag passes CFG.drag_threshold the client hops to
     -- whichever cell the pointer is over, instead of waiting for release.
     -- drag_target_tag tracks the client's current tag so re-entering the same
     -- cell does not re-trigger move_to_tag, and dragging back over the source
@@ -536,7 +742,7 @@ local function start_drag(c, source_tag, start_x, start_y)
     local drag_target_tag = source_tag
     local drag_view_timer = nil
     local function move_to_hovered(x, y)
-        local hover = find_cell_under_mouse(x, y)
+        local hover = hovered_tag_at(x, y)
         if hover and hover.valid and hover ~= drag_target_tag then
             c:move_to_tag(hover)
             drag_target_tag = hover
@@ -573,6 +779,7 @@ local function start_drag(c, source_tag, start_x, start_y)
             if gen == drag_gen then
                 drag_client = nil
                 drag_source_tag = nil
+                drag_swap_hover = nil
             end
             drag_safety_timer:stop()
             if drag_view_timer then drag_view_timer:stop() end
@@ -587,14 +794,25 @@ local function start_drag(c, source_tag, start_x, start_y)
             local drop_settling = false
             local ok, err = pcall(function()
                 local moved = drag_moved
-                    or math.abs(m.x - start_x) > DRAG_THRESHOLD
-                    or math.abs(m.y - start_y) > DRAG_THRESHOLD
+                    or math.abs(m.x - start_x) > CFG.drag_threshold
+                    or math.abs(m.y - start_y) > CFG.drag_threshold
 
                 if moved then
-                    -- the client normally reached its drop tag during motion;
-                    -- this catches a release landing on a cell with no prior
-                    -- motion event (e.g. a fast flick across the bar)
-                    move_to_hovered(m.x, m.y)
+                    if swap_mode then
+                        -- Swap Mode never moves the Client mid-drag; the
+                        -- Release swaps the Contents of the Source Tag and
+                        -- the Tag under the pointer
+                        local target = hovered_tag_at(m.x, m.y)
+                        if target and target.valid and target ~= source_tag then
+                            swap_tag_contents(source_tag, target)
+                            drag_target_tag = target
+                        end
+                    else
+                        -- the client normally reached its drop tag during motion;
+                        -- this catches a release landing on a cell with no prior
+                        -- motion event (e.g. a fast flick across the bar)
+                        move_to_hovered(m.x, m.y)
+                    end
                     if drag_target_tag and drag_target_tag.valid and drag_target_tag ~= source_tag then
                         -- Keep drag_client/drag_source_tag set until the tag is
                         -- viewed below, so the cell keeps rendering the
@@ -636,6 +854,7 @@ local function start_drag(c, source_tag, start_x, start_y)
                                 if gen == drag_gen then
                                     drag_client = nil
                                     drag_source_tag = nil
+                                    drag_swap_hover = nil
                                 end
                                 debounced_refresh()
                             end)
@@ -654,6 +873,7 @@ local function start_drag(c, source_tag, start_x, start_y)
                                     if gen == drag_gen then
                                         drag_client = nil
                                         drag_source_tag = nil
+                                        drag_swap_hover = nil
                                     end
                                     debounced_refresh()
                                 end),
@@ -663,6 +883,7 @@ local function start_drag(c, source_tag, start_x, start_y)
                             if gen == drag_gen then
                                 drag_client = nil
                                 drag_source_tag = nil
+                                drag_swap_hover = nil
                             end
                         end
                     end
@@ -681,6 +902,7 @@ local function start_drag(c, source_tag, start_x, start_y)
                 if not drop_settling then
                     drag_client = nil
                     drag_source_tag = nil
+                    drag_swap_hover = nil
                 end
             end
             drag_safety_timer:stop()
@@ -692,15 +914,25 @@ local function start_drag(c, source_tag, start_x, start_y)
         -- Button held: once past the threshold, move the client to the cell
         -- under the pointer so the hop happens mid-drag, not on release.
         if not drag_moved then
-            drag_moved = math.abs(m.x - start_x) > DRAG_THRESHOLD
-                or math.abs(m.y - start_y) > DRAG_THRESHOLD
+            drag_moved = math.abs(m.x - start_x) > CFG.drag_threshold
+                or math.abs(m.y - start_y) > CFG.drag_threshold
         end
         if drag_moved then
-            move_to_hovered(m.x, m.y)
+            if swap_mode then
+                -- Swap Mode never moves the Client mid-drag; only track the
+                -- hovered Tag so the Cell under the pointer can highlight
+                local hover = hovered_tag_at(m.x, m.y)
+                if hover ~= drag_swap_hover then
+                    drag_swap_hover = hover
+                    debounced_refresh()
+                end
+            else
+                move_to_hovered(m.x, m.y)
+            end
         end
 
         return true
-    end, "fleur")
+    end, swap_mode and "exchange" or "fleur")
 
     drag_safety_timer:start()
 end
@@ -722,14 +954,31 @@ local function make_cell(t, cell_height)
     local surf = render_cell_surface(cell_w, cell_h, t)
     img:set_image(surf)
 
-    img:connect_signal("button::press", function(_, lx, ly, button)
+    -- inactive cells re-render with the hover wash while the pointer is over
+    -- them; viewed cells keep their own styling
+    img:connect_signal("mouse::enter", function()
+        if t and t.valid and not t.selected then
+            hover_tag = t
+            img:set_image(render_cell_surface(cell_w, cell_h, t))
+        end
+    end)
+    img:connect_signal("mouse::leave", function()
+        if hover_tag == t then
+            hover_tag = nil
+            img:set_image(render_cell_surface(cell_w, cell_h, t))
+        end
+    end)
+
+    img:connect_signal("button::press", function(_, lx, ly, button, mods)
         if button == 1 and t and t.valid then
             -- hit-test: was a window rectangle clicked?
             local clicked_c = hit_test_client(t, cell_w, cell_h, lx, ly)
             if clicked_c then
                 -- start drag/click handler (threshold distinguishes click from drag)
+                -- Mod4 held at Press Time latches Swap Mode for the whole Drag:
+                -- somewm's mousegrabber reports no modifiers mid-drag
                 local coords = mouse.coords()
-                start_drag(clicked_c, t, coords.x, coords.y)
+                start_drag(clicked_c, t, coords.x, coords.y, mods_contain(mods, "Mod4"))
             else
                 -- empty area: switch to this tag
                 t:view_only()
@@ -739,7 +988,8 @@ local function make_cell(t, cell_height)
         elseif button == 2 and t and t.valid then
             M.show(t)
         elseif (button == 4 or button == 5) and t and t.valid then
-            -- scroll wheel: cycle through tags relative to the currently selected tag
+            -- scroll wheel: cycle through tags that have clients,
+            -- relative to the currently selected tag
             local s = t.screen
             if not s or not s.valid then return end
             local stags = s.tags
@@ -748,8 +998,13 @@ local function make_cell(t, cell_height)
             local cur_idx = sel.index
             if not cur_idx then return end
             local dir = (button == 4) and -1 or 1
-            local new_idx = ((cur_idx - 1 + dir) % #stags) + 1
-            stags[new_idx]:view_only()
+            for i = 1, #stags - 1 do
+                local idx = ((cur_idx - 1 + dir * i) % #stags) + 1
+                if #stags[idx]:clients() > 0 then
+                    stags[idx]:view_only()
+                    break
+                end
+            end
         end
     end)
 
@@ -801,18 +1056,17 @@ end
 -- (jit.off is active), freezing the UI for several seconds on restart.
 local refresh_timer
 local refresh_pending = false
-local REFRESH_DELAY = 1 / 60  -- one frame; fast enough to feel immediate
 
 debounced_refresh = function()
     -- proper debounce: always reset the timer so the refresh fires
-    -- REFRESH_DELAY after the LAST signal. the previous guard
+    -- CFG.refresh_delay after the LAST signal. the previous guard
     -- (if refresh_pending then return end) dropped later signals,
     -- so screen::arrange (which fires after layout reflow) was lost
     -- and the pager rendered stale client geometry.
     refresh_pending = true
     if not refresh_timer then
         refresh_timer = gears.timer {
-            timeout   = REFRESH_DELAY,
+            timeout   = CFG.refresh_delay,
             single_shot = true,
             callback  = guarded(function()
                 refresh_pending = false
@@ -834,7 +1088,7 @@ local ignore_next_wibar_click = false
 
 local function build_detail_tile(c, t)
     local icon = wibox.widget {
-        image         = c.icon,
+        image         = resolve_icon_surface(c) or c.icon,
         forced_width  = dpi(48),
         forced_height = dpi(48),
         resize       = true,
@@ -855,14 +1109,14 @@ local function build_detail_tile(c, t)
     local inner = wibox.widget {
         icon,
         { title, badge_w, layout = wibox.layout.fixed.vertical },
-        spacing = dpi(4),
+        spacing = style.spacing.s,
         layout  = wibox.layout.fixed.vertical,
     }
     local bg = wibox.widget {
         inner,
         forced_width  = dpi(150),
         bg            = c.minimized and COLOR_DIM or COLOR_BG,
-        border_width  = dpi(1),
+        border_width = style.popup.border_width,
         border_color  = c.minimized and COLOR_DIM or COLOR_OCC,
         widget       = wibox.container.background,
     }
@@ -897,12 +1151,12 @@ local function build_detail_body(tag)
     }
 
     local grid = wibox.layout.fixed.vertical()
-    grid.spacing = dpi(8)
+    grid.spacing = style.spacing.l
     local row
     for i, c in ipairs(clients) do
         if (i - 1) % per_row == 0 then
             row = wibox.layout.fixed.horizontal()
-            row.spacing = dpi(8)
+            row.spacing = style.spacing.l
             grid:add(row)
         end
         row:add(build_detail_tile(c, tag))
@@ -910,7 +1164,7 @@ local function build_detail_body(tag)
 
     return wibox.widget {
         header,
-        { grid, margins = dpi(12), widget = wibox.container.margin },
+        { grid, margins = style.spacing.xxl, widget = wibox.container.margin },
         layout = wibox.layout.fixed.vertical,
     }
 end
@@ -924,7 +1178,7 @@ local function ensure_popup()
     popup_instance = awful.popup {
         ontop        = true,
         visible      = false,
-        border_width = dpi(2),
+        border_width = style.popup.border_width,
         border_color = COLOR_GOLD,
         widget       = wibox.widget.textbox(""),
     }
@@ -936,10 +1190,13 @@ function M.show(opt_tag)
     local popup = ensure_popup()
     if popup.visible then return end
 
-    local s = awful.screen.focused()
-    local tag = opt_tag or (s and s.selected_tag)
+    local focused = awful.screen.focused()
+    local tag = opt_tag or (focused and focused.selected_tag)
     if not tag then return end
 
+    -- a clicked pager cell's tag lives on the pressed screen; only fall back
+    -- to the focused screen for keybinding opens
+    local s = tag.screen or focused
     popup.screen = s
     popup.widget = build_detail_body(tag)
     popup.visible = true
@@ -990,6 +1247,7 @@ function M.hide()
     drag_gen = drag_gen + 1
     drag_client = nil
     drag_source_tag = nil
+    drag_swap_hover = nil
 
     if popup_instance._escape_key then
         if root._remove_key then
@@ -1063,5 +1321,10 @@ end
 
 -- pre-build the popup so the first open has no delay
 ensure_popup()
+
+-- exported so the tasklist (and other widgets) can resolve proper app icons
+-- instead of trusting c.icon, which is often a tiny generic surface
+M.resolve_icon_surface = resolve_icon_surface
+M.resolve_icon_path = resolve_icon_path
 
 return M

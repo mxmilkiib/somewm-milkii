@@ -16,10 +16,11 @@ local wibox   = require("wibox")
 local beautiful = require("beautiful")
 local guarded = require("error_guard")
 local popup_common = require("plugins.popup_common")
+local style   = require("plugins.style")
 local animation = require("plugins.shimmer.animation")
 local gshape  = require("gears.shape")
 
-local dpi = beautiful.xresources.apply_dpi
+local dpi = style.dpi
 
 local COLOR_PURPLE = popup_common.theme.PURPLE
 local COLOR_BLACK  = popup_common.theme.BLACK
@@ -33,15 +34,22 @@ local FONT       = popup_common.fonts.FONT
 local FONT_INFO  = popup_common.fonts.FONT_INFO
 local FONT_VALUE = popup_common.fonts.FONT_VALUE
 -- two-column body: preset list left, controls right
-local CONTENT_W    = dpi(560)
-local PRESET_COL_W = dpi(170)
-local CTRL_COL_W   = CONTENT_W - PRESET_COL_W - dpi(12)
+-- module configuration; override via M.configure{...} before first use
+local CFG = {
+    content_w = dpi(560),
+    preset_col_w = dpi(170),
+    label_w = dpi(112),
+    value_w = dpi(150),
+}
+
+
+local CTRL_COL_W   = CFG.content_w - CFG.preset_col_w - dpi(12)
 -- label/value column widths shared by every control row so the values form
 -- a single left-aligned column rather than hugging each row's buttons
-local LABEL_W = dpi(112)
-local VALUE_W = dpi(150)
 
 local M = {}
+
+function M.configure(opts) style.merge(CFG, opts) end
 
 local popup
 -- holder table: draggable_header reads popup from here so build_content can
@@ -115,7 +123,7 @@ local make_text = popup_common.make_text
 -- separators inside the controls column shrink to its width; the full-width
 -- ones between body sections take the default
 local function separator(width)
-    return popup_common.separator(width or CONTENT_W)
+    return popup_common.separator(width or CFG.content_w)
 end
 
 -- small clickable glyph button with hover feedback. returns the widget
@@ -130,9 +138,9 @@ local function glyph_button(label, on_click)
     local bg = wibox.widget {
         { txt, halign = "center", valign = "center", widget = wibox.container.place },
         forced_width = dpi(22),
-        top = dpi(2), bottom = dpi(2),
+        top = style.spacing.xxs, bottom = style.spacing.xxs,
         shape = function(cr, w, h)
-            gshape.rounded_rect(cr, w, h, dpi(3))
+            gshape.rounded_rect(cr, w, h, style.popup.radius)
         end,
         widget = wibox.container.background,
     }
@@ -145,7 +153,7 @@ local function glyph_button(label, on_click)
     return bg
 end
 
--- label + value pair pinned to LABEL_W/VALUE_W columns so every row's value
+-- label + value pair pinned to CFG.label_w/CFG.value_w columns so every row's value
 -- text starts at the same x, forming a readable column. spacing keeps the
 -- value from touching a long label ("Border shimmer" + "off")
 local function make_label_value(label, value_text)
@@ -153,9 +161,9 @@ local function make_label_value(label, value_text)
     local value_w = make_text(value_text, COLOR_GOLD, FONT_VALUE)
     value_w.align = "left"
     local pair = wibox.widget {
-        { label_w, forced_width = LABEL_W, widget = wibox.container.background },
-        { value_w, forced_width = VALUE_W, widget = wibox.container.background },
-        spacing = dpi(8),
+        { label_w, forced_width = CFG.label_w, widget = wibox.container.background },
+        { value_w, forced_width = CFG.value_w, widget = wibox.container.background },
+        spacing = style.spacing.l,
         layout = wibox.layout.fixed.horizontal,
     }
     return pair, value_w
@@ -169,7 +177,7 @@ local function make_row(label, value_text, left_btn, right_btn, on_cycle, extra_
     local pair, value_w = make_label_value(label, value_text)
     local buttons = wibox.widget {
         left_btn, right_btn, extra_btn,
-        spacing = dpi(4),
+        spacing = style.spacing.s,
         layout = wibox.layout.fixed.horizontal,
     }
     local row = wibox.widget {
@@ -180,8 +188,8 @@ local function make_row(label, value_text, left_btn, right_btn, on_cycle, extra_
             expand = "inside",
             layout = wibox.layout.align.horizontal,
         },
-        left = dpi(8), right = dpi(6),
-        top = dpi(3), bottom = dpi(3),
+        left = style.spacing.l, right = style.spacing.m,
+        top = style.spacing.xs, bottom = style.spacing.xs,
         widget = wibox.container.margin,
     }
     if on_cycle then
@@ -206,9 +214,9 @@ local function state_button(on_toggle)
     local bg = wibox.widget {
         { txt, halign = "center", valign = "center", widget = wibox.container.place },
         forced_width = dpi(30),
-        top = dpi(2), bottom = dpi(2),
+        top = style.spacing.xxs, bottom = style.spacing.xxs,
         shape = function(cr, w, h)
-            gshape.rounded_rect(cr, w, h, dpi(3))
+            gshape.rounded_rect(cr, w, h, style.popup.radius)
         end,
         widget = wibox.container.background,
     }
@@ -232,8 +240,8 @@ local function make_toggle_row(label, value_text, btn)
             expand = "inside",
             layout = wibox.layout.align.horizontal,
         },
-        left = dpi(8), right = dpi(6),
-        top = dpi(3), bottom = dpi(3),
+        left = style.spacing.l, right = style.spacing.m,
+        top = style.spacing.xs, bottom = style.spacing.xs,
         widget = wibox.container.margin,
     }
     return row, value_w
@@ -277,13 +285,13 @@ local function make_slider_row(label, min, max, to_slider, from_slider, set, fmt
                     height = dpi(14),
                     widget = wibox.container.constraint,
                 },
-                left = dpi(2), top = dpi(2), bottom = dpi(2),
+                left = style.spacing.xxs, top = style.spacing.xxs, bottom = style.spacing.xxs,
                 widget = wibox.container.margin,
             },
             layout = wibox.layout.fixed.vertical,
         },
-        left = dpi(8), right = dpi(6),
-        top = dpi(3), bottom = dpi(3),
+        left = style.spacing.l, right = style.spacing.m,
+        top = style.spacing.xs, bottom = style.spacing.xs,
         widget = wibox.container.margin,
     }
     return row, value_w, function(engine_v)
@@ -308,7 +316,7 @@ local function paint_preview()
         stops[#stops + 1] = { i / n, pal[1 + math.floor(i * (#pal - 1) / n)] }
     end
     preview_bar.bg = gears.color {
-        type = "linear", from = { 0, 0 }, to = { CONTENT_W - dpi(20), 0 },
+        type = "linear", from = { 0, 0 }, to = { CFG.content_w - 2 * style.popup.margin_x, 0 },
         stops = stops,
     }
 end
@@ -357,9 +365,9 @@ local function add_preset_cell(list, name)
         preset_tints[name] = pal[math.max(1, math.floor(#pal * 0.8))]
     end
     local bg = wibox.widget {
-        { cell, left = dpi(8), top = dpi(2), bottom = dpi(2), widget = wibox.container.margin },
-        forced_width = PRESET_COL_W,
-        shape = function(cr, w, h) gshape.rounded_rect(cr, w, h, dpi(3)) end,
+        { cell, left = style.spacing.l, top = style.spacing.xxs, bottom = style.spacing.xxs, widget = wibox.container.margin },
+        forced_width = CFG.preset_col_w,
+        shape = function(cr, w, h) gshape.rounded_rect(cr, w, h, style.popup.radius) end,
         widget = wibox.container.background,
     }
     preset_cell_bg[name] = bg
@@ -377,7 +385,7 @@ end
 
 local function build_preset_list()
     local list = wibox.widget {
-        spacing = dpi(1),
+        spacing = style.spacing.hair,
         layout = wibox.layout.fixed.vertical,
     }
     for _, name in ipairs(animation.get_preset_list()) do
@@ -410,7 +418,7 @@ end
 local function build_mode_grid(modes, cells, cell_bg, set_mode)
     local grid = wibox.layout.grid()
     grid.forced_num_cols = 2
-    grid.spacing = dpi(1)
+    grid.spacing = style.spacing.hair
     for _, name in ipairs(modes) do
         local cell = wibox.widget {
             font = FONT_INFO,
@@ -420,8 +428,8 @@ local function build_mode_grid(modes, cells, cell_bg, set_mode)
         }
         cells[name] = cell
         local bg = wibox.widget {
-            { cell, left = dpi(8), top = dpi(2), bottom = dpi(2), widget = wibox.container.margin },
-            shape = function(cr, w, h) gshape.rounded_rect(cr, w, h, dpi(3)) end,
+            { cell, left = style.spacing.l, top = style.spacing.xxs, bottom = style.spacing.xxs, widget = wibox.container.margin },
+            shape = function(cr, w, h) gshape.rounded_rect(cr, w, h, style.popup.radius) end,
             widget = wibox.container.background,
         }
         cell_bg[name] = bg
@@ -624,16 +632,16 @@ local function build_modes_row()
                     expand = "inside",
                     layout = wibox.layout.align.horizontal,
                 },
-                left = dpi(8), right = dpi(6),
-                top = dpi(3), bottom = dpi(3),
+                left = style.spacing.l, right = style.spacing.m,
+                top = style.spacing.xs, bottom = style.spacing.xs,
                 widget = wibox.container.margin,
             },
             {
                 build_mode_grid(modes, cells, cell_bg, set_mode),
-                left = dpi(6), right = dpi(6), bottom = dpi(4),
+                left = style.spacing.m, right = style.spacing.m, bottom = style.spacing.s,
                 widget = wibox.container.margin,
             },
-            forced_width = (CONTENT_W - dpi(1)) / 2,
+            forced_width = (CFG.content_w - dpi(1)) / 2,
             layout = wibox.layout.fixed.vertical,
         }
     end
@@ -668,7 +676,7 @@ local function build_content()
         holder = popup_holder,
         name  = "shimmer_popup",
         title = "Shimmer",
-        width = CONTENT_W,
+        width = CFG.content_w,
         hide  = function() hide() end,
     }
 
@@ -709,8 +717,8 @@ local function build_content()
             { swatch_w, halign = "center", widget = wibox.container.place },
             layout = wibox.layout.fixed.vertical,
         },
-        forced_width = CONTENT_W,
-        top = dpi(6), bottom = dpi(2),
+        forced_width = CFG.content_w,
+        top = style.spacing.m, bottom = style.spacing.xxs,
         widget = wibox.container.margin,
     }
 
@@ -722,13 +730,13 @@ local function build_content()
     local preview_strip = wibox.widget {
         {
             preview_bar,
-            shape = function(cr, w, h) gshape.rounded_rect(cr, w, h, dpi(2)) end,
-            shape_border_width = dpi(1),
+            shape = function(cr, w, h) gshape.rounded_rect(cr, w, h, style.popup.radius) end,
+            shape_border_width = style.popup.border_width,
             shape_border_color = COLOR_GREY .. "66",
             widget = wibox.container.background,
         },
-        left = dpi(10), right = dpi(10),
-        top = dpi(2), bottom = dpi(4),
+        left = style.spacing.xl, right = style.spacing.xl,
+        top = style.spacing.xxs, bottom = style.spacing.s,
         widget = wibox.container.margin,
     }
 
@@ -762,16 +770,16 @@ local function build_content()
     local preset_col = wibox.widget {
         {
             preset_head,
-            left = dpi(8), bottom = dpi(2),
+            left = style.spacing.l, bottom = style.spacing.xxs,
             widget = wibox.container.margin,
         },
         preset_list_widget,
         {
             save_btn,
-            left = dpi(8), top = dpi(4),
+            left = style.spacing.l, top = style.spacing.s,
             widget = wibox.container.margin,
         },
-        forced_width = PRESET_COL_W,
+        forced_width = CFG.preset_col_w,
         layout = wibox.layout.fixed.vertical,
     }
 
@@ -855,8 +863,8 @@ local function build_content()
     -- fps / timing line from get_speed_breakdown
     fps_val = make_text(" ", COLOR_GREY, FONT_INFO)
     local fps_block = wibox.widget {
-        { fps_val, left = dpi(8), right = dpi(6),
-            top = dpi(4), bottom = dpi(4), widget = wibox.container.margin },
+        { fps_val, left = style.spacing.l, right = style.spacing.m,
+            top = style.spacing.s, bottom = style.spacing.s, widget = wibox.container.margin },
         widget = wibox.container.background,
     }
 
@@ -899,10 +907,10 @@ local function build_content()
             widget = wibox.widget.textbox,
         }
         local bg = wibox.widget {
-            { t, top = dpi(6), bottom = dpi(6), widget = wibox.container.margin },
+            { t, top = style.spacing.m, bottom = style.spacing.m, widget = wibox.container.margin },
             forced_width = dpi(150),
-            shape = function(cr, w, h) gshape.rounded_rect(cr, w, h, dpi(3)) end,
-            shape_border_width = dpi(1),
+            shape = function(cr, w, h) gshape.rounded_rect(cr, w, h, style.popup.radius) end,
+            shape_border_width = style.popup.border_width,
             shape_border_color = color .. "55",
             widget = wibox.container.background,
         }
@@ -924,16 +932,16 @@ local function build_content()
                         restore_snapshot()
                         hide()
                     end),
-                    spacing = dpi(10),
+                    spacing = style.spacing.xl,
                     layout = wibox.layout.fixed.horizontal,
                 },
                 halign = "center",
                 widget = wibox.container.place,
             },
-            top = dpi(4), bottom = dpi(6),
+            top = style.spacing.s, bottom = style.spacing.m,
             widget = wibox.container.margin,
         },
-        forced_width = CONTENT_W,
+        forced_width = CFG.content_w,
         widget = wibox.container.background,
     }
 
@@ -1022,7 +1030,7 @@ end
 
 local function ensure_popup()
     if popup then return end
-    local style = popup_common.popup_style()
+    local pstyle = popup_common.popup_style()
     -- build content first so the awful.popup constructor gets its required
     -- widget arg; draggable_header reads popup via popup_holder, assigned
     -- right after construction
@@ -1032,9 +1040,9 @@ local function ensure_popup()
         visible  = false,
         ontop    = true,
         bg       = COLOR_BLACK,
-        border_width = style.border_width,
+        border_width = pstyle.border_width,
         border_color = COLOR_GOLD,
-        shape = style.shape,
+        shape = pstyle.shape,
     }
     popup_holder.popup = popup
 end

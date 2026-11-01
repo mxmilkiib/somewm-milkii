@@ -62,6 +62,8 @@ local naughty = require("naughty")
 local shimmer = require("plugins/shimmer") -- For shimmer mode functions
 local floating_rules = require("plugins.floating_rules") -- Dynamic floating rules (Super+Alt+F)
 local guarded = require("error_guard")
+local term = require("rc.terminal") -- terminal command-line abstraction
+local qt_dark = require("rc.qt_dark") -- qtNct dark-theme launch wrapper
 -- Home dir for portable paths (P3)
 local home = os.getenv("HOME") or "/home/milkii"
 
@@ -78,8 +80,54 @@ end
 
 -- Define modifier keys locally
 local altkey = "Mod1"   -- Alt key
+local altgrkey = "Mod5" -- AltGr key (right Alt, ISO_Level3_Shift)
 local ctrlkey = "Control" -- Control key
 local shiftkey = "Shift"  -- Shift key
+
+-- Move the focused tag's current layout inside the list it cycles through
+-- (t.layouts when the tag forked one, else the shared awful.layout.layouts).
+-- All writes go through rawset/rawget: the layouts table's __newindex is an
+-- append trap, so a plain table.insert at the tail would double-add (see the
+-- comment above append_default_layouts in rc.lua). target is "start"/"end"
+-- or a +/- step.
+local function move_current_layout(target)
+    local t = awful.screen.focused() and awful.screen.focused().selected_tag
+    local L = (t and t.layouts and #t.layouts > 0) and t.layouts
+        or awful.layout.layouts
+    local n = #L
+    local l = t and t.layout or awful.layout.get()
+    if not l or n == 0 then return end
+    -- same matching as awful.layout.inc: object, then constructor type,
+    -- then name
+    local idx
+    for i = 1, n do
+        local v = rawget(L, i)
+        if v == l or l._type == v or (v.name and l.name and v.name == l.name) then
+            idx = i
+            break
+        end
+    end
+    if not idx then return end
+    local to
+    if target == "start" then to = 1
+    elseif target == "end" then to = n
+    else to = math.max(1, math.min(n, idx + target)) end
+    if to == idx then return end
+    local v = rawget(L, idx)
+    if to > idx then
+        for i = idx, to - 1 do rawset(L, i, rawget(L, i + 1)) end
+    else
+        for i = idx, to + 1, -1 do rawset(L, i, rawget(L, i - 1)) end
+    end
+    rawset(L, to, v)
+    -- refresh layoutboxes the same way append_default_layout does
+    tag.emit_signal("property::layouts")
+    naughty.notify {
+        title = "layout order",
+        text = string.format("%s → %d/%d", l.name or "?", to, n),
+        timeout = 1.5,
+    }
+end
 
 
 local M = {}
@@ -113,7 +161,8 @@ local function log_unknown_context_properties(ctx)
     -- Optional (commonly used)
     "copy_last_notification", "toggle_mode_glyphs_style", 
     "cycle_tags_with_clients", "quake_toggle_lain", "quake",
-    "ui_scale_zoom_in", "ui_scale_zoom_out", "ui_scale_reset"
+    "ui_scale_zoom_in", "ui_scale_zoom_out", "ui_scale_reset",
+    "spread_tag_clients"
   }
   
   local known_set = {}
@@ -205,6 +254,8 @@ function M.build(ctx)
         local use_instance = key[7]  -- Optional, use instance instead of class for matching
         
         if type(func_or_string) == "string" then
+          -- Route through bin/qt-dark so Qt programs get the qtNct dark theme
+          func_or_string = qt_dark.wrap(func_or_string)
           if class_name then
             -- Special handling for F-key launchers with window matching
             local matcher = create_matcher(class_name, use_instance)
@@ -273,7 +324,13 @@ function M.build(ctx)
     {{modkey, ctrlkey}, "h", function() awful.tag.incncol(1, nil, true)  end, "increase number of columns", nil, "layout"},
     {{modkey, ctrlkey}, "l", function() awful.tag.incncol(-1, nil, true) end, "decrease number of columns", nil, "layout"},
     {{modkey}, "r", function() awful.layout.inc(1) end, "select next layout", nil, "layout"},
-    {{modkey, shiftkey}, "r", function() awful.layout.inc(-1) end, "select previous layout", nil, "layout"}
+    {{modkey, shiftkey}, "r", function() awful.layout.inc(-1) end, "select previous layout", nil, "layout"},
+    -- layout cycling on the mod+ctrl+shift chord; holding alt as well moves
+    -- the current layout's position in the list itself
+    {{modkey, ctrlkey, shiftkey}, "Left", function() awful.layout.inc(-1) end, "select previous layout", nil, "layout"},
+    {{modkey, ctrlkey, shiftkey}, "Right", function() awful.layout.inc(1) end, "select next layout", nil, "layout"},
+    {{modkey, ctrlkey, shiftkey, altkey}, "Left", function() move_current_layout(-1) end, "move current layout earlier in list", nil, "layout"},
+    {{modkey, ctrlkey, shiftkey, altkey}, "Right", function() move_current_layout(1) end, "move current layout later in list", nil, "layout"}
   }
 
   -- Program launchers
@@ -281,9 +338,10 @@ function M.build(ctx)
     {{modkey}, "Return", function() awful.spawn(terminal) end, "open terminal", nil, "launcher"},
     {{modkey, shiftkey}, "Return", function() awful.spawn(terminal, {floating = true, placement = awful.placement.center}) end,
       "open floating terminal", nil, "launcher"},
-    {{modkey, ctrlkey}, "Return", function() awful.spawn("sh -c '" .. terminal .. " --chdir \"$(xcwd 2>/dev/null || echo $HOME)\"'") end,
+    {{modkey, ctrlkey}, "Return", function() awful.spawn("sh -c '" .. terminal .. " " .. term.cwd_flag .. " \"$(xcwd 2>/dev/null || echo $HOME)\"'") end,
       "open terminal in focused app's cwd", nil, "launcher"},
     {{modkey}, "d", "rofi_nice", "rofi launcher (drun+run)", nil, "launcher"},
+    {{modkey}, "v", "cliphist list | rofi -dmenu -matching fuzzy | cliphist decode | wl-copy", "clipboard history picker", nil, "launcher"},
     {{modkey, ctrlkey}, "r", function() (ctx.debounced_restart or awesome.restart)() end, "reload awesome", nil, "awesome"},
     {{modkey, shiftkey}, "q", function() awesome.quit() end, "quit awesome", nil, "awesome"},
     {{modkey, ctrlkey}, "n", function()
@@ -405,10 +463,10 @@ function M.build(ctx)
   -- // MARK: F-KEY LAUNCHERS
   -- F-key application launchers
   local f_key_defs = {
-    {{modkey}, "F1", "alacritty --class ncmpcpp -e sh -c 'ncmpcpp'", "run ncmpcpp", "ncmpcpp", "launcher"},  -- class matching (Wayland app_id)
+    {{modkey}, "F1", term.run_in_class("ncmpcpp", "sh -c 'ncmpcpp'"), "run ncmpcpp", "ncmpcpp", "launcher"},  -- class matching (Wayland app_id)
     {{modkey, shiftkey}, "F1", "spotify", "run spotify", "spotify", "launcher", true},  -- use instance matching
     {{modkey}, "F2", "raysession", "run raysession", nil, "launcher"},
-    {{modkey, shiftkey}, "F2", "alacritty --class nsm -e sh -c 'nsm'", "run argodejo in a terminal", "nsm", "launcher"},
+    {{modkey, shiftkey}, "F2", term.run_in_class("nsm", "sh -c 'nsm'"), "run argodejo in a terminal", "nsm", "launcher"},
     {{modkey}, "F3", function() if ctx.toggle_qbittorrent then ctx.toggle_qbittorrent() end end, "toggle qbittorrent", "qBittorrent", "launcher"},
     {{modkey, shiftkey}, "F3", "nicotine", "run nicotine++", nil, "launcher"},
     {{modkey}, "F4", "picard", "run picard", "Picard", "launcher"},
@@ -421,7 +479,7 @@ function M.build(ctx)
     {{modkey}, "F8", function() if ctx.toggle_keepassxc then ctx.toggle_keepassxc() end end, "toggle keepassxc", "keepassxc", "launcher"},
     {{modkey}, "F9", function() if ctx.toggle_doublecmd then ctx.toggle_doublecmd() end end, "toggle doublecmd", "doublecmd", "launcher"},
     {{modkey, shiftkey}, "F9", "oneko", "run oneko", "oneko", "launcher", true},  -- use instance matching
-    {{modkey}, "F11", "env QT_QPA_PLATFORMTHEME=qt5ct quasselclient", "run quasselclient", "quassel", "launcher", true},  -- use instance matching (instance = "quassel"); qt5ct for dark theme (Qt5 app under qt6ct)
+    {{modkey}, "F11", "quasselclient", "run quasselclient", "quassel", "launcher", true},  -- use instance matching (instance = "quassel"); qt5ct dark theme via bin/qt-dark
     -- previous binding: run_or_raise via command string
     {{modkey}, "F12", function() if ctx.toggle_firefox then ctx.toggle_firefox() end end, "toggle firefox", "firefox", "launcher"},
     {{modkey, shiftkey}, "F12", "chromium", "run chromium", nil, "launcher"}
@@ -433,7 +491,7 @@ function M.build(ctx)
     -- {{modkey}, "Print", "flameshot gui", "take a screenshot with flameshot", nil, "utility"},
     {{modkey}, "Print", "wayshot -g", "take a screenshot with wayshot", nil, "utility"},
     {{modkey, shiftkey}, "Print", "grim -g \"$(slurp)\" - | wl-copy", "screenshot region to clipboard", nil, "utility"},
-    -- old: {{modkey, altkey}, "e", "emote", "run emote emoji picker", nil, "utility"},
+    {{modkey, altkey}, "e", "emote", "run emote emoji picker", nil, "utility"},
     -- old: {{modkey, altkey}, "q", "xkill", "xkill to kill a hung gui app", nil, "utility"},
     {{modkey, altkey}, "q", function() local c = client.focus; if c then c:kill() end end, "kill focused window", nil, "utility"},
     -- old: {{modkey, altkey}, "c", "xcolor -s clipboard", "colour picker to clipboard", nil, "utility"},
@@ -449,6 +507,7 @@ function M.build(ctx)
     {{modkey, altkey}, "b", "sh -c 'wlopm -j | jq -r .[].name | xargs -I{} wlopm --off {}'", "blank screens immediately (DPMS)", nil, "utility"},
     -- old: {{modkey, shiftkey, altkey}, "b", "xset dpms force suspend", "suspend screens (DPMS)", nil, "utility"}
     {{ctrlkey, shiftkey}, "space", "whisper-dictate", "toggle voice dictation", nil, "utility"},
+    {{modkey, ctrlkey}, "s", "say --sel", "speak selection (TTS)", nil, "utility"},
   }
   
   -- // MARK: MENU
@@ -482,6 +541,14 @@ function M.build(ctx)
     }
   end
 
+  -- Spread a crowded tag: each extra window gets its own empty tag
+  local tag_spread_keys = {}
+  if ctx_has_function(ctx, "spread_tag_clients") then
+    tag_spread_keys = {
+      {{modkey, ctrlkey, shiftkey}, "Down", ctx.spread_tag_clients, "spread windows to empty tags", nil, "tag"}
+    }
+  end
+
   -- // MARK: AUDIO
   -- Volume and audio control keys
   local audio_keys = {
@@ -491,7 +558,32 @@ function M.build(ctx)
     {{}, "XF86AudioRaiseVolume", ctx.volume_increase or "vol-inc-all-3.sh", "increase volume", nil, "audio"},
     {{}, "XF86AudioMute", ctx.volume_toggle_mute or "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle", "toggle mute", nil, "audio"}
   }
-  
+
+
+  -- // MARK: DICTATION
+  -- Whisper dictation toggles on Ctrl + AltGr + the AI key. The Copilot
+  -- key's firmware emits Shift+Super+F23 in one burst, so the press
+  -- arrives as {Control,Mod5,Mod4,Shift}+F23 - modifiers the key cannot
+  -- synthesize itself, so a lone AI-key press can never match. Keycode
+  -- 201's shifted Keysym is XF86Assistant, so both names are bound.
+  local dictation_keys = {
+    {{ctrlkey, altgrkey, modkey, shiftkey}, "XF86Assistant", "/home/milkii/.local/bin/whisper-dictate", "toggle whisper dictation", nil, "dictation"},
+    {{ctrlkey, altgrkey, modkey, shiftkey}, "F23", "/home/milkii/.local/bin/whisper-dictate", "toggle whisper dictation", nil, "dictation"}
+    -- old: {Mod4,Shift}+F23 gated on solo_super.press_age - the AI key
+    --      alone produced the same mask, so timing was the only
+    --      discriminator; superseded by requiring Ctrl+AltGr which the
+    --      key cannot synthesize
+    -- {{modkey, shiftkey}, "XF86Assistant", dictate_if_chorded, "toggle whisper dictation", nil, "dictation"},
+    -- {{modkey, shiftkey}, "F23", dictate_if_chorded, "toggle whisper dictation", nil, "dictation"}
+  }
+
+
+  -- // MARK: TTS
+  -- Speak the current selection in tts-reader (sherpa/kokoro backends)
+  local tts_keys = {
+    {{modkey, shiftkey}, "t", "/home/milkii/.local/bin/tts-reader --sel", "read selection aloud (TTS)", nil, "tts"}
+  }
+
   -- // MARK: DISPLAY
   -- Display configuration tools
   local display_keys = {
@@ -560,9 +652,12 @@ function M.build(ctx)
   add_keys(rotation_keys)
   add_keys(tag_nav_keys)
   add_keys(tag_nav_follow_keys)
+  add_keys(tag_spread_keys)
   
   -- Add system control keys to globalkeys
   add_keys(audio_keys)
+  add_keys(dictation_keys)
+  add_keys(tts_keys)
   add_keys(display_keys)
   add_keys(denon_keys)
   add_keys(media_keys)
@@ -774,6 +869,14 @@ function M.build(ctx)
         if ctx_has_function(ctx, "cycle_tags_with_clients") then
             ctx.cycle_tags_with_clients("next")
         end
+    end),
+
+    -- alt + mousewheel: cycle through all tags
+    awful.button({ modkey, altkey }, 4, function (c)
+        awful.tag.viewprev()
+    end),
+    awful.button({ modkey, altkey }, 5, function (c)
+        awful.tag.viewnext()
     end)
   )
 

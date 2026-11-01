@@ -41,6 +41,7 @@ local awful = require("awful")
 local gears = require("gears")
 local guarded = require("error_guard")
 local naughty = require("naughty")
+local GLib = require("lgi").GLib
 
 local M = {}
 
@@ -61,6 +62,20 @@ local function disarm()
 end
 
 M.disarm = disarm
+
+--- Seconds since the current Super press went down (math.huge when Super
+-- is up). state.pressed is only set on the initial press and cleared on
+-- release, so the timestamp marks the start of the physical hold even
+-- through keyboard-repeat events. Consumers like the dictation chord use
+-- this to tell a held Mod4 apart from the Copilot key, whose firmware
+-- emits Super+Shift+F23 in one burst - the synthesized Super_L lands only
+-- milliseconds before F23, while a human-held Mod4 is far older.
+function M.press_age()
+    if not state.pressed or not state.press_time then
+        return math.huge
+    end
+    return (GLib.get_monotonic_time() - state.press_time) / 1e6
+end
 
 --- Wire disarm() onto the "press" signal of every underlying key object in
 -- one or more keybinding tables (as returned by keybindings.build: an array
@@ -94,6 +109,8 @@ end
 -- @tparam string opts.launcher Command to launch.
 -- @tparam[opt] string opts.process Process name for pkill/pgrep toggle; nil disables the close-on-tap.
 -- @tparam[opt=0.6] number opts.hold Seconds after which a held Super no longer counts as a tap.
+-- @tparam[opt=0.05] number opts.tap_min Minimum hold for a release to count as a tap
+--   (the Copilot key's burst holds its synthesized Meta for only ~4ms).
 -- @treturn table List of awful.key objects to append to the global keybindings.
 function M.keys(opts)
     local modkey = opts.modkey or "Mod4"
@@ -136,19 +153,46 @@ function M.keys(opts)
     -- new: a separate state.pressed flag tracks the physical key and is only
     --      cleared on release, so repeat events never re-arm after the hold
     --      threshold expires. The timer then reliably disarms a held Super.
-    local function on_press()
+    local function record_press()
         if state.pressed then return end
         state.pressed = true
+        state.press_time = GLib.get_monotonic_time()
+    end
+
+    local function on_press()
+        if state.pressed then return end
+        record_press()
         state.armed = true
         hold_timer:again()
     end
 
     local function on_release()
+        -- a lone AI-key burst holds its synthesized Meta for only ~4ms and
+        -- can slip a release past the chord-disarm paths depending on which
+        -- modifier the firmware drops first; a deliberate tap is never that
+        -- fast, so holds under the floor never count as taps
+        local held = state.press_time
+            and (GLib.get_monotonic_time() - state.press_time) / 1e6
+            or math.huge
         state.pressed = false
+        state.press_time = nil
         hold_timer:stop()
-        if state.armed then
+        if state.armed and held >= (opts.tap_min or 0.05) then
             awful.spawn.with_shell(cmd, false)
         end
+        disarm()
+    end
+
+    -- Release cleanup for masks where the tap can never fire anyway: the
+    -- emitted mask carries the released key's own modifier, so a Meta
+    -- released while Shift is still down arrives as {Mod4,Shift}+Super_L.
+    -- The Copilot key's firmware burst releases its synthesized Meta exactly
+    -- that way - without this, state.pressed would wedge true on the first
+    -- AI-key press, sticking solo-tap and press_age consumers forever.
+    local function on_release_only()
+        state.pressed = false
+        state.press_time = nil
+        hold_timer:stop()
         disarm()
     end
 
@@ -165,6 +209,13 @@ function M.keys(opts)
     return {
         awful.key({}, "Super_L", guarded(on_press), guarded(on_release), desc),
         awful.key({ modkey }, "Super_L", guarded(on_press), guarded(on_release)),
+        -- Super_L arriving/releasing with other modifiers already in the
+        -- mask (the Copilot key's Shift+Super+F23 burst, or a held Shift):
+        -- tracked for press_age bookkeeping but never arms or fires the tap
+        awful.key({ "Shift" }, "Super_L", guarded(record_press), guarded(on_release_only)),
+        awful.key({ modkey, "Shift" }, "Super_L", guarded(record_press), guarded(on_release_only)),
+        awful.key({ modkey, "Control" }, "Super_L", guarded(record_press), guarded(on_release_only)),
+        awful.key({ modkey, "Mod1" }, "Super_L", guarded(record_press), guarded(on_release_only)),
     }
 end
 

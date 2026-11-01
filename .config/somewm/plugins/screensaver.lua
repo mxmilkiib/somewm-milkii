@@ -26,6 +26,7 @@
 local awful   = require("awful")
 local gears   = require("gears")
 local wibox   = require("wibox")
+local wclay   = require("wibox.clay")
 local naughty = require("naughty")
 local lgi     = require("lgi")
 local GLib    = lgi.GLib
@@ -40,8 +41,8 @@ local function now()
 end
 
 local M = {
-    saver_timeout = 300,     -- idle seconds before the saver appears
-    dpms_timeout  = 1800,    -- idle seconds before outputs power off (nil = never)
+    saver_timeout = 1800,    -- idle seconds before the saver appears (nil = never)
+    dpms_timeout  = 3600,    -- idle seconds before outputs power off (nil = never)
     star_density  = 1/16000, -- stars per square pixel of screen
     max_luminance = 0.34,    -- peak alpha of any drawn element (0-1)
     aberration    = 3.0,     -- chromatic aberration: max fringe offset in px (at screen edge)
@@ -212,7 +213,20 @@ end
 local function make_saver(s)
     local g = s.geometry
     local canvas = wibox.widget.base.make_widget()
-    canvas.draw = draw_saver
+    -- the saver is one painted frame per tick: the describer rasterises it
+    -- into a fresh image surface, since the renderer re-rasters only on a
+    -- pointer change
+    wclay.describe_widget(canvas, function(_, _, _, _, offer)
+        local width = math.floor(offer.w or g.width)
+        local height = math.floor(offer.h or g.height)
+        if width < 1 or height < 1 then return nil end
+        local surf = cairo.ImageSurface(cairo.Format.ARGB32, width, height)
+        local cr = cairo.Context(surf)
+        draw_saver(canvas, nil, cr, width, height)
+        surf:flush()
+        return { image = surf._native, w = "grow", h = "grow",
+            image_width = width, image_height = height }
+    end, "screensaver.canvas")
 
     local w = wibox {
         x       = g.x,
@@ -300,6 +314,18 @@ function M.preview()
     show()
 end
 
+-- runtime override of saver_timeout: re-registers the named idle timeout
+-- (nil disables the saver stage entirely; DPMS still fires). Reverts to the
+-- configured default on config reload.
+function M.set_saver_timeout(seconds)
+    M.saver_timeout = seconds
+    if seconds then
+        awesome.set_idle_timeout("screensaver", seconds, show)
+    else
+        awesome.clear_idle_timeout("screensaver")
+    end
+end
+
 
 -- MARK: START
 
@@ -307,7 +333,9 @@ end
 function M.start()
     -- native idle timeouts; cleared by somewm on config hot-reload and
     -- re-registered here each load
-    awesome.set_idle_timeout("screensaver", M.saver_timeout, show)
+    if M.saver_timeout then
+        awesome.set_idle_timeout("screensaver", M.saver_timeout, show)
+    end
     if M.dpms_timeout then
         awesome.set_idle_timeout("screensaver_dpms", M.dpms_timeout,
             function() awesome.dpms_off() end)
