@@ -2474,8 +2474,13 @@ do
         self:set_widget(cal_wrapped)
         -- extend the wibox height to fit the header now sitting above the calendar
         local s = screen or self.screen or awful.screen.focused()
-        local wa = s.workarea
-        local _, header_h = cal_header:fit({ screen = s, dpi = s.dpi }, wa.width, wa.height)
+        -- :fit and get_preferred_size are gone; the header's height is the
+        -- font's own plus the margin's vertical padding
+        -- (background > margin > textbox)
+        local hdr_tb = cal_header.widget.widget
+        local header_h = beautiful.get_font_height(
+            (hdr_tb.get_font and hdr_tb:get_font()) or beautiful.font)
+        header_h = header_h + _hk_dpi(12)
         local geo = self:geometry()
         self:geometry({ x = geo.x, y = geo.y, width = geo.width, height = geo.height + header_h })
     end
