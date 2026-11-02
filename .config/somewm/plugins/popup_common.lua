@@ -104,7 +104,7 @@ function M.pin(name, on_change)
     local hovering = false
     local hover_bg = COLOR_PURPLE .. "33"
     local function paint()
-        local color = hovering and COLOR_WHITE or (state and COLOR_GOLD or COLOR_GREY)
+        local color = hovering and M.theme.WHITE or (state and COLOR_GOLD or COLOR_GREY)
         glyph.markup = string.format('<span foreground="%s">󰐃</span>', color)
         btn.bg = hovering and hover_bg or nil
     end
