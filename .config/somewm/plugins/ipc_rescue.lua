@@ -136,7 +136,7 @@ local function install()
         if c_subscribe then c_subscribe(cfd) end
     end
     _G._ipc_has_subscribers = function()
-        return next(subs) ~= nil or (c_has_subs and c_has_subs()) or false
+        return next(subs) ~= nil or (c_has and c_has()) or false
     end
     _G._ipc_broadcast = function(msg)
         if c_broadcast then c_broadcast(msg) end
