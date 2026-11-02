@@ -1875,6 +1875,11 @@ end
 
 -- timer callback for shimmer animation
 local function shimmer_tick()
+    -- A pointer grab (window drag/resize) needs the frame budget: markup
+    -- updates here would force a full bar recompile under the drag.
+    if mousegrabber and mousegrabber.isrunning() then
+        return
+    end
     shimmer_step = shimmer_step + 1  -- legacy unified step
     color_step = color_step + color_speed_multiplier
     shine_step = shine_step + shine_speed_multiplier
