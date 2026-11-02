@@ -95,6 +95,43 @@ local make_text = popup_common.make_text
 -- that applies the sRGB-to-BT.2020/PQ output transform
 local HDR_ARMED = os.getenv("SOMEWM_HDR_UNSAFE") == "1"
 
+-- the hdr pick persists across reloads/restarts like lid_action does: one
+-- "name=0|1" line per hdr-capable output. restore applies it back when the
+-- module loads and when an output is added, but only under the same
+-- HDR_ARMED gate that guards the commit itself
+local HDR_STATE_FILE = (os.getenv("HOME") or "") .. "/.config/somewm/hdr_state"
+
+local function hdr_save()
+    local f = io.open(HDR_STATE_FILE, "w")
+    if not f then return end
+    for i = 1, capi_output.count() do
+        local o = capi_output[i]
+        if o and o.valid and o.name and o.hdr_supported then
+            f:write(o.name .. "=" .. (o.hdr and "1" or "0") .. "\n")
+        end
+    end
+    f:close()
+end
+
+local function hdr_restore()
+    if not HDR_ARMED then return end
+    local f = io.open(HDR_STATE_FILE, "r")
+    if not f then return end
+    local want = {}
+    for line in f:lines() do
+        local name, v = line:match("^(%S+)=(%d)")
+        if name then want[name] = v == "1" end
+    end
+    f:close()
+    for i = 1, capi_output.count() do
+        local o = capi_output[i]
+        if o and o.valid and o.name and o.hdr_supported
+                and want[o.name] ~= nil and o.hdr ~= want[o.name] then
+            pcall(function() o.hdr = want[o.name] end)
+        end
+    end
+end
+
 local function separator()
     return popup_common.separator(CFG.content_w)
 end
@@ -970,6 +1007,9 @@ local function wire_output(o)
     } do
         o:connect_signal(sig, function() schedule_refresh() end)
     end
+    -- hdr flips from anywhere persist to the state file; the restore write
+    -- itself re-enters here but writes back the same values
+    o:connect_signal("property::hdr", hdr_save)
 end
 
 local function build_content()
@@ -1281,8 +1321,9 @@ M.refresh = refresh_popup
 
 -- close this popup when any other popup opens; re-render on hotplug
 popup_common.register_closer(hide)
-capi_output.connect_signal("added",   function() schedule_refresh() end)
+capi_output.connect_signal("added",   function() hdr_restore(); schedule_refresh() end)
 capi_output.connect_signal("removed", function() schedule_refresh() end)
+hdr_restore()
 
 
 return M
