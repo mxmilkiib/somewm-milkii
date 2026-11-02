@@ -2680,7 +2680,17 @@ local active_tasklist_menu
 --     end
 --     return reversed
 -- end
+-- while a pointer grab is active the dragged client's screen can flap
+-- mid-boundary, rebuilding both bars' tasklists per frame; freeze each
+-- screen's list for the duration and let the release rebuild it
+local tasklist_grab_cache = setmetatable({}, { __mode = "k" })
+
 local function tasklist_source(s)
+    if mousegrabber and mousegrabber.isrunning() then
+        local cached = tasklist_grab_cache[s]
+        if cached then return cached end
+    end
+
     -- reverse the order so newest clients appear on the right
     local reversed = {}
     local all = client.get()
@@ -2714,6 +2724,7 @@ local function tasklist_source(s)
             table.insert(clients, c)
         end
     end
+    tasklist_grab_cache[s] = clients
     return clients
 end
 
