@@ -2378,7 +2378,6 @@ do
         {
             {
                 text  = "Calendar",
-                fg    = "#FFFFFF",
                 font  = font_utils.FONT_HEAD,
                 align = "left",
                 valign = "center",
@@ -2389,6 +2388,7 @@ do
             widget = wibox.container.margin,
         },
         bg = (beautiful.main_purple and beautiful.main_purple.base) or "#623997",
+        fg = "#FFFFFF",
         widget = wibox.container.background,
     }
     local cal_wrapped = wibox.widget {
