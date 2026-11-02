@@ -4637,6 +4637,13 @@ awful.mouse.append_global_mousebindings({
         else
             local menu = build_mainmenu()
             menu:toggle()
+            -- an attachment re-asserts the anchor at every declare; each
+            -- pointer-motion re-describe of the hovered menu re-runs the
+            -- solve and shimmies the border. drop it once placed, same as
+            -- popup_common.place_next_to does for the wibar popups
+            if menu.wibox.drawin.attachment then
+                menu.wibox.drawin.attachment = nil
+            end
         end
         if active_tasklist_menu and active_tasklist_menu.wibox
            and active_tasklist_menu.wibox.visible then
