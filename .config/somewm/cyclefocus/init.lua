@@ -20,7 +20,8 @@ local capi         = {
 }
 local wibox        = require("wibox")
 
-local xresources = require("beautiful").xresources
+local beautiful    = require("beautiful")
+local xresources = beautiful.xresources
 local dpi = xresources and xresources.apply_dpi or function() end
 
 --- Escape pango markup, taken from naughty.
@@ -1101,7 +1102,9 @@ cyclefocus.cycle = function(startdirection_or_args, args)
             textbox:set_wrap("word_char")
             textbox:set_ellipsize("middle")
             -- Set height to no wrap with fixed main layout.
-            local _, h = textbox:get_preferred_size(c.screen)
+            -- get_preferred_size is gone with Clay; a single line is the
+            -- font's own height.
+            local h = beautiful.get_font_height(preset.font or beautiful.font)
             textbox:set_forced_height(h)
             local textbox_margin = wibox.container.margin(textbox)
             textbox_margin:set_margins(dpi(5))
@@ -1119,10 +1122,12 @@ cyclefocus.cycle = function(startdirection_or_args, args)
             end
             layout:add(entry_with_bg)
 
-            -- Add height to outer wibox.
-            local context = {dpi=beautiful.xresources.get_dpi(initial_screen)}
-            _, h = entry_with_bg:fit(context, wbox.width, 2^20)
-            wbox_height = wbox_height + h
+            -- Add height to outer wibox. fit() is gone with Clay; a row is
+            -- the taller of the text's forced height plus its margins and
+            -- the icon, plus the outer margin's vertical padding.
+            wbox_height = wbox_height
+                + math.max(h + 2 * dpi(5), preset.icon_size or 0)
+                + 2 * dpi(2)
         end  -- }}}
 
         -- Get clients before and after currently selected one.
