@@ -4002,8 +4002,8 @@ awful.screen.connect_for_each_screen(function(s)
     resource_popup.attach(ram_bar, resource_group)
     resource_popup.attach(temp_bar, resource_group)
     battery_popup.attach(battery_bar)
-    brightness_popup.attach(brightness_bar)
-    -- middle-click the same widget for the monitor-management popup
+    -- left or middle click opens the merged displays popup (brightness
+    -- sliders on top, monitor management below)
     displays_popup.attach(brightness_bar)
     volume_popup.attach(volume_bar)
     media_popup.attach(media_bar)

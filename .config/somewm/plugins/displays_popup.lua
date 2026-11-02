@@ -1,6 +1,8 @@
 -- plugins/displays_popup.lua
--- Monitor management popup, opened by middle-clicking the wibar brightness
--- widget. Lists every output the compositor reports with enable/primary
+-- Display popup, opened by left- or middle-clicking the wibar brightness
+-- widget: the brightness popup's sliders and daemon buttons ride on top
+-- since the two merged, then every output the compositor reports with
+-- enable/primary
 -- toggles and mode/scale/transform/adaptive-sync/hdr controls, topped by a
 -- draggable mini-map of the output layout (drag a rectangle to set
 -- output.position; edges snap to neighbouring monitors).
@@ -20,6 +22,7 @@ local beautiful = require("beautiful")
 local gshape  = require("gears.shape")
 local guarded = require("error_guard")
 local popup_common = require("plugins.popup_common")
+local bright      = require("plugins.brightness_popup")
 local style   = require("plugins.style")
 local base    = require("wibox.widget.base")
 local wclay   = require("wibox.clay")
@@ -1033,6 +1036,10 @@ local function build_content()
         hide  = function() hide() end,
     }
 
+    -- the old brightness popup's body rides first: the two merged into this
+    -- one popup, opened by either the left or middle click
+    local brightness_body = bright.body()
+
     map_widget = make_map()
 
     -- apply/cancel bar for staged map drags; empty until a drag stages a move
@@ -1046,6 +1053,8 @@ local function build_content()
 
     return wibox.widget {
         header,
+        brightness_body,
+        separator(),
         {
             map_widget,
             top = style.spacing.m, bottom = style.spacing.xxs,
@@ -1297,6 +1306,7 @@ local function show(anchor)
     awesome.emit_signal("popup::opening")
     popup._showing = true
     refresh_popup()
+    bright.refresh()
     popup_common.show_placement(popup, anchor, ctrl.show_opts())
     popup._showing = false
 end
@@ -1316,7 +1326,7 @@ function M.attach(widget)
     ensure_popup()
     popup_common.sticky_border(popup, widget)
     widget:connect_signal("button::press", guarded(function(_, _, _, pressed)
-        if pressed ~= 2 then return end
+        if pressed ~= 1 and pressed ~= 2 then return end
         popup._anchor_geo    = mouse.current_widget_geometry
         popup._anchor_screen = (mouse.current_wibox and mouse.current_wibox.screen) or mouse.screen
         popup._anchor_wibox  = mouse.current_wibox

@@ -47,6 +47,10 @@ local popup
 -- run before the awful.popup is constructed (awful.popup requires a widget arg)
 local popup_holder = {}
 local display_rows = {}
+-- assigned inside build_body whether the body is embedded in
+-- displays_popup's popup or built for this module's own
+local rows_container_ref
+local refresh_btn_ref
 local refresh_popup  -- forward declaration (used by make_refresh_button before definition)
 -- forward declarations: `hide` is referenced by the draggable_header
 -- controller before assignment; `ctrl` is built in build_content once the
@@ -253,19 +257,11 @@ end
 
 -- MARK: DISPLAY ROWS
 
-local function build_content()
-    -- header (title drag handle + detach + pin) and the detach/drag controller
-    -- come from popup_common so this popup can float and be dragged like the
-    -- rest of the wibar popups
-    local header
-    header, ctrl = popup_common.draggable_header {
-        holder = popup_holder,
-        name  = "brightness_popup",
-        title = "Displays",
-        width = CFG.content_w,
-        hide  = function() hide() end,
-    }
-
+-- the headerless body: brightness rows plus the daemon/inhibit/saver
+-- buttons. displays_popup embeds this in its own popup since the two
+-- merged; assigning the refs here keeps refresh_popup working whichever
+-- popup owns the body
+local function build_body()
     local rows_container = wibox.widget {
         layout = wibox.layout.fixed.vertical,
         spacing = style.spacing.xxs,
@@ -276,8 +272,10 @@ local function build_content()
     local saver_btn   = make_saver_button()
     local saver_row   = make_saver_timeout_row()
 
+    rows_container_ref = rows_container
+    refresh_btn_ref = refresh_btn
+
     return wibox.widget {
-        header,
         {
             rows_container,
             top = style.spacing.l, bottom = style.spacing.l,
@@ -293,7 +291,27 @@ local function build_content()
         separator(),
         saver_row,
         layout = wibox.layout.fixed.vertical,
-    }, rows_container, refresh_btn
+    }
+end
+
+local function build_content()
+    -- header (title drag handle + detach + pin) and the detach/drag controller
+    -- come from popup_common so this popup can float and be dragged like the
+    -- rest of the wibar popups
+    local header
+    header, ctrl = popup_common.draggable_header {
+        holder = popup_holder,
+        name  = "brightness_popup",
+        title = "Displays",
+        width = CFG.content_w,
+        hide  = function() hide() end,
+    }
+
+    return wibox.widget {
+        header,
+        build_body(),
+        layout = wibox.layout.fixed.vertical,
+    }
 end
 
 
@@ -406,9 +424,6 @@ local function get_display_info(callback)
     end))
 end
 
-
-local rows_container_ref
-local refresh_btn_ref
 
 -- apply a brightness percentage to a single display.
 -- gamma outputs go through wlr-brightnessd's per-output command; backlight
@@ -683,9 +698,7 @@ local function ensure_popup()
     -- build content first so the awful.popup constructor gets its required
     -- widget arg; draggable_header reads popup via popup_holder, assigned
     -- right after construction
-    local content, rc, rb = build_content()
-    rows_container_ref = rc
-    refresh_btn_ref = rb
+    local content = build_content()
     popup = awful.popup {
         widget   = content,
         visible  = false,
@@ -748,6 +761,9 @@ end
 
 -- re-read display info and rebuild the popup rows
 M.refresh = refresh_popup
+
+-- the headerless body, for displays_popup to embed since the two merged
+M.body = build_body
 
 -- close this popup when any other popup opens
 popup_common.register_closer(hide)
