@@ -529,7 +529,8 @@ local function output_section(o)
                     {
                         make_text(g.w .. "x" .. g.h, COLOR_WHITE, FONT_SMALL),
                         make_text(ratio_label(g.w, g.h), COLOR_GREY, FONT_SMALL),
-                        layout = wibox.layout.fixed.vertical,
+                        spacing = style.spacing.s,
+                        layout = wibox.layout.fixed.horizontal,
                     },
                     strategy = "exact",
                     width = CFG.res_w,
@@ -1224,7 +1225,9 @@ local function compute_content_w()
                 table.insert(groups[k], m)
             end
             for k, g in pairs(groups) do
-                max_res = math.max(max_res, fit_text(k))
+                -- res column holds "WxH ratio" on one line now
+                max_res = math.max(max_res, fit_text(
+                    k .. " " .. ratio_label(g[1].width, g[1].height)))
                 local wsum = 0
                 for _, m in ipairs(g) do
                     local lbl = string.format("%g", (m.refresh or 0) / 1000)
