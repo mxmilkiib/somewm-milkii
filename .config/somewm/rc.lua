@@ -46,7 +46,7 @@ Xephyr :1 -ac -br -noreset -screen 1152x720 & sleep 1 && DISPLAY=:1.0 awesome -c
 --     • Clipboard Copy Of Last Alert (copy_last_notification helper)
 --     • Hotkey Duplicate Detection (plugins.hotkey_dupe_detector audit)
 --   APPLICATION TOGGLES AND MENUS
---     • Dedicated Toggles For KeePassXC, Pavucontrol, qBittorrent, Double Commander, Arandr
+--     • Dedicated Toggle For Pavucontrol
 --     • Freedesktop Menu Integration (freedesktop.menu build)
 
 
@@ -1486,56 +1486,6 @@ local function toggle_pavucontrol()
 end
 
 
--- // MARK: -- keepassxc toggle
-local function toggle_keepassxc()
-    toggle_app_tag(
-        function(c) return ci_client(c, "keepassxc") end,
-        8,
-        "keepassxc ~/state/nextcloud/sync/keepassxc-mb.kdbx"
-    )
-end
-
-
--- // MARK: -- qbittorrent toggle
-local function toggle_qbittorrent()
-    toggle_app_tag(
-        function(c) return ci_client(c, "qbittorrent") end,
-        3,
-        "qbittorrent"
-    )
-end
-
-
--- // MARK: -- doublecmd toggle
-local function toggle_doublecmd()
-    toggle_app_tag(
-        function(c) return ci_client(c, "doublecmd", "double commander") end,
-        9,
-        "doublecmd"
-    )
-end
-
-
--- // MARK: -- arandr toggle
-local function toggle_arandr()
-    toggle_app_tag(
-        function(c) return ci_client(c, "arandr") end,
-        9,
-        "arandr"
-    )
-end
-
-
--- // MARK: -- firefox toggle
-local function toggle_firefox()
-    toggle_app_tag(
-        function(c) return ci_client(c, "firefox", "navigator") end,
-        12,
-        "firefox"
-    )
-end
-
-
 -- // MARK: -- resize-no-warp
 -- anti-warp resize: prevents cursor from jumping to another monitor during
 -- resize. see rc/resize_no_warp.lua for implementation.
@@ -2058,16 +2008,6 @@ local keys = keybindings.build({
     notification_center_delete_oldest = notification_center_delete_oldest,
     -- pavucontrol toggle function
     toggle_pavucontrol = toggle_pavucontrol,
-    -- keepassxc toggle function
-    toggle_keepassxc = toggle_keepassxc,
-    -- qbittorrent toggle function
-    toggle_qbittorrent = toggle_qbittorrent,
-    -- doublecmd toggle function
-    toggle_doublecmd = toggle_doublecmd,
-    -- arandr toggle function
-    toggle_arandr = toggle_arandr,
-    -- firefox toggle function
-    toggle_firefox = toggle_firefox,
     -- custom resize function that prevents cursor warping
     resize_no_warp = resize_no_warp,
     -- quake terminal: expose toggle function for hotkey

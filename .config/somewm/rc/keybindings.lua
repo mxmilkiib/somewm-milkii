@@ -467,7 +467,6 @@ function M.build(ctx)
     {{modkey, shiftkey}, "F1", "spotify", "run spotify", "spotify", "launcher", true},  -- use instance matching
     {{modkey}, "F2", "raysession", "run raysession", nil, "launcher"},
     {{modkey, shiftkey}, "F2", term.run_in_class("nsm", "sh -c 'nsm'"), "run argodejo in a terminal", "nsm", "launcher"},
-    {{modkey}, "F3", function() if ctx.toggle_qbittorrent then ctx.toggle_qbittorrent() end end, "toggle qbittorrent", "qBittorrent", "launcher"},
     {{modkey, shiftkey}, "F3", "nicotine", "run nicotine++", nil, "launcher"},
     {{modkey}, "F4", "picard", "run picard", "Picard", "launcher"},
     -- old: {{modkey, shiftkey}, "F4", "simplescreenrecorder", "run simplescreenrecorder", nil, "launcher"},
@@ -476,12 +475,8 @@ function M.build(ctx)
     {{modkey}, "F6", "hyprpicker -r", "colour picker (region)", nil, "launcher"},
     {{modkey, shiftkey}, "F6", "qseq66", "run qseq66", nil, "launcher"},
     {{modkey, shiftkey}, "F7", "signal-desktop", "run signal-desktop", nil, "launcher"},
-    {{modkey}, "F8", function() if ctx.toggle_keepassxc then ctx.toggle_keepassxc() end end, "toggle keepassxc", "keepassxc", "launcher"},
-    {{modkey}, "F9", function() if ctx.toggle_doublecmd then ctx.toggle_doublecmd() end end, "toggle doublecmd", "doublecmd", "launcher"},
     {{modkey, shiftkey}, "F9", "oneko", "run oneko", "oneko", "launcher", true},  -- use instance matching
     {{modkey}, "F11", "quasselclient", "run quasselclient", "quassel", "launcher", true},  -- use instance matching (instance = "quassel"); qt5ct dark theme via bin/qt-dark
-    -- previous binding: run_or_raise via command string
-    {{modkey}, "F12", function() if ctx.toggle_firefox then ctx.toggle_firefox() end end, "toggle firefox", "firefox", "launcher"},
     {{modkey, shiftkey}, "F12", "chromium", "run chromium", nil, "launcher"}
   }
   
