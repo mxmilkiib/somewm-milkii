@@ -33,7 +33,10 @@ local FONT_HEAD  = popup_common.fonts.FONT_HEAD
 local CFG = {
     content_w = dpi(240),
 }
--- sdr-white slider bounds for HDR outputs, in nits (PQ reference is 203)
+-- sdr-white slider bounds for HDR outputs, in nits (PQ reference is 203).
+-- 600 is a ceiling, not a panel figure: this box's HDR outputs declare no
+-- max luminance in their EDID HDR static metadata, so there is nothing
+-- better to clamp to
 local NITS_MIN, NITS_MAX = 80, 600
 
 
@@ -213,9 +216,20 @@ local SAVER_PRESETS = {
 local function make_saver_timeout_row()
     local saver = require("plugins.screensaver")
     local entries = {}
+    local heading = make_text("Screensaver Delay", COLOR_WHITE, FONT_HEAD)
+    local function fmt_secs(secs)
+        if not secs then return "off" end
+        if secs % 3600 == 0 then return (secs / 3600) .. "h" end
+        if secs % 60 == 0 then return (secs / 60) .. "m" end
+        return secs .. "s"
+    end
     local function refresh_labels()
+        -- the heading names the active delay outright; the matching preset
+        -- chip paints green. textbox fg is inert in somewm, so the chip
+        -- colour goes through its background container's fg
+        heading.text = "Screensaver Delay · " .. fmt_secs(saver.saver_timeout)
         for _, e in ipairs(entries) do
-            e.txt.fg = (e.secs == saver.saver_timeout) and COLOR_GREEN or COLOR_GREY
+            e.bg.fg = (e.secs == saver.saver_timeout) and COLOR_GREEN or COLOR_WHITE
         end
     end
     local row = wibox.widget {
@@ -225,17 +239,20 @@ local function make_saver_timeout_row()
     for _, p in ipairs(SAVER_PRESETS) do
         local txt = wibox.widget {
             text   = p.label,
-            fg     = COLOR_GREY,
             font   = FONT,
             widget = wibox.widget.textbox,
         }
         local bg = wibox.widget {
             {
-                txt,
-                halign = "center",
-                valign = "center",
-                fill_horizontal = true,
-                widget = wibox.container.place,
+                {
+                    txt,
+                    halign = "center",
+                    valign = "center",
+                    fill_horizontal = true,
+                    widget = wibox.container.place,
+                },
+                top = style.spacing.xs, bottom = style.spacing.xs,
+                widget = wibox.container.margin,
             },
             bg = COLOR_BLACK,
             fg = COLOR_WHITE,
@@ -247,14 +264,14 @@ local function make_saver_timeout_row()
             saver.set_saver_timeout(p.secs)
             refresh_labels()
         end)))
-        entries[#entries + 1] = { secs = p.secs, txt = txt }
+        entries[#entries + 1] = { secs = p.secs, bg = bg }
         row:add(bg)
     end
     refresh_labels()
     return wibox.widget {
         {
             {
-                make_text("Screensaver Delay", COLOR_WHITE, FONT_HEAD),
+                heading,
                 row,
                 layout = wibox.layout.fixed.vertical,
                 spacing = style.spacing.xs,
