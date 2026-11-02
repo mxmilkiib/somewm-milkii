@@ -119,13 +119,17 @@ local function compute_systray_anchor(s)
                 return false
             end
             if contains_systray(child) then
-                local fw = wbase.fit_widget(right_section, context, child, max_w, max_h)
-                systray_w = fw or 0
+                -- fit_widget is gone with Clay; without a measure the anchor
+                -- slides right of the true systray edge but stays on the bar
+                local fw = wbase.fit_widget
+                    and wbase.fit_widget(right_section, context, child, max_w, max_h) or 0
+                systray_w = fw
                 systray_found = true
             end
         else
-            local fw = wbase.fit_widget(right_section, context, child, max_w, max_h)
-            width_after = width_after + (fw or 0)
+            local fw = wbase.fit_widget
+                and wbase.fit_widget(right_section, context, child, max_w, max_h) or 0
+            width_after = width_after + fw
         end
     end
 
