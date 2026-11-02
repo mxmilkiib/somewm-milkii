@@ -250,10 +250,43 @@ local function create_row(instance)
     return { instance = instance, widget = bg, art = art, source = source, title = title, artist = artist, status = status, art_url = nil }
 end
 
+-- icon fallback for players with no cover art: the app's themed icon by
+-- desktop-entry-ish name, else a generic media glyph. resolved once per
+-- player and cached — the instance name can't change under a row
+local lookup_icon
+local GENERIC_ICONS = {
+    "multimedia-player", "applications-multimedia",
+    "media-playback-start", "audio-x-generic",
+}
+local function player_icon(player)
+    if player.icon_path ~= nil then return player.icon_path end
+    if lookup_icon == nil then
+        local ok, utils = pcall(require, "menubar.utils")
+        lookup_icon = ok and utils.lookup_icon or false
+    end
+    local path = false
+    if lookup_icon then
+        local names = {}
+        names[#names + 1] = player.instance:match("kdeconnect%.mpris_")
+            and "kdeconnect"
+            or player.instance:gsub("%.instance.+$", "")
+        for _, g in ipairs(GENERIC_ICONS) do names[#names + 1] = g end
+        for _, n in ipairs(names) do
+            path = lookup_icon(n)
+            if path then break end
+        end
+    end
+    player.icon_path = path
+    return path
+end
+
 local function update_art(player, url)
     if player.art_url == url then return end
     player.art_url = url
-    if not url or url == "" then player.art.image = nil; return end
+    if not url or url == "" then
+        player.art.image = player_icon(player) or nil
+        return
+    end
     local path = url:match("^file://(.+)")
     if path then player.art.image = path; return end
     if not url:match("^https?://") then return end
