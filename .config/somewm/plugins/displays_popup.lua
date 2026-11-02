@@ -88,6 +88,13 @@ local SCALE_STEPS = { 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3 }
 
 local make_text = popup_common.make_text
 
+-- resolution label's aspect ratio, reduced: 3840x2160 -> "16:9"
+local function ratio_label(w, h)
+    local function gcd(a, b) return b == 0 and a or gcd(b, a % b) end
+    local g = gcd(w, h)
+    return string.format("%d:%d", w / g, h / g)
+end
+
 -- opt-in for the hdr commit: setting BT.2020/PQ image description on eDP
 -- hard-hung this box's amdgpu display core (kernel 7.3.0-rc6). re-test on a
 -- fixed kernel by exporting SOMEWM_HDR_UNSAFE=1 before somewm starts; the
@@ -516,7 +523,11 @@ local function output_section(o)
             end
             col:add(wibox.widget {
                 {
-                    make_text(g.w .. "x" .. g.h, COLOR_WHITE, FONT_SMALL),
+                    {
+                        make_text(g.w .. "x" .. g.h, COLOR_WHITE, FONT_SMALL),
+                        make_text(ratio_label(g.w, g.h), COLOR_GREY, FONT_SMALL),
+                        layout = wibox.layout.fixed.vertical,
+                    },
                     strategy = "exact",
                     width = CFG.res_w,
                     widget = wibox.container.constraint,
