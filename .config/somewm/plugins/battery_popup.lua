@@ -294,6 +294,35 @@ local function separator()
     return popup_common.separator(CFG.content_w)
 end
 
+-- the big percentage's charge ramp: red when nearly flat, through orange
+-- and gold to green when full
+local PCT_STOPS = {
+    {   0, style.color.err },
+    {  30, "#E8934A" },
+    {  60, COLOR_GOLD },
+    { 100, style.color.ok },
+}
+local function lerp_hex(a, b, t)
+    local ar, ag, ab = a:match("#(..)(..)(..)")
+    local br, bg, bb = b:match("#(..)(..)(..)")
+    ar, ag, ab = tonumber(ar, 16), tonumber(ag, 16), tonumber(ab, 16)
+    br, bg, bb = tonumber(br, 16), tonumber(bg, 16), tonumber(bb, 16)
+    return string.format("#%02X%02X%02X",
+        math.floor(ar + (br - ar) * t + 0.5),
+        math.floor(ag + (bg - ag) * t + 0.5),
+        math.floor(ab + (bb - ab) * t + 0.5))
+end
+local function pct_colour(pct)
+    pct = math.max(0, math.min(pct, 100))
+    for i = 2, #PCT_STOPS do
+        if pct <= PCT_STOPS[i][1] then
+            local lo, hi = PCT_STOPS[i - 1], PCT_STOPS[i]
+            return lerp_hex(lo[2], hi[2], (pct - lo[1]) / (hi[1] - lo[1]))
+        end
+    end
+    return PCT_STOPS[#PCT_STOPS][2]
+end
+
 local function build_content()
     pct_text    = make_text("100%", COLOR_WHITE, popup_common.fonts.FONT_HUGE)
     status_text = make_text("Unknown", COLOR_GREY)
@@ -436,7 +465,10 @@ end
 
 local function refresh_popup()
     local i = battery_info()
-    pct_text.text = i.pct .. "%"
+    -- markup, not fg: textbox fg is inert in somewm, only pango foreground
+    -- spans and background-container fg actually colour text
+    pct_text.markup = string.format('<span foreground="%s">%d%%</span>',
+        pct_colour(i.pct), i.pct)
     status_text.text = i.status
     ac_text.text = (i.ac == "1") and "Plugged in (AC)" or "On battery"
 
