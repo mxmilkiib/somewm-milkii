@@ -372,11 +372,19 @@ local function build_widget(n, s)
     -- breathing room around short bodies
     local probe = wibox.widget { text = "Ag", font = FONT,
         widget = wibox.widget.textbox }
-    -- somewm textboxes measure via get_preferred_size; fall back to fit on
-    -- builds that still carry the classic widget API
+    -- Clay removed the textbox measuring methods, so measure through a
+    -- Pango layout the way textbox.lua does internally: heights are the
+    -- font's own, widths come from the laid-out markup
+    local lgi = require("lgi")
+    local measure_layout = lgi.Pango.Layout.new(
+        lgi.PangoCairo.create_context(
+            lgi.cairo.Context.create(
+                lgi.cairo.ImageSurface.create(lgi.cairo.Format.ARGB32, 0, 0))))
     local function measure(w)
-        if w.get_preferred_size then return w:get_preferred_size(s) end
-        return w:fit(s, 9999, 9999)
+        measure_layout:set_font_description(beautiful.get_font(w.font or beautiful.font))
+        if w.markup then measure_layout:set_markup(w.markup)
+        else measure_layout:set_text(w.text or "") end
+        return measure_layout:get_pixel_size()
     end
     local _, line_h = measure(probe)
     local title_w, title_h = measure(title_widget)
