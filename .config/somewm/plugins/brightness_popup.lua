@@ -87,7 +87,6 @@ end
 local function make_refresh_button()
     local txt = wibox.widget {
         text  = "Reapply Gamma",
-        fg    = COLOR_WHITE,
         font  = FONT,
         widget = wibox.widget.textbox,
     }
@@ -128,7 +127,6 @@ end
 local function make_inhibit_button()
     local txt = wibox.widget {
         text  = "Stay Awake: off",
-        fg    = COLOR_GREY,
         font  = FONT,
         widget = wibox.widget.textbox,
     }
@@ -173,7 +171,6 @@ end
 local function make_saver_button()
     local txt = wibox.widget {
         text  = "Screensaver Now",
-        fg    = COLOR_WHITE,
         font  = FONT,
         widget = wibox.widget.textbox,
     }
@@ -494,34 +491,17 @@ function refresh_popup(on_done)
         local individual_rows = {}
 
         for _, d in ipairs(info) do
-            local name_text = wibox.widget {
-                text  = d.name,
-                fg    = COLOR_WHITE,
-                font  = FONT_HEAD,
-                widget = wibox.widget.textbox,
-            }
+            local name_text = make_text(d.name, COLOR_WHITE, FONT_HEAD)
 
             local pct_color = d.gamma_failed and COLOR_RED or COLOR_GOLD
-            local pct_text = wibox.widget {
-                text  = d.brightness .. (d.hdr and " nits" or "%"),
-                fg    = pct_color,
-                font  = popup_common.fonts.FONT_VALUE,
-                widget = wibox.widget.textbox,
-            }
+            local pct_text = make_text(d.brightness .. (d.hdr and " nits" or "%"),
+                pct_color, popup_common.fonts.FONT_VALUE)
 
-            local source_text = wibox.widget {
-                text  = d.source,
-                fg    = COLOR_GREY,
-                font  = popup_common.fonts.FONT_SMALL,
-                widget = wibox.widget.textbox,
-            }
+            local source_text = make_text(d.source, COLOR_GREY,
+                popup_common.fonts.FONT_SMALL)
 
-            local status_text = wibox.widget {
-                text  = d.gamma_failed and " (gamma failed)" or "",
-                fg    = COLOR_RED,
-                font  = popup_common.fonts.FONT_SMALL,
-                widget = wibox.widget.textbox,
-            }
+            local status_text = make_text(d.gamma_failed and " (gamma failed)" or "",
+                COLOR_RED, popup_common.fonts.FONT_SMALL)
 
             local header = wibox.widget {
                 {
@@ -639,12 +619,7 @@ function refresh_popup(on_done)
             return math.max(1, math.min(100, math.floor(v + 0.5)))
         end
 
-        local all_pct = wibox.widget {
-            text  = "",
-            fg    = COLOR_GOLD,
-            font  = popup_common.fonts.FONT_VALUE,
-            widget = wibox.widget.textbox,
-        }
+        local all_pct = make_text("", COLOR_GOLD, popup_common.fonts.FONT_VALUE)
         local all_header = wibox.widget {
             {
                 make_text("All Displays", COLOR_WHITE, FONT_HEAD),

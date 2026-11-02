@@ -161,36 +161,15 @@ local function make_service_row(svc, status)
         widget = wibox.widget.textbox,
     }
 
-    local name = wibox.widget {
-        text = svc.name,
-        fg = COLOR_WHITE,
-        font = FONT,
-        align = "left",
-        valign = "center",
-        widget = wibox.widget.textbox,
-    }
+    local name = make_text(svc.name, COLOR_WHITE, FONT)
 
     -- desc sits in a fixed-width column so each row's port starts at the
     -- same x (the middle cell's left edge is uniform: every row leads with
     -- an identical dot glyph)
-    local desc = wibox.widget {
-        text = svc.desc,
-        fg = COLOR_GREY,
-        font = FONT_INFO,
-        align = "left",
-        valign = "center",
-        forced_width = CFG.desc_w,
-        widget = wibox.widget.textbox,
-    }
+    local desc = make_text(svc.desc, COLOR_GREY, FONT_INFO)
+    desc.forced_width = CFG.desc_w
 
-    local port = wibox.widget {
-        text = svc.port or "",
-        fg = COLOR_GREY,
-        font = FONT_INFO,
-        align = "left",
-        valign = "center",
-        widget = wibox.widget.textbox,
-    }
+    local port = make_text(svc.port or "", COLOR_GREY, FONT_INFO)
 
     -- launchers aren't services: fixed label, no Start/Stop state
     local toggle_label, toggle_color

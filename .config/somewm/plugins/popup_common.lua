@@ -229,14 +229,21 @@ end
 -- textbox helper shared by the popup family (was duplicated verbatim in
 -- volume_popup, brightness_popup and resource_popup)
 function M.make_text(text, fg, font)
-    return wibox.widget {
-        text  = text or "",
-        fg    = fg or M.theme.WHITE,
+    local color = fg or M.theme.WHITE
+    local w = wibox.widget {
         font  = font or M.fonts.FONT,
         align = "left",
         valign = "center",
         widget = wibox.widget.textbox,
     }
+    -- textbox has no fg property in somewm: the colour rides in a pango span,
+    -- and set_text is overridden so later `.text =` writes keep it
+    function w:set_text(t)
+        self:set_markup(string.format("<span foreground='%s'>%s</span>",
+            color, gears.string.xml_escape(tostring(t))))
+    end
+    w:set_text(text or "")
+    return w
 end
 
 -- full-width separator line. width is the already-dpi'd content width of the
@@ -570,12 +577,7 @@ function M.draggable_header(opts)
     -- on the right sit outside the handle so they keep their own clicks. a
     -- space textbox gives the stretchy middle real geometry to receive
     -- button::press, else an empty container can miss the press on somewm
-    local title_w = wibox.widget {
-        text = opts.title,
-        fg = M.theme.WHITE,
-        font = FONT_HEAD,
-        widget = wibox.widget.textbox,
-    }
+    local title_w = M.make_text(opts.title, M.theme.WHITE, FONT_HEAD)
     local drag_area = wibox.widget {
         { text = " ", widget = wibox.widget.textbox },
         bg = "#00000000",

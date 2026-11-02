@@ -187,7 +187,6 @@ local make_text = popup_common.make_text
 local function make_profile_button(p)
     local txt = wibox.widget {
         text  = p.label,
-        fg    = COLOR_WHITE,
         font  = FONT,
         widget = wibox.widget.textbox,
     }
@@ -243,7 +242,6 @@ end
 local function make_lid_button(p)
     local txt = wibox.widget {
         text  = p.label,
-        fg    = COLOR_WHITE,
         font  = FONT,
         widget = wibox.widget.textbox,
     }
