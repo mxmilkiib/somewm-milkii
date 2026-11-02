@@ -532,8 +532,8 @@ function refresh_popup(on_done)
                 handle_color        = COLOR_WHITE,
                 handle_border_width = style.popup.border_width,
                 handle_border_color = COLOR_PURPLE,
-                min   = d.hdr and NITS_MIN or 1,
-                max   = d.hdr and NITS_MAX or 100,
+                minimum = d.hdr and NITS_MIN or 1,
+                maximum = d.hdr and NITS_MAX or 100,
                 value = d.brightness,
                 -- slider:fit() returns the full available height, so without a
                 -- forced height the popup would grow to the whole workarea
@@ -647,8 +647,8 @@ function refresh_popup(on_done)
             handle_color        = COLOR_WHITE,
             handle_border_width = style.popup.border_width,
             handle_border_color = COLOR_PURPLE,
-            min   = 1,
-            max   = 100,
+            minimum = 1,
+            maximum = 100,
             forced_width  = CFG.content_w - 2 * style.popup.margin_x,
             forced_height = dpi(14),
             widget = wibox.widget.slider,
