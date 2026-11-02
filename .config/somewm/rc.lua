@@ -832,7 +832,7 @@ local tag_pager                                                        -- tag-aw
 local brightness = require("plugins.brightness")                        -- screen brightness with OSD
 local solo_super = require("plugins.solo_super")                        -- tap Super alone to toggle the launcher
 require("plugins.shake_cursor").start()                                 -- KDE Shake Cursor: shake the pointer to enlarge it briefly
-require("somewm.layout_animation")                                      -- animated tiled-layout transitions (native frame clock)
+require("somewm.animation").layout_duration = 0.15                       -- animated tiled-layout transitions (native frame clock)
 require("plugins.window_fx")                                            -- open fade, close shrink, focus dim, floating shadows
 require("plugins.power").start()                                        -- power mgmt: battery, profiles, lid (swayidle/swaylock disabled)
 require("plugins.screensaver").start()                                  -- idle saver: starfield + clock, then DPMS off (native idle timers)
