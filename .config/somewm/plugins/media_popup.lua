@@ -79,7 +79,7 @@ local function ensure_popup()
                     spacing = style.spacing.m,
                     layout = wibox.layout.fixed.vertical,
                 },
-                top = style.spacing.l, bottom = style.spacing.xxs,
+                top = style.spacing.l, bottom = style.spacing.m,
                 left = style.spacing.xl, right = style.spacing.xl,
                 widget = wibox.container.margin,
             },

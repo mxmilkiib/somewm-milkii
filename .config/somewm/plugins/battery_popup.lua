@@ -193,11 +193,15 @@ local function make_profile_button(p)
     }
     local bg = wibox.widget {
         {
-            txt,
-            halign = "center",
-            valign = "center",
-            fill_horizontal = true,
-            widget = wibox.container.place,
+            {
+                txt,
+                halign = "center",
+                valign = "center",
+                fill_horizontal = true,
+                widget = wibox.container.place,
+            },
+            top = style.spacing.xs, bottom = style.spacing.xs,
+            widget = wibox.container.margin,
         },
         forced_width = CFG.content_w,
         bg = COLOR_BLACK,
@@ -211,8 +215,9 @@ local function make_profile_button(p)
     local function paint()
         local active = (p.key == active_profile)
         bg.bg = active and bg._active_bg or bg._inactive_bg
+        -- the container's fg is what the label paints with; textbox fg is
+        -- inert in somewm
         bg.fg = active and COLOR_GOLD or COLOR_WHITE
-        txt.fg = active and COLOR_GOLD or COLOR_WHITE
     end
     bg.paint = paint
 
@@ -244,11 +249,15 @@ local function make_lid_button(p)
     }
     local bg = wibox.widget {
         {
-            txt,
-            halign = "center",
-            valign = "center",
-            fill_horizontal = true,
-            widget = wibox.container.place,
+            {
+                txt,
+                halign = "center",
+                valign = "center",
+                fill_horizontal = true,
+                widget = wibox.container.place,
+            },
+            top = style.spacing.xs, bottom = style.spacing.xs,
+            widget = wibox.container.margin,
         },
         forced_width = CFG.content_w,
         bg = COLOR_BLACK,
@@ -263,7 +272,6 @@ local function make_lid_button(p)
         local active = (p.key == active_lid)
         bg.bg = active and bg._active_bg or bg._inactive_bg
         bg.fg = active and COLOR_GOLD or COLOR_WHITE
-        txt.fg = active and COLOR_GOLD or COLOR_WHITE
     end
     bg.paint = paint
 

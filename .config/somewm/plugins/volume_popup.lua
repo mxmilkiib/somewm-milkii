@@ -60,6 +60,12 @@ local default_sink_view
 
 local make_text = popup_common.make_text
 
+-- textbox fg is inert in somewm; pango foreground spans are how these
+-- labels get their colour
+local function span(text, c)
+    return string.format("<span foreground='%s'>%s</span>", c, text)
+end
+
 local function separator()
     return popup_common.separator(CFG.content_w)
 end
@@ -114,8 +120,8 @@ end
 local function make_slider_row(device, device_type)
     -- device_type: "sink" or "source" (wpctl set-default works for both)
     local name = wibox.widget {
-        text = device.name,
-        fg = device.is_default and COLOR_GOLD or COLOR_WHITE,
+        markup = span(gears.string.xml_escape(device.name),
+            device.is_default and COLOR_GOLD or COLOR_WHITE),
         font = FONT,
         align = "left",
         valign = "center",
@@ -134,8 +140,8 @@ local function make_slider_row(device, device_type)
     -- compact star toggle: gold ★ for the current default, dim ☆ for others;
     -- click to set as default
     local star = wibox.widget {
-        text = device.is_default and "★" or "☆",
-        fg = device.is_default and COLOR_GOLD or COLOR_GREY,
+        markup = span(device.is_default and "★" or "☆",
+            device.is_default and COLOR_GOLD or COLOR_GREY),
         font = popup_common.fonts.FONT_STAR,
         valign = "center",
         widget = wibox.widget.textbox,
@@ -148,13 +154,17 @@ local function make_slider_row(device, device_type)
         end
     end)))
     if not device.is_default then
-        star:connect_signal("mouse::enter", function() star.fg = COLOR_GOLD end)
-        star:connect_signal("mouse::leave", function() star.fg = COLOR_GREY end)
+        star:connect_signal("mouse::enter", function()
+            star.markup = span("☆", COLOR_GOLD)
+        end)
+        star:connect_signal("mouse::leave", function()
+            star.markup = span("☆", COLOR_GREY)
+        end)
     end
 
     local pct = wibox.widget {
-        text = math.floor(device.vol * 100 + 0.5) .. "%",
-        fg = device.muted and COLOR_GREY or COLOR_GOLD,
+        markup = span(math.floor(device.vol * 100 + 0.5) .. "%",
+            device.muted and COLOR_GREY or COLOR_GOLD),
         font = popup_common.fonts.FONT_VALUE,
         align = "right",
         valign = "center",
@@ -162,11 +172,15 @@ local function make_slider_row(device, device_type)
     }
 
     local mute_btn = wibox.widget {
-        text = device.muted and "Muted" or "Mute",
-        fg = device.muted and COLOR_RED or COLOR_WHITE,
-        font = FONT,
-        valign = "center",
-        widget = wibox.widget.textbox,
+        {
+            markup = span(device.muted and "Muted" or "Mute",
+                device.muted and COLOR_RED or COLOR_WHITE),
+            font = FONT,
+            valign = "center",
+            widget = wibox.widget.textbox,
+        },
+        top = style.spacing.xs, bottom = style.spacing.xs,
+        widget = wibox.container.margin,
     }
     local function toggle_mute()
         awful.spawn.easy_async({ "wpctl", "set-mute", tostring(device.id), "toggle" }, guarded(function()
@@ -219,8 +233,7 @@ local function make_slider_row(device, device_type)
     -- which already reflect a volume change made elsewhere)
     local programmatic = false
     slider:connect_signal("property::value", function(_, val)
-        pct.text = val .. "%"
-        pct.fg = COLOR_GOLD
+        pct.markup = span(val .. "%", COLOR_GOLD)
         if programmatic then return end
         pending_vol = val / 100
         if not send_timer then
@@ -462,8 +475,7 @@ awesome.connect_signal("volume::updated", guarded(function(pct, muted)
     view.set_programmatic(true)
     view.slider.value = math.min(150, math.max(0, pct))
     view.set_programmatic(false)
-    view.pct.text = pct .. "%"
-    view.pct.fg = muted and COLOR_GREY or COLOR_GOLD
+    view.pct.markup = span(pct .. "%", muted and COLOR_GREY or COLOR_GOLD)
     view.slider.bar_color = muted and COLOR_GREY or COLOR_PURPLE
 end))
 

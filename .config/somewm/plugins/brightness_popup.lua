@@ -90,11 +90,15 @@ local function make_refresh_button()
     }
     local bg = wibox.widget {
         {
-            txt,
-            halign = "center",
-            valign = "center",
-            fill_horizontal = true,
-            widget = wibox.container.place,
+            {
+                txt,
+                halign = "center",
+                valign = "center",
+                fill_horizontal = true,
+                widget = wibox.container.place,
+            },
+            top = style.spacing.xs, bottom = style.spacing.xs,
+            widget = wibox.container.margin,
         },
         forced_width = CFG.content_w,
         bg = COLOR_BLACK,
@@ -125,18 +129,25 @@ local function make_inhibit_button()
         font  = FONT,
         widget = wibox.widget.textbox,
     }
+    local bg  -- forward declaration (used by refresh_label before definition)
     local function refresh_label()
         local on = awesome.idle_inhibit
         txt.text = "Stay Awake: " .. (on and "on" or "off")
-        txt.fg = on and COLOR_GREEN or COLOR_GREY
+        -- textbox has no fg of its own in somewm; the background container's
+        -- fg is what the text paints with
+        bg.fg = on and COLOR_GREEN or COLOR_WHITE
     end
-    local bg = wibox.widget {
+    bg = wibox.widget {
         {
-            txt,
-            halign = "center",
-            valign = "center",
-            fill_horizontal = true,
-            widget = wibox.container.place,
+            {
+                txt,
+                halign = "center",
+                valign = "center",
+                fill_horizontal = true,
+                widget = wibox.container.place,
+            },
+            top = style.spacing.xs, bottom = style.spacing.xs,
+            widget = wibox.container.margin,
         },
         forced_width = CFG.content_w,
         bg = COLOR_BLACK,
@@ -165,11 +176,15 @@ local function make_saver_button()
     }
     local bg = wibox.widget {
         {
-            txt,
-            halign = "center",
-            valign = "center",
-            fill_horizontal = true,
-            widget = wibox.container.place,
+            {
+                txt,
+                halign = "center",
+                valign = "center",
+                fill_horizontal = true,
+                widget = wibox.container.place,
+            },
+            top = style.spacing.xs, bottom = style.spacing.xs,
+            widget = wibox.container.margin,
         },
         forced_width = CFG.content_w,
         bg = COLOR_BLACK,

@@ -293,7 +293,7 @@ local function chip(text, fg, onclick, border)
         {
             txt,
             left = CFG.chip_pad, right = CFG.chip_pad,
-            top = style.spacing.xxs, bottom = style.spacing.xxs,
+            top = style.spacing.xs, bottom = style.spacing.xs,
             widget = wibox.container.margin,
         },
         bg = COLOR_BLACK,
