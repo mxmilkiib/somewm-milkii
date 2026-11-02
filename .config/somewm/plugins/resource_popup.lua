@@ -372,11 +372,10 @@ local function temp_colour(celsius)
     return CFG.temp_ok_c
 end
 
--- the same ramp as a graph gradient: the fill's top edge takes the heat
--- colour, cooling to purple towards the baseline
-local function temp_gradient(celsius)
-    return "linear:0,0:0," .. CFG.graph_h .. ":0," .. temp_colour(celsius)
-        .. ":0.5," .. COLOR_PURPLE .. ":1," .. COLOR_PURPLE
+-- #rrggbb -> cairo r,g,b components
+local function hex_rgb(c)
+    local r, g, b = c:match("#(..)(..)(..)")
+    return tonumber(r, 16) / 255, tonumber(g, 16) / 255, tonumber(b, 16) / 255
 end
 
 -- current CPU clock from cpufreq, for the CPU info line
@@ -428,15 +427,12 @@ local function sample()
     -- GPU busy; the NVMe section's own graph is the drive's hottest sensor
     if cpu_t and views.cpu.graph2 then
         views.cpu.graph2:add_value(cpu_t / 1000)
-        views.cpu.graph2.color = temp_gradient(cpu_t / 1000)
     end
     if gpu_t and views.gpu.graph2 then
         views.gpu.graph2:add_value(gpu_t / 1000)
-        views.gpu.graph2.color = temp_gradient(gpu_t / 1000)
     end
     if nvme_t and views.temp.graph then
         views.temp.graph:add_value(nvme_t / 1000)
-        views.temp.graph.color = temp_gradient(nvme_t / 1000)
     end
     if fan and views.fan and views.fan.graph then views.fan.graph:add_value(fan) end
 
@@ -522,11 +518,18 @@ local function minute_markers()
         for i = 1, math.ceil(width / MINUTE_PX) - 1 do
             specs[i] = { float = true, parent = 6, own = 6,
                 x = 1 - i * MINUTE_PX, w = 1, h = { percent = 1 },
-                bg = { 0.75, 0.75, 0.75, 0.22 } }
+                bg = { 0.75, 0.75, 0.75, 0.12 } }
         end
         return { w = { percent = 1 }, h = { percent = 1 }, specs = specs }
     end, "resource_popup.minute_markers")
     return w
+end
+
+-- every history graph takes the per-core tapestry's height: the tallest the
+-- build produces, so busy/temp/tapestry rows line up across sections.
+-- core_count is seeded in ensure_popup before build_content runs
+local function graph_h()
+    return math.min(math.max(core_count * dpi(2), CFG.graph_h), CFG.graph_h * 2)
 end
 
 -- a mirrored history graph with the minute-marker overlay.
@@ -541,25 +544,25 @@ local function make_graph()
         step_width = dpi(2),
         step_spacing = style.spacing.hair,
         forced_width = CFG.content_w - 2 * style.popup.margin_x,
-        color = "linear:0,0:0," .. CFG.graph_h .. ":0," .. COLOR_GOLD
+        color = "linear:0,0:0," .. graph_h() .. ":0," .. COLOR_GOLD
             .. ":0.5," .. COLOR_PURPLE .. ":1," .. COLOR_PURPLE,
         background_color = "#00000000",
         widget = wibox.widget.graph,
     }
-    -- min-height constraint so the graph is at least CFG.graph_h but can grow to
+    -- min-height constraint so the graph is at least graph_h() but can grow to
     -- fill extra space when the popup's min-height floor leaves room. the
     -- flex's max_widget_size caps that growth — wibox.widget.graph:fit is
     -- greedy (returns the full offered height), so without a cap each graph
     -- claims the whole fit allowance and the popup balloons to fit height
     local graph_flex = wibox.widget {
         graph,
-        max_widget_size = CFG.graph_h * 1.5,
+        max_widget_size = graph_h() * 1.5,
         layout = wibox.layout.flex.vertical,
     }
     local constrained = wibox.widget {
         graph_flex,
         strategy = "min",
-        height = CFG.graph_h,
+        height = graph_h(),
         widget = wibox.container.constraint,
     }
     return wibox.widget {
@@ -631,11 +634,8 @@ local function cell_pattern(v)
     return p
 end
 
-local function make_tapestry(rows_fn, n_hint)
-    -- dpi(2) a row, floored at graph_h, capped so the section can't swallow
-    -- the whole popup height; n_hint is the expected row count at build
-    local rows_h = math.min(math.max((n_hint or 0) * dpi(2), CFG.graph_h),
-        CFG.graph_h * 2)
+local function make_tapestry(rows_fn)
+    local rows_h = graph_h()
     local w = base.make_widget()
     -- the cell grid is pixel art, not a widget tree: the describer rasterises
     -- it into one image surface per compile. a fresh surface each time, since
@@ -674,12 +674,12 @@ local function make_tapestry(rows_fn, n_hint)
                     cr:fill()
                 end
             end
-            -- name tinted by the row's latest load, centred in its strip
+            -- engine name in white, centred in its strip
             if row.label then
                 local fs = math.min(dpi(9), row_h - dpi(2))
                 if fs >= 4 then
                     cr:set_font_size(fs)
-                    cr:set_source(cell_pattern(h[n] or 0))
+                    cr:set_source_rgba(1, 1, 1, 1)
                     cr:move_to(dpi(2), y + (row_h + fs * 0.7) / 2)
                     cr:show_text(row.label)
                 end
@@ -699,6 +699,65 @@ local function make_tapestry(rows_fn, n_hint)
         graph_flex,
         strategy = "min",
         height = rows_h,
+        widget = wibox.container.constraint,
+    }
+    return wibox.widget {
+        constrained,
+        minute_markers(),
+        layout = wibox.layout.stack,
+    }, w
+end
+
+-- temp history rastered per-sample: wibox.widget.graph's .color applies to
+-- the whole backlog, so a hot reading used to repaint every old column in
+-- the new colour. here each column keeps the colour of its own reading —
+-- heat at the bar's top edge fading to purple at the baseline — on the same
+-- step pitch and newest-at-right direction as the mirrored graphs
+local function make_temp_graph()
+    local hist = {}
+    local w = base.make_widget()
+    function w:add_value(v)
+        hist[#hist + 1] = v
+        if #hist > CFG.graph_cap then table.remove(hist, 1) end
+        w:emit_signal("widget::redraw_needed")
+    end
+    wclay.describe_widget(w, function(_, _, _, _, offer)
+        local width = math.floor(math.min(offer.w or 1e9,
+            CFG.content_w - 2 * style.popup.margin_x))
+        local height = math.floor(math.min(offer.h or 1e9, graph_h()))
+        if width < 1 or height < 1 then return nil end
+        local surf = cairo.ImageSurface(cairo.Format.ARGB32, width, height)
+        local cr = cairo.Context(surf)
+        local pr, pg, pb = hex_rgb(COLOR_PURPLE)
+        local n = #hist
+        for j = 1, n do
+            local xr = width - (n - j) * CORE_STEP
+            if xr - CORE_CELL >= 0 then
+                local v = hist[j]
+                local bh = math.max(dpi(1), v / 100 * height)
+                local r, g, b = hex_rgb(temp_colour(v))
+                local pat = cairo.Pattern.create_linear(0, height - bh, 0, height)
+                pat:add_color_stop_rgba(0, r, g, b, 1)
+                pat:add_color_stop_rgba(1, pr, pg, pb, 0.5)
+                cr:set_source(pat)
+                cr:rectangle(xr - CORE_CELL, height - bh, CORE_CELL, bh)
+                cr:fill()
+            end
+        end
+        surf:flush()
+        return { image = surf._native, w = width, h = height,
+            image_width = width, image_height = height }
+    end, "resource_popup.temp_graph")
+    -- same flex+constraint stack and marker overlay as make_graph
+    local graph_flex = wibox.widget {
+        w,
+        max_widget_size = graph_h() * 1.5,
+        layout = wibox.layout.flex.vertical,
+    }
+    local constrained = wibox.widget {
+        graph_flex,
+        strategy = "min",
+        height = graph_h(),
         widget = wibox.container.constraint,
     }
     return wibox.widget {
@@ -728,9 +787,11 @@ end
 -- n_graphs=0 leaves graphs out entirely (used for fan when the hardware
 -- exposes neither a tach input nor a pwm duty); n_graphs=2 stacks a captioned
 -- second graph (GPU busy + temp, NVMe + CPU temp — all read as 0-100).
--- graph2_first places the captioned graph above the primary one; label gives
--- the primary graph a caption of its own (used when both are temperatures)
-local function make_section(title, n_graphs, graph2_label, graph2_first, label)
+-- graph2 is always a per-sample-coloured temp graph; `temp` makes the
+-- primary graph one too (NVMe's hottest sensor). graph2_first places the
+-- captioned graph above the primary one; label gives the primary graph a
+-- caption of its own (used when both are temperatures)
+local function make_section(title, n_graphs, graph2_label, graph2_first, label, temp)
     local value_text = make_text("--", COLOR_GOLD, FONT_VALUE)
     value_text.align = "right"
     local info_text = make_text(" ", COLOR_GREY, FONT_INFO)
@@ -750,14 +811,14 @@ local function make_section(title, n_graphs, graph2_label, graph2_first, label)
     local function add_graph2()
         local w
         if graph2_label then rows:add(make_text(graph2_label, COLOR_GREY, FONT_INFO)) end
-        w, graph2 = make_graph()
+        w, graph2 = make_temp_graph()
         rows:add(w)
     end
     if n_graphs >= 2 and graph2_first then add_graph2() end
     if n_graphs >= 1 then
         local w
         if label then rows:add(make_text(label, COLOR_GREY, FONT_INFO)) end
-        w, graph = make_graph()
+        w, graph = temp and make_temp_graph() or make_graph()
         rows:add(w)
     end
     if n_graphs >= 2 and not graph2_first then add_graph2() end
@@ -782,7 +843,7 @@ local function build_content()
     local gpu_body, gpu_v = make_section("GPU", gpu_temp_path and 2 or 1, "edge temp")
     local ram_body, ram_v = make_section("RAM", 1)
     local temp_body, temp_v = make_section("NVMe", #nvme_temp_paths > 0 and 1 or 0,
-        nil, false, "nvme (hottest)")
+        nil, false, "nvme (hottest)", true)
     -- every hwmon temp input as a "name .... figure" row; two columns of
     -- align.horizontal rows so each column's figures share its right edge.
     -- FONT_INFO is the proportional Hack Nerd Font, so space-padding alone
@@ -822,18 +883,19 @@ local function build_content()
     })
     views = { cpu = cpu_v, gpu = gpu_v, ram = ram_v, temp = temp_v }
 
-    -- per-core strips under the CPU graphs and per-engine strips under the
-    -- GPU graphs; both inserted ahead of the info row (the last child of
-    -- each section's rows)
+    -- per-core strips under the CPU busy graph and per-engine strips under
+    -- the GPU busy graph, with each temp graph below its tapestry; inserted
+    -- at child index 3 (after the title row and the busy graph), which also
+    -- lands ahead of the info row on sections without a temp graph
     local cores_w, eng_w
-    cores_w, cores_graph = make_tapestry(cpu_rows, core_count)
-    eng_w, eng_graph = make_tapestry(eng_rows, #eng_names)
-    local info_at = #cpu_v.rows:get_children()
-    cpu_v.rows:insert(info_at, make_text("per-core busy", COLOR_GREY, FONT_INFO))
-    cpu_v.rows:insert(info_at + 1, cores_w)
-    local ginfo_at = #gpu_v.rows:get_children()
-    gpu_v.rows:insert(ginfo_at, make_text("per-engine busy (fdinfo)", COLOR_GREY, FONT_INFO))
-    gpu_v.rows:insert(ginfo_at + 1, eng_w)
+    cores_w, cores_graph = make_tapestry(cpu_rows)
+    eng_w, eng_graph = make_tapestry(eng_rows)
+    local ins_at = math.min(3, #cpu_v.rows:get_children())
+    cpu_v.rows:insert(ins_at, make_text("per-core busy", COLOR_GREY, FONT_INFO))
+    cpu_v.rows:insert(ins_at + 1, cores_w)
+    local gins_at = math.min(3, #gpu_v.rows:get_children())
+    gpu_v.rows:insert(gins_at, make_text("per-engine busy (fdinfo)", COLOR_GREY, FONT_INFO))
+    gpu_v.rows:insert(gins_at + 1, eng_w)
 
     -- fan section disabled: this hardware exposes no tach input or pwm duty.
     -- uncomment (plus a `fan_body` row in the layout below) if one shows up;
