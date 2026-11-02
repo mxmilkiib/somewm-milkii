@@ -2524,32 +2524,41 @@ for key, file in pairs(category_icon_files) do
     end
 end
 
--- Build the main menu with the submenu, app launcher, and terminal entry
-mymainmenu = freedesktop.menu.build({
-    before = {
-        {"somewm", awesomesubmenu, beautiful.awesome_icon},
-        -- old: Terminal and Power sat in `after` at the bottom of the menu
-        -- new: pinned to the top, just below the somewm submenu
-        {"Terminal", terminal, menu_action_icons.terminal},
-        {"Power", powersubmenu, menu_action_icons.power}
-        -- other triads can be put here
-    },
-    after = {
-        -- other triads can be put here
-    }
-})
+-- Build the main menu lazily on first open: the freedesktop scan plus one
+-- icon decode per entry cost ~2s inside the startup path.
+-- old: mymainmenu = freedesktop.menu.build({...}) ran here and the border
+--      overrides below applied at startup
+-- new: build_mainmenu() does both on first use and caches the result
+local function build_mainmenu()
+    if mymainmenu then return mymainmenu end
+    -- Build the main menu with the submenu, app launcher, and terminal entry
+    mymainmenu = freedesktop.menu.build({
+        before = {
+            {"somewm", awesomesubmenu, beautiful.awesome_icon},
+            -- old: Terminal and Power sat in `after` at the bottom of the menu
+            -- new: pinned to the top, just below the somewm submenu
+            {"Terminal", terminal, menu_action_icons.terminal},
+            {"Power", powersubmenu, menu_action_icons.power}
+            -- other triads can be put here
+        },
+        after = {
+            -- other triads can be put here
+        }
+    })
 
--- Apply the same themed border color, width, and rounded corners to the
--- main menu popup wibox as the other popups. awful.menu sets border values
--- from menu_border_* (purple) and no shape; override to match the gold
--- border + bar_edge_width + border_radius pattern used by the popups.
-if mymainmenu and mymainmenu.wibox then
-    local _menu_gold = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
-    mymainmenu.wibox.border_color = _menu_gold
-    mymainmenu.wibox.border_width = beautiful.bar_edge_width or beautiful.border_width or _hk_dpi(1)
-    mymainmenu.wibox.shape = function(cr, w, h)
-        gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or _hk_dpi(3))
+    -- Apply the same themed border color, width, and rounded corners to the
+    -- main menu popup wibox as the other popups. awful.menu sets border values
+    -- from menu_border_* (purple) and no shape; override to match the gold
+    -- border + bar_edge_width + border_radius pattern used by the popups.
+    if mymainmenu and mymainmenu.wibox then
+        local _menu_gold = (beautiful.main_gold and beautiful.main_gold.base) or "#FFD700"
+        mymainmenu.wibox.border_color = _menu_gold
+        mymainmenu.wibox.border_width = beautiful.bar_edge_width or beautiful.border_width or _hk_dpi(1)
+        mymainmenu.wibox.shape = function(cr, w, h)
+            gears.shape.rounded_rect(cr, w, h, beautiful.border_radius or _hk_dpi(3))
+        end
     end
+    return mymainmenu
 end
 
 -- -- Pre-populate the menu once at startup to avoid a pause on first open
@@ -2597,7 +2606,7 @@ mylauncher:connect_signal("button::press", guarded(function(_, _, _, button)
     local s = mouse.screen
     local bar_h = (s.mywibox and s.mywibox.valid and s.mywibox:geometry().height) or 26
     -- outside-click close is installed by the menu_module.show wrapper
-    mymainmenu:toggle({ coords = { x = s.geometry.x + (beautiful.menu_border_width or 0), y = s.geometry.y + bar_h } })
+    build_mainmenu():toggle({ coords = { x = s.geometry.x + (beautiful.menu_border_width or 0), y = s.geometry.y + bar_h } })
 end))
 
 
@@ -4625,8 +4634,9 @@ awful.mouse.append_global_mousebindings({
     awful.button({ }, 3, function()
         if mymainmenu and mymainmenu.wibox and mymainmenu.wibox.visible then
             mymainmenu:hide()
-        elseif mymainmenu then
-            mymainmenu:toggle()
+        else
+            local menu = build_mainmenu()
+            menu:toggle()
         end
         if active_tasklist_menu and active_tasklist_menu.wibox
            and active_tasklist_menu.wibox.visible then
