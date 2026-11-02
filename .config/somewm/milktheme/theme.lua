@@ -266,13 +266,14 @@ theme.border_radius = dpi(2)
 
 
 
--- tag switch pans the client layer: one slide word drives both the
--- arriving and departing tag, always toward the right. Upstream keeps only
--- the first slide word of a table and has no direction mirroring or
--- minimize word; the pair and minimize keys below need the combined tree
+-- tag switch pans the client layer: one slide word names the edge the
+-- arriving tag enters from; the departing tag exits the opposite edge and
+-- both directions mirror on a backward switch. Upstream keeps only the
+-- first slide word of a table and has no direction mirroring or minimize
+-- word; the pair and minimize keys below need the combined tree
 -- theme.animation_tag              = { "slide_right", "slide_left" }
--- theme.animation_minimize          = "slide_up"
--- theme.animation_minimize_duration = 0.3
+theme.animation_minimize          = "slide_up"
+theme.animation_minimize_duration = 0.3
 theme.animation_tag          = "slide_right"
 theme.animation_tag_duration = 0.3
 
