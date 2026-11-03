@@ -19,10 +19,12 @@ icon_theme_mod.find_icon_path = function(self, icon_name, icon_size)
     local key = (self.icon_theme_name or "hicolor") .. ":"
         .. (icon_name or "") .. ":" .. (icon_size or 16)
     if path_cache[key] ~= nil then
-        return path_cache[key]
+        return path_cache[key] or nil
     end
+    -- store misses as false: an icon with no theme match is the expensive
+    -- case - the full recursive scan re-runs on every update otherwise
     local path = original_find_icon_path(self, icon_name, icon_size)
-    path_cache[key] = path
+    path_cache[key] = path or false
     return path
 end
 
