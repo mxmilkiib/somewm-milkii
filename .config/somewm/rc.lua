@@ -4158,15 +4158,20 @@ client.connect_signal("request::manage", guarded(function(c)
     -- c.icon to icon_role on every refresh, so per-widget image overrides
     -- get stomped - a tiny c.icon (16px XWayland _NET_WM_ICON) loses to a
     -- themed hit when one resolves. awesome.load_image returns the raw cairo
-    -- pointer luaA_client_set_icon wants; an lgi surface segfaults (#727)
-    local ipath = tag_pager.resolve_icon_path and tag_pager.resolve_icon_path(c)
-    if ipath then
-        local surf = awesome.load_image(ipath)
-        if surf then c.icon = surf end
-    elseif not c.icon then
-        local surf = get_fallback_icon(c)
-        if surf then c.icon = surf end
-    end
+    -- pointer luaA_client_set_icon wants; an lgi surface segfaults (#727).
+    -- the theme scan + decode cost ~1s synchronously inside every manage -
+    -- deferred so the window maps now and the icon lands a tick later
+    gears.timer.delayed_call(function()
+        if not c.valid then return end
+        local ipath = tag_pager.resolve_icon_path and tag_pager.resolve_icon_path(c)
+        if ipath then
+            local surf = awesome.load_image(ipath)
+            if surf then c.icon = surf end
+        elseif not c.icon then
+            local surf = get_fallback_icon(c)
+            if surf then c.icon = surf end
+        end
+    end)
     
     -- Set the windows at the slave,
     -- i.e. put it at the end of others instead of setting it master.
