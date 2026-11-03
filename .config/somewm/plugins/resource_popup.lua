@@ -810,15 +810,17 @@ local function make_section(title, n_graphs, graph2_label, graph2_first, label, 
     local graph, graph2
     local function add_graph2()
         local w
-        if graph2_label then rows:add(make_text(graph2_label, COLOR_GREY, FONT_INFO)) end
+        if graph2_label then rows:add(make_text(graph2_label .. ":", COLOR_GREY, FONT_INFO)) end
         w, graph2 = make_temp_graph()
         rows:add(w)
     end
     if n_graphs >= 2 and graph2_first then add_graph2() end
     if n_graphs >= 1 then
         local w
-        if label then rows:add(make_text(label, COLOR_GREY, FONT_INFO)) end
-        w, graph = temp and make_temp_graph() or make_graph()
+        if label then rows:add(make_text(label .. ":", COLOR_GREY, FONT_INFO)) end
+        -- an `and`/`or` chain would collapse make_*'s two return values to
+        -- the stack widget alone, leaving graph nil
+        if temp then w, graph = make_temp_graph() else w, graph = make_graph() end
         rows:add(w)
     end
     if n_graphs >= 2 and not graph2_first then add_graph2() end
@@ -891,10 +893,10 @@ local function build_content()
     cores_w, cores_graph = make_tapestry(cpu_rows)
     eng_w, eng_graph = make_tapestry(eng_rows)
     local ins_at = math.min(3, #cpu_v.rows:get_children())
-    cpu_v.rows:insert(ins_at, make_text("per-core busy", COLOR_GREY, FONT_INFO))
+    cpu_v.rows:insert(ins_at, make_text("per-core busy:", COLOR_GREY, FONT_INFO))
     cpu_v.rows:insert(ins_at + 1, cores_w)
     local gins_at = math.min(3, #gpu_v.rows:get_children())
-    gpu_v.rows:insert(gins_at, make_text("per-engine busy (fdinfo)", COLOR_GREY, FONT_INFO))
+    gpu_v.rows:insert(gins_at, make_text("per-engine busy (fdinfo):", COLOR_GREY, FONT_INFO))
     gpu_v.rows:insert(gins_at + 1, eng_w)
 
     -- fan section disabled: this hardware exposes no tach input or pwm duty.
