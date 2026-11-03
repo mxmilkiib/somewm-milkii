@@ -12,6 +12,9 @@
 
 local gpcall = require("gears.protected_call")
 
+-- stall probe prints only when SOMEWM_STALL is set
+local stall_enabled = os.getenv("SOMEWM_STALL") == "1"
+
 local function guarded(fn)
     if not fn then return nil end
     -- stall probe: capture the wrapped handler's definition site once so a
@@ -19,6 +22,9 @@ local function guarded(fn)
     local info = debug.getinfo(fn, "S")
     local site = string.format("%s:%d", info.short_src or "?", info.linedefined or -1)
     return function(...)
+        if not stall_enabled then
+            return gpcall(fn, ...)
+        end
         local t0 = os.clock()
         -- stall probe, part 2: a count hook snapshots the running stack once
         -- the call crosses the threshold while still running, so the slow
