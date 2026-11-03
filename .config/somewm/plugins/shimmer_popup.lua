@@ -499,16 +499,22 @@ end
 local function ensure_preview_timer()
     if preview_timer then return end
     -- ~1 palette step per tick (offset ×0.3 ×8 ≈ 2.4 steps per +1.0)
+    local preview_tick = 0
     preview_timer = gears.timer {
         timeout = 0.1,
         autostart = false,
         single_shot = false,
         callback = guarded(function()
             preview_phase = preview_phase + 0.4
-            paint_sample()
-            paint_swatch()
-            -- the mode cells are live previews, so they advance in step
-            paint_mode_cells()
+            -- repaint every second tick: each markup write rebuilds the
+            -- whole popup wibox, at 10Hz that starves cursor commits
+            preview_tick = preview_tick + 1
+            if preview_tick % 2 == 0 then
+                paint_sample()
+                paint_swatch()
+                -- the mode cells are live previews, so they advance in step
+                paint_mode_cells()
+            end
             return popup and popup.visible
         end),
     }
