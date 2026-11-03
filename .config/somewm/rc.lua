@@ -2121,6 +2121,26 @@ local function cover_surface(s, path)
     }
 end
 
+-- the cover decode+crop is ~200ms of lgi surface work - deferred one tick
+-- so the screen maps now and the picture lands later, and coalesced so a
+-- burst of geometry changes re-runs the crop once
+local function schedule_cover(s, rec)
+    if rec.cover_pending then return end
+    rec.cover_pending = true
+    gears.timer.delayed_call(function()
+        rec.cover_pending = false
+        if not s.valid or wallpapers[s] ~= rec then return end
+        -- the decode+crop is the same work for the same path at the same
+        -- size; geometry/wallpaper re-requests often change neither
+        local g = s.geometry
+        local key = rec.path .. "@" .. g.width .. "x" .. g.height
+        if rec.cover_key == key then return end
+        rec.ib:set_image(cover_surface(s, rec.path))
+        rec.cover_key = key
+        rec.wp:repaint()
+    end)
+end
+
 local function set_wallpaper(s)
     -- per-screen wallpaper: prefer beautiful.wallpapers[s.index] if provided
     if beautiful.wallpapers and beautiful.wallpapers[s.index] then
@@ -2159,8 +2179,7 @@ local function set_wallpaper(s)
             wallpapers[s] = rec
         end
         rec.path = wallpaper
-        rec.ib:set_image(cover_surface(s, wallpaper))
-        rec.wp:repaint()
+        schedule_cover(s, rec)
     end
 end
 
@@ -2172,8 +2191,7 @@ screen.connect_signal("request::wallpaper", guarded(set_wallpaper))
 screen.connect_signal("property::geometry", guarded(function(s)
     local rec = wallpapers[s]
     if rec then
-        rec.ib:set_image(cover_surface(s, rec.path))
-        rec.wp:repaint()
+        schedule_cover(s, rec)
     end
 end))
 
