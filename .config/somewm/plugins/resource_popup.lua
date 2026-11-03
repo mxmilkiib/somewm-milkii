@@ -650,7 +650,9 @@ local function make_tapestry(rows_fn)
         local rows = rows_fn()
         local n_rows = #rows
         if n_rows == 0 then
-            return { image = surf._native, w = width, h = height,
+            -- keep the lgi object pinned to the spec: GC would otherwise be
+            -- free to destroy the cairo surface before C references _native
+            return { image = surf._native, surface = surf, w = width, h = height,
                 image_width = width, image_height = height }
         end
         local label_w = 0
@@ -686,7 +688,9 @@ local function make_tapestry(rows_fn)
             end
         end
         surf:flush()
-        return { image = surf._native, w = width, h = height,
+        -- keep the lgi object pinned to the spec: GC would otherwise be
+        -- free to destroy the cairo surface before C references _native
+        return { image = surf._native, surface = surf, w = width, h = height,
             image_width = width, image_height = height }
     end, "resource_popup.tapestry")
     -- same flex+constraint stack as make_graph, sized for the strip count
@@ -745,7 +749,9 @@ local function make_temp_graph()
             end
         end
         surf:flush()
-        return { image = surf._native, w = width, h = height,
+        -- keep the lgi object pinned to the spec: GC would otherwise be
+        -- free to destroy the cairo surface before C references _native
+        return { image = surf._native, surface = surf, w = width, h = height,
             image_width = width, image_height = height }
     end, "resource_popup.temp_graph")
     -- same flex+constraint stack and marker overlay as make_graph
